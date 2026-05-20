@@ -1,0 +1,47 @@
+services:
+  shopping-api:
+    build: .
+    image: shopping-cli-api:2.0.0
+    command:
+      - python3
+      - scripts/shopping_api.py
+      - --db
+      - /data/shopping-cli.sqlite
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+    ports:
+      - "${SHOPPING_API_BIND:-127.0.0.1}:${SHOPPING_API_PORT:-8765}:8765"
+    environment:
+      SHOPPING_ADMIN_TOKEN: "${SHOPPING_ADMIN_TOKEN:?set SHOPPING_ADMIN_TOKEN before starting shopping-api}"
+      SHOPPING_CHANNEL_TOKENS: "${SHOPPING_CHANNEL_TOKENS:-}"
+    volumes:
+      - shopping_cli_api_data:/data
+    restart: unless-stopped
+
+  shopping-agent:
+    build: .
+    image: shopping-cli-api:2.0.0
+    command:
+      - python3
+      - scripts/shopping.py
+      - agent
+      - run
+      - --merchant
+      - "${SHOPPING_AGENT_MERCHANT:?set SHOPPING_AGENT_MERCHANT before starting shopping-agent}"
+      - --api-url
+      - http://shopping-api:8765
+      - --agent-token
+      - "${SHOPPING_AGENT_TOKEN:?set SHOPPING_AGENT_TOKEN before starting shopping-agent}"
+      - --interval
+      - "${SHOPPING_AGENT_INTERVAL:-3}"
+    environment:
+      SHOPPING_AGENT_HOST: "${SHOPPING_AGENT_HOST:-docker-compose}"
+      SHOPPING_AGENT_SESSION_ID: "${SHOPPING_AGENT_SESSION_ID:-merchant-worker}"
+    depends_on:
+      - shopping-api
+    restart: unless-stopped
+
+volumes:
+  shopping_cli_api_data:

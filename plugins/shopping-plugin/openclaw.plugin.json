@@ -1,0 +1,24 @@
+{
+  "id": "shopping-plugin",
+  "name": "shopping-cli Plugin",
+  "version": "2.0.0",
+  "description": "Lightweight OpenClaw native bridge for shopping-cli consultation tools.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "projectRoot": {
+        "type": "string",
+        "description": "Absolute path to a shopping-cli skill checkout. Defaults to SHOPPING_ROOT, ~/.openclaw/workspace/skills/shopping, or ~/.hermes/skills/commerce/shopping."
+      },
+      "dbPath": {
+        "type": "string",
+        "description": "Optional local shopping-cli SQLite database path. Defaults to SHOPPING_DB or ~/.local/share/shopping-cli/shopping-cli.sqlite."
+      },
+      "dataPath": {
+        "type": "string",
+        "description": "Deprecated alias for dbPath."
+      }
+    }
+  }
+}

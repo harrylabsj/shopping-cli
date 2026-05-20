@@ -1,0 +1,46 @@
+{
+  "name": "shopping-cli",
+  "version": "2.0.0",
+  "description": "Standalone SQLite-backed local commerce AI consultation marketplace runtime.",
+  "files": [
+    "agents/",
+    "docs/",
+    "!docs/superpowers/",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "shopping_cli/",
+    "plugins/",
+    "references/",
+    "scripts/",
+    "buyer-demo.json",
+    "clawhub.json",
+    "hermes-buyer.json",
+    "marketplace.example.env",
+    "openclaw-seller.json",
+    "pyproject.toml",
+    "seller-demo.json",
+    "SKILL.md"
+  ],
+  "bin": {
+    "shopping-cli": "scripts/shopping.py",
+    "shopping-cli-api": "scripts/shopping_api.py",
+    "shopping-cli-agent": "scripts/shopping_agent.py"
+  },
+  "scripts": {
+    "install:agents": "bash scripts/install.sh --both",
+    "test": "python3 -m unittest discover -s tests && node --test tests/shopping_plugin.test.mjs && bash scripts/verify.sh",
+    "test:plugin": "node --test tests/shopping_plugin.test.mjs",
+    "verify": "bash scripts/verify.sh"
+  },
+  "keywords": [
+    "openclaw",
+    "hermes",
+    "skill",
+    "commerce",
+    "consultation",
+    "marketplace",
+    "agent"
+  ],
+  "author": "harrylabsj",
+  "license": "MIT"
+}

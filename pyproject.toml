@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shopping-cli"
+version = "2.0.0"
+description = "Standalone local-commerce AI consultation marketplace runtime"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "pydantic>=2",
+  "uvicorn>=0.27",
+]
+
+[project.scripts]
+shopping-cli = "shopping_cli.cli:main"
+shopping-cli-api = "shopping_cli.api.server:main"
+shopping-cli-agent = "shopping_cli.agents.agent_cli:main"
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.110",
+  "pydantic>=2",
+  "uvicorn>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["shopping_cli*"]
