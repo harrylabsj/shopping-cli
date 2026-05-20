@@ -20,6 +20,8 @@ shopping-cli is a consultation network, not a transaction system. It can answer 
 
 If a buyer wants to proceed, record `quote_request` or `purchase_intent` as a conversation message only.
 
+If a conversation is `waiting_merchant` or `human_required`, treat it as pending and keep the conversation open. Do not report failure merely because the merchant agent or merchant human has not replied yet.
+
 ## Quick Start
 
 ```bash

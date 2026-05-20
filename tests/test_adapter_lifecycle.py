@@ -19,7 +19,7 @@ class AdapterLifecycleTest(unittest.TestCase):
             bin_dir = tmp_path / "bin"
             bin_dir.mkdir()
             self.make_fake_command(bin_dir, "openclaw")
-            skill_root = tmp_path / ".openclaw" / "workspace" / "skills" / "shopping"
+            skill_root = tmp_path / ".openclaw" / "skills" / "shopping-cli"
             skill_root.parent.mkdir(parents=True)
             skill_root.symlink_to(Path.cwd(), target_is_directory=True)
             db_file = tmp_path / "shopping.sqlite"
@@ -46,7 +46,7 @@ class AdapterLifecycleTest(unittest.TestCase):
             self.make_fake_command(bin_dir, "openclaw")
             stale_root = tmp_path / "old-shopping"
             stale_root.mkdir()
-            skill_root = tmp_path / ".openclaw" / "workspace" / "skills" / "shopping"
+            skill_root = tmp_path / ".openclaw" / "skills" / "shopping-cli"
             skill_root.parent.mkdir(parents=True)
             skill_root.symlink_to(stale_root, target_is_directory=True)
 
@@ -65,7 +65,7 @@ class AdapterLifecycleTest(unittest.TestCase):
             bin_dir = tmp_path / "bin"
             bin_dir.mkdir()
             self.make_fake_command(bin_dir, "openclaw")
-            skill_root = tmp_path / ".openclaw" / "workspace" / "skills" / "shopping"
+            skill_root = tmp_path / ".openclaw" / "skills" / "shopping-cli"
             skill_root.parent.mkdir(parents=True)
             skill_root.symlink_to(skill_root, target_is_directory=True)
 

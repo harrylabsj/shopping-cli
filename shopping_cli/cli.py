@@ -414,6 +414,7 @@ def cmd_buyer_ask(args: argparse.Namespace) -> None:
         print(f"Merchant: {selected['merchant']['name']}")
         print(f"Status: {conversation['status']}")
         print(f"Next actor: {conversation['next_actor']}")
+        print(f"Next action: {result['next_action']}")
         warnings = result.get("warnings") or []
         if warnings:
             print("Warnings:")
@@ -513,6 +514,7 @@ def cmd_buyer_intent(args: argparse.Namespace) -> None:
         print(f"Intent: {message['intent']}")
         print(f"Status: {conversation['status']}")
         print(f"Next actor: {conversation['next_actor']}")
+        print(f"Next action: {result['next_action']}")
         return
     emit(result, args.format)
 

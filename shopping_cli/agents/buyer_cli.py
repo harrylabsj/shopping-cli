@@ -16,6 +16,48 @@ MVP_WARNINGS = [
 ]
 
 
+def status_guidance(conversation: dict[str, Any]) -> dict[str, Any]:
+    status = str(conversation.get("status") or "")
+    if status == "waiting_merchant":
+        return {
+            "pending": True,
+            "next_action": "Wait for merchant agent response.",
+            "status_hint": "merchant_agent_pending",
+        }
+    if status == "human_required":
+        return {
+            "pending": True,
+            "next_action": "Wait for merchant human review.",
+            "status_hint": "merchant_human_pending",
+        }
+    if status == "waiting_buyer":
+        return {
+            "pending": False,
+            "next_action": "Review the merchant reply and continue the consultation if needed.",
+            "status_hint": "buyer_turn",
+        }
+    if status == "closed":
+        return {
+            "pending": False,
+            "next_action": "Conversation is closed.",
+            "status_hint": "closed",
+        }
+    return {
+        "pending": False,
+        "next_action": "Continue the consultation without creating orders or payments.",
+        "status_hint": "open",
+    }
+
+
+def status_warnings(conversation: dict[str, Any]) -> list[str]:
+    status = str(conversation.get("status") or "")
+    if status == "waiting_merchant":
+        return ["Merchant agent response is pending; keep the conversation open."]
+    if status == "human_required":
+        return ["Merchant human review is required before any commitment."]
+    return []
+
+
 def ask(
     conn: sqlite3.Connection,
     buyer_id: str,
@@ -58,14 +100,16 @@ def ask(
             "session_id": session_id or "",
         },
     )
+    summary = conversation_summary(conn, conversation["id"])
     return {
         "ok": True,
         "buyer_id": buyer_id,
         "candidates": candidates,
         "selected": selected,
-        "conversation": conversation_summary(conn, conversation["id"]),
+        "conversation": summary,
         "message": message,
-        "warnings": MVP_WARNINGS,
+        "warnings": [*MVP_WARNINGS, *status_warnings(summary)],
+        **status_guidance(summary),
     }
 
 
@@ -88,22 +132,17 @@ def summarize(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any]:
             missing_facts.append("delivery rule")
         if option["stock"] <= 0:
             warnings.append("Product is out of stock.")
-    if conversation["status"] == "human_required":
-        warnings.append("Merchant human review is required before any commitment.")
+    warnings.extend(status_warnings(conversation))
     for flag in conversation["flags"]:
         warnings.append(f"Human review flag: {flag['reason']}")
-    next_action = (
-        "Wait for merchant human review."
-        if conversation["status"] == "human_required"
-        else "Use purchase_intent only to record interest; confirm order and payment outside this MVP."
-    )
+    guidance = status_guidance(conversation)
     return {
         "ok": True,
         "conversation": conversation,
         "option": option,
         "missing_facts": missing_facts,
         "warnings": warnings,
-        "next_action": next_action,
+        **guidance,
         "no_order_created": True,
         "no_stock_reserved": True,
     }
@@ -113,9 +152,11 @@ def record_intent(conn: sqlite3.Connection, conversation_id: str, intent: str, t
     if intent not in {"purchase_intent", "quote_request"}:
         raise SystemExit("--intent must be purchase_intent or quote_request")
     message = append_message(conn, conversation_id, "buyer", intent, text, structured_payload={"source_id": "buyer-cli"})
+    conversation = conversation_summary(conn, conversation_id)
     return {
         "ok": True,
         "message": message,
-        "conversation": conversation_summary(conn, conversation_id),
-        "warnings": MVP_WARNINGS,
+        "conversation": conversation,
+        "warnings": [*MVP_WARNINGS, *status_warnings(conversation)],
+        **status_guidance(conversation),
     }
