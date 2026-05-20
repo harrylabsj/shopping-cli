@@ -1,0 +1,15 @@
+{
+  "created_at": "2026-05-09T09:29:31",
+  "inventory_events": [],
+  "merchants": {},
+  "messages": [],
+  "products": {},
+  "reviews": [],
+  "sync": {
+    "mode": "local-first",
+    "pending_events": [],
+    "remote_marketplace_url": "http://127.0.0.1:8765",
+    "schema_version": "1.1.2"
+  },
+  "version": "1.1.2"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "shopping-cli",
+  "version": "2.0.0",
+  "description": "shopping-cli consultation marketplace: buyers ask local commerce questions and resident merchant agents answer from SQLite-backed trusted state.",
+  "keywords": [
+    "openclaw",
+    "hermes",
+    "commerce",
+    "marketplace",
+    "consultation",
+    "inventory"
+  ],
+  "author": "harrylabsj",
+  "license": "MIT",
+  "repository": "https://github.com/harrylabsj/shopping-cli"
+}
