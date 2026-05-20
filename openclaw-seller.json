@@ -1,0 +1,93 @@
+{
+  "created_at": "2026-05-09T09:29:22",
+  "inventory_events": [
+    {
+      "created_at": "2026-05-09T09:29:22",
+      "delta": 5,
+      "reason": "initial stock",
+      "sku": "openclaw-tea-a"
+    }
+  ],
+  "merchants": {
+    "seller-a": {
+      "city": "Hangzhou",
+      "contact": "wechat:openclaw-seller",
+      "created_at": "2026-05-09T09:29:22",
+      "id": "seller-a",
+      "name": "OpenClaw 商家",
+      "tags": [
+        "tea",
+        "gift"
+      ],
+      "updated_at": "2026-05-09T09:29:22"
+    }
+  },
+  "messages": [
+    {
+      "buyer_id": "alice",
+      "created_at": "2026-05-08T20:01:20",
+      "id": 1,
+      "merchant_id": "seller-a",
+      "registry_id": "MSG-0001",
+      "sender": "buyer",
+      "sku": "tea-a",
+      "text": "今天能发货吗？买两盒可以优惠吗？"
+    },
+    {
+      "buyer_id": "hermes-user",
+      "created_at": "2026-05-09T09:29:31",
+      "id": 5,
+      "merchant_id": "seller-a",
+      "registry_id": "MSG-0005",
+      "sender": "buyer",
+      "sku": "openclaw-tea-a",
+      "text": "Hermes 用户：今天能发货吗？买两盒可以优惠吗？"
+    }
+  ],
+  "products": {
+    "openclaw-tea-a": {
+      "active": true,
+      "category": "tea",
+      "created_at": "2026-05-09T09:29:22",
+      "currency": "CNY",
+      "description": "",
+      "merchant_id": "seller-a",
+      "price": 88.0,
+      "shipping": "同城当日可送",
+      "sku": "openclaw-tea-a",
+      "stock": 5,
+      "tags": [
+        "longjing",
+        "gift"
+      ],
+      "title": "OpenClaw 龙井礼盒",
+      "updated_at": "2026-05-09T09:29:22"
+    }
+  },
+  "reviews": [],
+  "sync": {
+    "mode": "local-first",
+    "pending_events": [
+      {
+        "created_at": "2026-05-09T09:29:22",
+        "id": 1,
+        "payload": {
+          "merchant_id": "seller-a"
+        },
+        "type": "merchant.created"
+      },
+      {
+        "created_at": "2026-05-09T09:29:22",
+        "id": 2,
+        "payload": {
+          "merchant_id": "seller-a",
+          "sku": "openclaw-tea-a"
+        },
+        "type": "product.created"
+      }
+    ],
+    "remote_marketplace_url": "http://127.0.0.1:8765",
+    "schema_version": "1.1.2"
+  },
+  "version": "1.1.2"
+}

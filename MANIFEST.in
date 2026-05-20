@@ -1,0 +1,13 @@
+include LICENSE
+include README.md
+include pyproject.toml
+recursive-include shopping_cli *.py
+prune tests
+prune docs/superpowers
+exclude shopping-registry.json
+exclude shopping-demo.json
+exclude seller.json
+exclude buyer.json
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store

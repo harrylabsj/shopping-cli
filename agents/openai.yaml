@@ -1,0 +1,4 @@
+interface:
+  display_name: "shopping-cli"
+  short_description: "AI local commerce consultation agent"
+  default_prompt: "Use $shopping-cli to help merchants publish products and delivery rules, run resident merchant agents, and help buyers search, ask consultations, summarize replies, and record purchase intent only as conversation context."

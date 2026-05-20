@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+.git/
+mai-demo.json
+mai-registry.json
+seller.json
+buyer.json
