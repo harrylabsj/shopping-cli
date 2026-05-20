@@ -189,7 +189,12 @@ class MarketplaceToolDispatcher:
                 structured_payload={"source_id": self.source_id, "tool": "conversation_send"},
             )
             conversation = conversation_summary(conn, conversation_id)
-        return {"ok": True, "message": message, "conversation": conversation}
+        return {
+            "ok": True,
+            "message": message,
+            "conversation": conversation,
+            **buyer_cli.status_guidance(conversation),
+        }
 
     def _dispatch_conversation_summarize(self, arguments: dict[str, Any]) -> dict[str, Any]:
         conversation_id = str(arguments["conversation_id"])
@@ -437,10 +442,12 @@ class HTTPMarketplaceToolDispatcher:
                 "source_id": self.source_id,
             },
         )
+        conversation = self._response_object(result, "conversation")
         return {
             "ok": True,
             "message": self._response_object(result, "message"),
-            "conversation": self._response_object(result, "conversation"),
+            "conversation": conversation,
+            **buyer_cli.status_guidance(conversation),
         }
 
     def _dispatch_conversation_summarize(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -448,21 +455,17 @@ class HTTPMarketplaceToolDispatcher:
         result = self._request("GET", self._conversation_path(conversation_id))
         conversation = self._response_object(result, "conversation")
         warnings = list(buyer_cli.MVP_WARNINGS)
-        if conversation.get("status") == "human_required":
-            warnings.append("Merchant human review is required before any commitment.")
+        warnings.extend(buyer_cli.status_warnings(conversation))
         for flag in conversation.get("flags") or []:
             warnings.append(f"Human review flag: {flag['reason']}")
+        guidance = buyer_cli.status_guidance(conversation)
         summary = {
             "ok": True,
             "conversation": conversation,
             "option": conversation.get("product"),
             "missing_facts": [],
             "warnings": warnings,
-            "next_action": (
-                "Wait for merchant human review."
-                if conversation.get("status") == "human_required"
-                else "Use purchase_intent only to record interest; confirm order and payment outside this MVP."
-            ),
+            **guidance,
             "no_order_created": True,
             "no_stock_reserved": True,
         }

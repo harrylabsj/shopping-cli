@@ -12,7 +12,7 @@ usage() {
 Usage: bash scripts/install.sh [--both|--openclaw|--hermes] [--dry-run] [--force]
 
 Installs Shopping as a local skill by symlinking this directory into:
-  OpenClaw: ~/.openclaw/workspace/skills/shopping
+  OpenClaw: ~/.openclaw/skills/shopping-cli
   Hermes:   ~/.hermes/skills/commerce/shopping
 
 Environment overrides:
@@ -103,7 +103,7 @@ OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
 if [ "$INSTALL_OPENCLAW" -eq 1 ]; then
-  install_link "OpenClaw" "$OPENCLAW_HOME/workspace/skills/shopping"
+  install_link "OpenClaw" "$OPENCLAW_HOME/skills/shopping-cli"
 fi
 
 if [ "$INSTALL_HERMES" -eq 1 ]; then
@@ -113,7 +113,7 @@ fi
 cat <<EOF
 
 Next:
-  OpenClaw: restart OpenClaw or refresh skills, then invoke Shopping as a skill/agent.
+  OpenClaw: restart OpenClaw or refresh skills, then invoke shopping-cli as a skill/agent.
   Hermes:   run 'hermes -s shopping' or start Hermes after installing the skill.
   Smoke:    cd "$ROOT_DIR" && python3 scripts/shopping.py --help && python3 scripts/shopping.py api routes --format json
   Daemon:   python3 scripts/shopping.py agent start --merchant MERCHANT --db ./shopping-cli.sqlite --interval 3

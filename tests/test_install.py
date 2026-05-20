@@ -28,7 +28,7 @@ class ShoppingInstallTest(unittest.TestCase):
             result = self.run_install(home, "--both")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            openclaw_skill = home / ".openclaw" / "workspace" / "skills" / "shopping"
+            openclaw_skill = home / ".openclaw" / "skills" / "shopping-cli"
             hermes_skill = home / ".hermes" / "skills" / "commerce" / "shopping"
             self.assertTrue(openclaw_skill.is_symlink())
             self.assertTrue(hermes_skill.is_symlink())
@@ -51,7 +51,7 @@ class ShoppingInstallTest(unittest.TestCase):
     def test_refuses_to_overwrite_existing_target_without_force(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            target = home / ".openclaw" / "workspace" / "skills" / "shopping"
+            target = home / ".openclaw" / "skills" / "shopping-cli"
             target.parent.mkdir(parents=True)
             target.mkdir()
 

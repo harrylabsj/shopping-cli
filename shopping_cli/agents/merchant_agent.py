@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sqlite3
 from typing import Any
 
@@ -102,6 +103,40 @@ def has_agent_reply_after(conversation: dict[str, Any], buyer_message_id: int) -
     return False
 
 
+def _automation_boundaries(product: dict[str, Any]) -> str:
+    merchant = product.get("merchant") if isinstance(product.get("merchant"), dict) else {}
+    return str(merchant.get("automation_boundaries") or product.get("automation_boundaries") or "").strip()
+
+
+def _authorized_bargain_amount(product: dict[str, Any]) -> str:
+    boundaries = _automation_boundaries(product)
+    if not boundaries:
+        return ""
+    lower = boundaries.lower()
+    if not any(term in lower or term in boundaries for term in ("discount", "lowest", "final price", "砍价", "优惠", "实付", "成交")):
+        return ""
+    title = str(product.get("title") or "").strip()
+    sku = str(product.get("sku") or "").strip()
+    segments: list[str] = []
+    for marker in (title, sku):
+        if marker and marker in boundaries:
+            start = boundaries.find(marker)
+            segments.append(boundaries[start : start + 140])
+    if "两款均适用" in boundaries or "all products" in lower:
+        segments.append(boundaries)
+    patterns = [
+        r"(?:实付|最低可成交价|最低价|成交价)[^\d]{0,16}(\d+(?:\.\d+)?)\s*(?:元|cny|CNY)?",
+        r"(?:lowest price|final price)[^\d]{0,16}(\d+(?:\.\d+)?)\s*(?:cny|CNY|元)?",
+        r"(\d+(?:\.\d+)?)\s*(?:元|cny|CNY)[^\n。；;]{0,16}(?:成交|可成交)",
+    ]
+    for segment in segments:
+        for pattern in patterns:
+            match = re.search(pattern, segment, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return ""
+
+
 def generate_reply(
     tools: MerchantAgentTools,
     conversation: dict[str, Any],
@@ -114,6 +149,8 @@ def generate_reply(
         except SystemExit:
             product = None
     reason = human_review_reason(buyer_message["text"], product_found=product is not None)
+    if not reason and buyer_message.get("intent") in {"negotiate", "quote_request"}:
+        reason = "bargaining"
     disclaimer = " ".join(MVP_WARNINGS)
     if product is None:
         return f"I need a merchant human to confirm which product this consultation refers to. {disclaimer}", True, reason
@@ -124,6 +161,22 @@ def generate_reply(
         reason = "low_stock"
     if not reason and buyer_message["intent"] == "ask_delivery" and not delivery.get("service_area"):
         reason = "unclear_delivery"
+    if reason == "bargaining":
+        bargain_amount = _authorized_bargain_amount(product)
+        if bargain_amount:
+            delivery_text = "delivery rule is missing"
+            if delivery.get("service_area"):
+                delivery_text = (
+                    f"delivery area {delivery['service_area']}, ETA {_safe_non_negative_int(delivery.get('eta_minutes'))} minutes, "
+                    f"fee {_safe_non_negative_float(delivery.get('fee')):.2f} {delivery['currency']}"
+                )
+            return (
+                f"{product['title']} has a merchant-authorized bargain rule. "
+                f"The approved consultation price is {bargain_amount} {product['currency']}; "
+                f"catalog price {price:.2f} {product['currency']}, stock {stock}; {delivery_text}. {disclaimer}",
+                False,
+                "",
+            )
     if reason:
         return (
             f"{product['title']} is listed at {price:.2f} {product['currency']} with "

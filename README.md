@@ -4,6 +4,8 @@ shopping-cli is a standalone, SQLite-backed AI consultation runtime for local co
 
 The MVP is not a transaction system. It does not create commitments, reserve stock, process payment, record payment state, custody funds, handle refunds, dispatch couriers, or claim delivery success. Buyer intent is recorded only as `quote_request` or `purchase_intent` messages in a conversation.
 
+Pending merchant states are not failures. When a conversation is `waiting_merchant`, the buyer request has been handed to the merchant agent; when it is `human_required`, the merchant agent has escalated it to the merchant human. Keep the conversation open and wait for the next merchant-side message.
+
 ## Install and Verify
 
 ```bash

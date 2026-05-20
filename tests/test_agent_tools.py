@@ -129,6 +129,48 @@ class FailingMarketplaceTools(FakeMarketplaceTools):
         raise RuntimeError("temporary catalog failure")
 
 
+class QuoteRequestMarketplaceTools(FakeMarketplaceTools):
+    def waiting_merchant_conversations(self, merchant_id):
+        self.calls.append(("waiting_merchant_conversations", merchant_id))
+        return [
+            {
+                "id": "CONV-0001",
+                "merchant_id": merchant_id,
+                "sku": "macmini-16g-128g",
+                "messages": [
+                    {
+                        "id": 1,
+                        "sender": "buyer",
+                        "intent": "quote_request",
+                        "text": "如果今天就定，Mac mini 16GB+128GB 能不能按 4000 元成交？如果 4000 不行，请给一个最低可成交价。",
+                    }
+                ],
+            }
+        ]
+
+    def product_summary(self, sku):
+        self.calls.append(("product_summary", sku))
+        return {
+            "sku": sku,
+            "title": "Mac mini 16GB+128GB",
+            "price": 4499.0,
+            "currency": "CNY",
+            "stock": 10,
+            "merchant": {"automation_boundaries": ""},
+            "delivery": {"service_area": "全北京", "eta_minutes": 120, "fee": 0.0, "currency": "CNY"},
+        }
+
+
+class AuthorizedQuoteRequestMarketplaceTools(QuoteRequestMarketplaceTools):
+    def product_summary(self, sku):
+        product = super().product_summary(sku)
+        product["merchant"]["automation_boundaries"] = (
+            "砍价优惠：买家咨询砍价时，Mac mini 16GB+128GB 可减499元（实付4000元），"
+            "Mac mini 32GB+256GB 可减499元（实付6000元）。两款均适用。"
+        )
+        return product
+
+
 class CorruptBuyerMessageIdTools(FakeMarketplaceTools):
     def waiting_merchant_conversations(self, merchant_id):
         conversations = super().waiting_merchant_conversations(merchant_id)
@@ -518,6 +560,29 @@ class AgentToolsBoundaryTest(unittest.TestCase):
         self.assertTrue(result["replied"][0]["human_required"])
         self.assertIn("merchant human to confirm which product", tools.messages[0]["text"])
         self.assertIn(("add_flag", "CONV-0001", "unclear_product", "tea-a"), tools.calls)
+
+    def test_process_once_routes_quote_request_to_human_review(self):
+        tools = QuoteRequestMarketplaceTools()
+
+        result = merchant_agent.process_once_with_tools(tools, "seller-a")
+
+        self.assertEqual(result["failed"], [])
+        self.assertTrue(result["replied"][0]["human_required"])
+        self.assertEqual(result["replied"][0]["reason"], "bargaining")
+        self.assertIn("merchant human review", tools.messages[0]["text"])
+        self.assertIn(("add_flag", "CONV-0001", "bargaining", "macmini-16g-128g"), tools.calls)
+
+    def test_process_once_uses_authorized_bargain_rule_without_human_review(self):
+        tools = AuthorizedQuoteRequestMarketplaceTools()
+
+        result = merchant_agent.process_once_with_tools(tools, "seller-a")
+
+        self.assertEqual(result["failed"], [])
+        self.assertFalse(result["replied"][0]["human_required"])
+        self.assertEqual(result["replied"][0]["reason"], "")
+        self.assertIn("4000", tools.messages[0]["text"])
+        self.assertIn(("append_message", "CONV-0001", "merchant_agent", "waiting_buyer"), tools.calls)
+        self.assertFalse(any(call[0] == "add_flag" for call in tools.calls))
 
     def test_process_once_reports_corrupt_buyer_message_id_without_crashing(self):
         tools = CorruptBuyerMessageIdTools()

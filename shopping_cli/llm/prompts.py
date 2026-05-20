@@ -10,6 +10,7 @@ MVP_GUARDRAILS = [
     "Do not charge payments or claim payment status.",
     "Do not promise refunds, escrow, courier dispatch, or delivery success.",
     "Route bargaining, private discounts, unclear delivery, low stock, unsupported products, suspicious content, and low confidence to human review.",
+    "Treat pending merchant-agent or merchant-human replies as open consultations, not failures.",
 ]
 
 
