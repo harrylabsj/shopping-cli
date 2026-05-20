@@ -9,7 +9,7 @@ from typing import Iterable
 from shopping_cli.adapters.diagnostics import doctor_from_inspection, inspect_host as inspect_adapter_host
 from shopping_cli.adapters.diagnostics import install_command as adapter_install_command
 
-DEFAULT_SKILL_ROOT = Path.home() / ".openclaw" / "workspace" / "skills" / "shopping"
+DEFAULT_SKILL_ROOT = Path.home() / ".openclaw" / "skills" / "shopping-cli"
 
 
 def resolve_project_root(project_root: str | Path | None = None) -> Path:

@@ -110,6 +110,8 @@ class ShoppingCliMvpTest(unittest.TestCase):
             )
             self.assertEqual(ask["conversation"]["id"], "CONV-0001")
             self.assertEqual(ask["conversation"]["status"], "waiting_merchant")
+            self.assertTrue(ask["pending"])
+            self.assertEqual(ask["next_action"], "Wait for merchant agent response.")
             self.assertEqual(ask["candidates"][0]["sku"], "tea-a")
             self.assertIn("no order", " ".join(ask["warnings"]).lower())
 
@@ -163,6 +165,8 @@ class ShoppingCliMvpTest(unittest.TestCase):
             )
             self.assertEqual(intent["message"]["intent"], "purchase_intent")
             self.assertEqual(intent["conversation"]["status"], "waiting_merchant")
+            self.assertTrue(intent["pending"])
+            self.assertEqual(intent["next_action"], "Wait for merchant agent response.")
 
             messages = self.read_rows(db_file, "messages")
             self.assertEqual([row["intent"] for row in messages], ["ask_delivery", "ask_delivery", "purchase_intent"])

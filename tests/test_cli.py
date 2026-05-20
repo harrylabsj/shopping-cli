@@ -1245,6 +1245,7 @@ class ShoppingCliTest(unittest.TestCase):
             self.assertIn("Merchant: West Lake Tea", output)
             self.assertIn("Status: waiting_merchant", output)
             self.assertIn("Next actor: merchant_agent", output)
+            self.assertIn("Next action: Wait for merchant agent response.", output)
             self.assertIn("Warnings:", output)
             self.assertNotIn('"conversation"', output)
 

@@ -621,6 +621,8 @@ class LlmContractTest(unittest.TestCase):
         self.assertIn("do not charge", combined)
         self.assertIn("refund", combined)
         self.assertIn("human review", combined)
+        self.assertIn("pending merchant", combined)
+        self.assertIn("not failures", combined)
         self.assertIn("catalog and delivery only", merchant_prompt.lower())
 
     def test_marketplace_tool_dispatcher_executes_catalog_conversation_and_summary_tools(self):
@@ -644,10 +646,14 @@ class LlmContractTest(unittest.TestCase):
             )
             self.assertEqual(sent["result"]["message"]["sender"], "buyer_cli")
             self.assertEqual(sent["result"]["conversation"]["status"], "waiting_merchant")
+            self.assertTrue(sent["result"]["pending"])
+            self.assertEqual(sent["result"]["next_action"], "Wait for merchant agent response.")
             self.assertEqual(sent["result"]["message"]["structured_payload"]["source_id"], "llm-test")
 
             summary = dispatcher.dispatch("conversation_summarize", {"conversation_id": "CONV-0001"})
             self.assertEqual(summary["result"]["summary"]["conversation"]["id"], "CONV-0001")
+            self.assertTrue(summary["result"]["summary"]["pending"])
+            self.assertEqual(summary["result"]["summary"]["next_action"], "Wait for merchant agent response.")
             self.assertTrue(summary["result"]["summary"]["no_order_created"])
 
     def test_marketplace_tool_dispatcher_handles_human_review_and_merchant_reply(self):

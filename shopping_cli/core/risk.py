@@ -6,6 +6,9 @@ from __future__ import annotations
 BARGAINING_TERMS = {
     "discount",
     "cheaper",
+    "best price",
+    "lowest price",
+    "final price",
     "private price",
     "bargain",
     "优惠",
@@ -14,6 +17,17 @@ BARGAINING_TERMS = {
     "折扣",
     "私下",
     "少一点",
+    "砍价",
+    "议价",
+    "还价",
+    "最低",
+    "最低价",
+    "最低可成交价",
+    "成交价",
+    "成交",
+    "预算",
+    "能卖吗",
+    "能不能卖",
 }
 
 UNSUPPORTED_TERMS = {
@@ -80,8 +94,8 @@ def infer_intent(text: str) -> str:
         return "ask_stock"
     if any(term in lower or term in text for term in ("delivery", "ship", "courier", "送", "配送", "快递", "到货")):
         return "ask_delivery"
-    if any(term in lower or term in text for term in ("price", "cost", "多少钱", "价格", "报价", "售价")):
-        return "ask_price"
     if any(term in lower or term in text for term in BARGAINING_TERMS):
         return "negotiate"
+    if any(term in lower or term in text for term in ("price", "cost", "多少钱", "价格", "报价", "售价")):
+        return "ask_price"
     return "ask_product"
