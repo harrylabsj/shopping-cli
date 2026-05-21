@@ -1,5 +1,6 @@
 import importlib
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +9,14 @@ from shopping_cli.db.session import db_session
 
 
 class ProjectShapeTest(unittest.TestCase):
+    def test_api_dependencies_are_optional_extras(self):
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        required = set(pyproject["project"].get("dependencies") or [])
+        api_extra = set(pyproject["project"]["optional-dependencies"]["api"])
+
+        self.assertFalse(any(dep.startswith(("fastapi", "pydantic", "uvicorn")) for dep in required))
+        self.assertTrue({"fastapi>=0.110", "pydantic>=2", "uvicorn>=0.27"}.issubset(api_extra))
+
     def test_documented_modules_are_importable(self):
         module_names = [
             "shopping_cli.config",
@@ -70,7 +79,14 @@ class ProjectShapeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "shopping.sqlite"
             state_dir = Path(tmp) / "state"
-            with patch.dict("os.environ", {"SHOPPING_DB": str(db_path), "SHOPPING_CLI_STATE_DIR": str(state_dir)}):
+            with patch.dict(
+                "os.environ",
+                {
+                    "SHOPPING_DB": str(db_path),
+                    "SHOPPING_CLI_STATE_DIR": str(state_dir),
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "",
+                },
+            ):
                 runtime = config.RuntimeConfig.from_env()
 
             self.assertEqual(runtime.db_path, db_path)

@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 export const OPENCLAW_PLUGIN_ID = 'shopping-plugin';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_OPENCLAW_SKILL_ROOT = path.join(os.homedir(), '.openclaw', 'workspace', 'skills', 'shopping');
+const PACKAGE_ROOT = path.resolve(MODULE_DIR, '..', '..');
+const DEFAULT_OPENCLAW_SKILL_ROOT = path.join(os.homedir(), '.openclaw', 'skills', 'shopping-cli');
 const DEFAULT_HERMES_SKILL_ROOT = path.join(os.homedir(), '.hermes', 'skills', 'commerce', 'shopping');
 
 function nonEmptyString(value) {
@@ -23,28 +24,71 @@ function stringList(value) {
   return nonEmptyString(value);
 }
 
-export function resolveProjectRoot(projectRoot) {
-  const explicit = nonEmptyString(projectRoot) || nonEmptyString(process.env.SHOPPING_ROOT);
-  if (explicit) return explicit;
+function truthy(value) {
+  if (value === true) return true;
+  if (value === false || value === undefined || value === null) return false;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
 
-  for (const candidate of [DEFAULT_OPENCLAW_SKILL_ROOT, DEFAULT_HERMES_SKILL_ROOT, MODULE_DIR]) {
-    if (fs.existsSync(path.join(candidate, 'scripts', 'shopping.py'))) return candidate;
+function shoppingProjectRoot(root) {
+  const resolved = path.resolve(String(root));
+  try {
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory() || (stat.mode & 0o002) !== 0) return undefined;
+  } catch {
+    return undefined;
   }
+  const required = [
+    path.join(resolved, 'scripts', 'shopping.py'),
+    path.join(resolved, 'SKILL.md'),
+    path.join(resolved, 'shopping_cli'),
+  ];
+  if (!required.every((candidate) => fs.existsSync(candidate))) return undefined;
+  return resolved;
+}
 
+function defaultProjectRoot() {
+  for (const candidate of [DEFAULT_OPENCLAW_SKILL_ROOT, DEFAULT_HERMES_SKILL_ROOT, PACKAGE_ROOT, MODULE_DIR]) {
+    const root = shoppingProjectRoot(candidate);
+    if (root) return root;
+  }
   return DEFAULT_OPENCLAW_SKILL_ROOT;
+}
+
+export function resolveProjectRoot(projectRoot, options = {}) {
+  const explicit = nonEmptyString(projectRoot) || nonEmptyString(process.env.SHOPPING_ROOT);
+  const allowProjectRootOverride = options.allowProjectRootOverride !== false;
+  if (explicit && allowProjectRootOverride) {
+    if (!options.requireValidOverride) return path.resolve(explicit);
+    const root = shoppingProjectRoot(explicit);
+    if (!root) {
+      throw new Error(`Invalid trusted shopping-cli projectRoot: ${explicit}`);
+    }
+    return root;
+  }
+  return defaultProjectRoot();
 }
 
 export function resolveShoppingPluginConfig(api, pluginId = OPENCLAW_PLUGIN_ID) {
   const nestedConfig = api?.config?.plugins?.entries?.[pluginId]?.config || {};
   const directConfig = api?.pluginConfig || {};
   const cfg = { ...directConfig, ...nestedConfig };
+  const writesEnabled = truthy(cfg.trustedWrites)
+    || truthy(cfg.enableWrites)
+    || truthy(cfg.enableMutatingTools)
+    || truthy(process.env.SHOPPING_PLUGIN_TRUSTED_WRITES);
+  const trustedProjectRoot = writesEnabled || truthy(cfg.trustedProjectRoot);
 
   return {
-    projectRoot: resolveProjectRoot(cfg.projectRoot),
+    projectRoot: resolveProjectRoot(cfg.projectRoot, {
+      allowProjectRootOverride: trustedProjectRoot,
+      requireValidOverride: trustedProjectRoot,
+    }),
     dataPath: nonEmptyString(cfg.dbPath)
       || nonEmptyString(cfg.dataPath)
       || nonEmptyString(process.env.SHOPPING_DB)
       || nonEmptyString(process.env.SHOPPING_DATA),
+    writesEnabled,
   };
 }
 
@@ -122,84 +166,95 @@ function toolSpec(api, spec, handler) {
 }
 
 function formatHelp(config) {
+  const readTools = 'shopping_search_merchants, shopping_search_products, shopping_buyer_summarize';
+  const writeTools = 'shopping_create_merchant, shopping_add_product, shopping_buyer_ask, shopping_record_intent, shopping_run_merchant_agent';
   const lines = [
     'shopping-cli Plugin is loaded.',
-    'Tools: shopping_create_merchant, shopping_add_product, shopping_search_merchants, shopping_search_products, shopping_buyer_ask, shopping_buyer_summarize, shopping_record_intent, shopping_run_merchant_agent.',
+    `Read tools: ${readTools}.`,
     'Command: /shopping search <query> runs a local marketplace product search.',
   ];
+  if (config.writesEnabled) {
+    lines.push(`Trusted write tools: ${writeTools}.`);
+  } else {
+    lines.push('Trusted write tools are disabled; set trustedWrites: true only for a verified local shopping-cli root.');
+  }
   if (config.dataPath) lines.push(`dbPath: ${config.dataPath}`);
   return lines.join('\n');
 }
 
 export function registerOpenClawPlugin(api) {
-  registerTool(api, toolSpec(api, {
-    name: 'shopping_create_merchant',
-    description: 'Create a local shopping-cli merchant profile and delivery rule.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        id: { type: 'string' },
-        name: { type: 'string' },
-        city: { type: 'string' },
-        service_area: { type: 'string' },
-        contact: { type: 'string' },
-        hours: { type: 'string' },
-        delivery_fee: { type: 'number' },
-        delivery_eta_minutes: { type: 'integer' },
-        tags: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['id', 'name'],
-    },
-  }, async (input, config) => {
-    const args = ['merchant', 'create', '--id', input.id, '--name', input.name, '--format', 'json'];
-    addOptionalArg(args, '--city', input.city);
-    addOptionalArg(args, '--service-area', input.service_area || input.serviceArea);
-    addOptionalArg(args, '--contact', input.contact);
-    addOptionalArg(args, '--hours', input.hours);
-    addOptionalNumber(args, '--delivery-fee', input.delivery_fee);
-    addOptionalNumber(args, '--delivery-eta-minutes', input.delivery_eta_minutes);
-    addOptionalTags(args, input.tags);
-    return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
-  }));
+  const registrationConfig = resolveShoppingPluginConfig(api);
 
-  registerTool(api, toolSpec(api, {
-    name: 'shopping_add_product',
-    description: 'Add a product listing to a local shopping-cli merchant catalog.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        merchant: { type: 'string' },
-        sku: { type: 'string' },
-        title: { type: 'string' },
-        price: { type: 'number' },
-        stock: { type: 'integer' },
-        currency: { type: 'string' },
-        category: { type: 'string' },
-        tags: { type: 'array', items: { type: 'string' } },
-        description: { type: 'string' },
-        delivery_attributes: { type: 'array', items: { type: 'string' } },
+  if (registrationConfig.writesEnabled) {
+    registerTool(api, toolSpec(api, {
+      name: 'shopping_create_merchant',
+      description: 'Create a local shopping-cli merchant profile and delivery rule.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          name: { type: 'string' },
+          city: { type: 'string' },
+          service_area: { type: 'string' },
+          contact: { type: 'string' },
+          hours: { type: 'string' },
+          delivery_fee: { type: 'number' },
+          delivery_eta_minutes: { type: 'integer' },
+          tags: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['id', 'name'],
       },
-      required: ['merchant', 'sku', 'title', 'price', 'stock'],
-    },
-  }, async (input, config) => {
-    const args = [
-      'product', 'add',
-      '--merchant', input.merchant,
-      '--sku', input.sku,
-      '--title', input.title,
-      '--price', String(input.price),
-      '--stock', String(input.stock),
-      '--format', 'json',
-    ];
-    addOptionalArg(args, '--currency', input.currency);
-    addOptionalArg(args, '--category', input.category);
-    addOptionalTags(args, input.tags);
-    addOptionalArg(args, '--description', input.description);
-    addOptionalListArg(args, '--delivery-attributes', input.delivery_attributes);
-    return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
-  }));
+    }, async (input, config) => {
+      const args = ['merchant', 'create', '--id', input.id, '--name', input.name, '--format', 'json'];
+      addOptionalArg(args, '--city', input.city);
+      addOptionalArg(args, '--service-area', input.service_area || input.serviceArea);
+      addOptionalArg(args, '--contact', input.contact);
+      addOptionalArg(args, '--hours', input.hours);
+      addOptionalNumber(args, '--delivery-fee', input.delivery_fee);
+      addOptionalNumber(args, '--delivery-eta-minutes', input.delivery_eta_minutes);
+      addOptionalTags(args, input.tags);
+      return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
+    }));
+
+    registerTool(api, toolSpec(api, {
+      name: 'shopping_add_product',
+      description: 'Add a product listing to a local shopping-cli merchant catalog.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          merchant: { type: 'string' },
+          sku: { type: 'string' },
+          title: { type: 'string' },
+          price: { type: 'number' },
+          stock: { type: 'integer' },
+          currency: { type: 'string' },
+          category: { type: 'string' },
+          tags: { type: 'array', items: { type: 'string' } },
+          description: { type: 'string' },
+          delivery_attributes: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['merchant', 'sku', 'title', 'price', 'stock'],
+      },
+    }, async (input, config) => {
+      const args = [
+        'product', 'add',
+        '--merchant', input.merchant,
+        '--sku', input.sku,
+        '--title', input.title,
+        '--price', String(input.price),
+        '--stock', String(input.stock),
+        '--format', 'json',
+      ];
+      addOptionalArg(args, '--currency', input.currency);
+      addOptionalArg(args, '--category', input.category);
+      addOptionalTags(args, input.tags);
+      addOptionalArg(args, '--description', input.description);
+      addOptionalListArg(args, '--delivery-attributes', input.delivery_attributes);
+      return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
+    }));
+  }
 
   registerTool(api, toolSpec(api, {
     name: 'shopping_search_merchants',
@@ -243,26 +298,28 @@ export function registerOpenClawPlugin(api) {
     return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
   }));
 
-  registerTool(api, toolSpec(api, {
-    name: 'shopping_buyer_ask',
-    description: 'Search candidates and open a buyer consultation conversation.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        buyer: { type: 'string' },
-        text: { type: 'string' },
-        city: { type: 'string' },
-        area: { type: 'string' },
+  if (registrationConfig.writesEnabled) {
+    registerTool(api, toolSpec(api, {
+      name: 'shopping_buyer_ask',
+      description: 'Search candidates and open a buyer consultation conversation.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          buyer: { type: 'string' },
+          text: { type: 'string' },
+          city: { type: 'string' },
+          area: { type: 'string' },
+        },
+        required: ['buyer', 'text'],
       },
-      required: ['buyer', 'text'],
-    },
-  }, async (input, config) => {
-    const args = ['buyer', 'ask', '--buyer', input.buyer, '--text', input.text, '--format', 'json'];
-    addOptionalArg(args, '--city', input.city);
-    addOptionalArg(args, '--area', input.area);
-    return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
-  }));
+    }, async (input, config) => {
+      const args = ['buyer', 'ask', '--buyer', input.buyer, '--text', input.text, '--format', 'json'];
+      addOptionalArg(args, '--city', input.city);
+      addOptionalArg(args, '--area', input.area);
+      return runShoppingCli({ subcommandArgs: args, dataPath: config.dataPath, projectRoot: config.projectRoot });
+    }));
+  }
 
   registerTool(api, toolSpec(api, {
     name: 'shopping_buyer_summarize',
@@ -281,41 +338,43 @@ export function registerOpenClawPlugin(api) {
     projectRoot: config.projectRoot,
   })));
 
-  registerTool(api, toolSpec(api, {
-    name: 'shopping_record_intent',
-    description: 'Record quote_request or purchase_intent as conversation context only.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        conversation: { type: 'string' },
-        intent: { type: 'string', enum: ['quote_request', 'purchase_intent'] },
-        text: { type: 'string' },
+  if (registrationConfig.writesEnabled) {
+    registerTool(api, toolSpec(api, {
+      name: 'shopping_record_intent',
+      description: 'Record quote_request or purchase_intent as conversation context only.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          conversation: { type: 'string' },
+          intent: { type: 'string', enum: ['quote_request', 'purchase_intent'] },
+          text: { type: 'string' },
+        },
+        required: ['conversation', 'intent', 'text'],
       },
-      required: ['conversation', 'intent', 'text'],
-    },
-  }, async (input, config) => runShoppingCli({
-    subcommandArgs: ['buyer', 'intent', '--conversation', input.conversation, '--intent', input.intent, '--text', input.text, '--format', 'json'],
-    dataPath: config.dataPath,
-    projectRoot: config.projectRoot,
-  })));
+    }, async (input, config) => runShoppingCli({
+      subcommandArgs: ['buyer', 'intent', '--conversation', input.conversation, '--intent', input.intent, '--text', input.text, '--format', 'json'],
+      dataPath: config.dataPath,
+      projectRoot: config.projectRoot,
+    })));
 
-  registerTool(api, toolSpec(api, {
-    name: 'shopping_run_merchant_agent',
-    description: 'Run one deterministic resident merchant-agent polling pass.',
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        merchant: { type: 'string' },
+    registerTool(api, toolSpec(api, {
+      name: 'shopping_run_merchant_agent',
+      description: 'Run one deterministic resident merchant-agent polling pass.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          merchant: { type: 'string' },
+        },
+        required: ['merchant'],
       },
-      required: ['merchant'],
-    },
-  }, async (input, config) => runShoppingCli({
-    subcommandArgs: ['agent', 'run', '--merchant', input.merchant, '--once', '--format', 'json'],
-    dataPath: config.dataPath,
-    projectRoot: config.projectRoot,
-  })));
+    }, async (input, config) => runShoppingCli({
+      subcommandArgs: ['agent', 'run', '--merchant', input.merchant, '--once', '--format', 'json'],
+      dataPath: config.dataPath,
+      projectRoot: config.projectRoot,
+    })));
+  }
 
   registerCommand(api, {
     name: 'shopping',

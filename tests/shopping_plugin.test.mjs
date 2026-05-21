@@ -39,8 +39,9 @@ test('resolveShoppingPluginConfig reads OpenClaw plugin config', () => {
         entries: {
           'shopping-plugin': {
             config: {
-              projectRoot: '/tmp/project',
+              projectRoot: REPO_ROOT,
               dbPath: '/tmp/data.sqlite',
+              trustedWrites: true,
             },
           },
         },
@@ -49,12 +50,36 @@ test('resolveShoppingPluginConfig reads OpenClaw plugin config', () => {
   };
 
   assert.deepEqual(resolveShoppingPluginConfig(api), {
-    projectRoot: '/tmp/project',
+    projectRoot: REPO_ROOT,
     dataPath: '/tmp/data.sqlite',
+    writesEnabled: true,
   });
 });
 
-test('registerOpenClawPlugin exposes marketplace tools and command', () => {
+test('resolveShoppingPluginConfig ignores untrusted project root overrides', () => {
+  const api = {
+    config: {
+      plugins: {
+        entries: {
+          'shopping-plugin': {
+            config: {
+              projectRoot: '/tmp/untrusted-shopping',
+              dbPath: '/tmp/data.sqlite',
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const config = resolveShoppingPluginConfig(api);
+
+  assert.notEqual(config.projectRoot, '/tmp/untrusted-shopping');
+  assert.equal(config.dataPath, '/tmp/data.sqlite');
+  assert.equal(config.writesEnabled, false);
+});
+
+test('registerOpenClawPlugin exposes read-only marketplace tools and command by default', () => {
   const calls = {
     tools: [],
     commands: [],
@@ -72,6 +97,43 @@ test('registerOpenClawPlugin exposes marketplace tools and command', () => {
   registerOpenClawPlugin(api);
 
   assert.deepEqual(new Set(calls.tools.map((tool) => tool.name)), new Set([
+    'shopping_search_merchants',
+    'shopping_search_products',
+    'shopping_buyer_summarize',
+  ]));
+  assert.equal(calls.commands.length, 1);
+  assert.equal(calls.commands[0].name, 'shopping');
+});
+
+test('registerOpenClawPlugin exposes mutating tools only for trusted writes', () => {
+  const calls = {
+    tools: [],
+    commands: [],
+  };
+  const api = {
+    registerTool(spec) {
+      calls.tools.push(spec);
+    },
+    registerCommand(spec) {
+      calls.commands.push(spec);
+    },
+    config: {
+      plugins: {
+        entries: {
+          'shopping-plugin': {
+            config: {
+              projectRoot: REPO_ROOT,
+              trustedWrites: true,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  registerOpenClawPlugin(api);
+
+  assert.deepEqual(new Set(calls.tools.map((tool) => tool.name)), new Set([
     'shopping_create_merchant',
     'shopping_add_product',
     'shopping_search_merchants',
@@ -82,7 +144,6 @@ test('registerOpenClawPlugin exposes marketplace tools and command', () => {
     'shopping_run_merchant_agent',
   ]));
   assert.equal(calls.commands.length, 1);
-  assert.equal(calls.commands[0].name, 'shopping');
 });
 
 test('registered local tools can create and search products', async () => {
@@ -100,6 +161,7 @@ test('registered local tools can create and search products', async () => {
             config: {
               projectRoot: REPO_ROOT,
               dataPath,
+              trustedWrites: true,
             },
           },
         },
