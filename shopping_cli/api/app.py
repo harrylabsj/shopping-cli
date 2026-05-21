@@ -213,6 +213,10 @@ def _payload_channel_token(payload: dict[str, Any]) -> str:
     return str(payload.get("channel_token") or payload.get("_auth_token") or "")
 
 
+def _payload_buyer_bootstrap_token(payload: dict[str, Any]) -> str:
+    return str(payload.get("buyer_bootstrap_token") or payload.get("_auth_token") or "")
+
+
 def _auth_header_default() -> Any:
     if Header is None:
         return ""
@@ -240,6 +244,10 @@ def _configured_admin_token() -> str:
     return str(os.environ.get("SHOPPING_ADMIN_TOKEN") or "").strip()
 
 
+def _configured_buyer_bootstrap_token() -> str:
+    return str(os.environ.get("SHOPPING_BUYER_BOOTSTRAP_TOKEN") or "").strip()
+
+
 def _require_admin_token(payload: dict[str, Any]) -> None:
     expected = _configured_admin_token()
     if not expected:
@@ -249,6 +257,17 @@ def _require_admin_token(payload: dict[str, Any]) -> None:
         raise AuthError("admin bootstrap token required")
     if not token_matches(token, expected):
         raise AuthError("invalid admin bootstrap token")
+
+
+def _require_buyer_bootstrap_token(payload: dict[str, Any]) -> None:
+    expected = _configured_buyer_bootstrap_token()
+    if not expected:
+        raise AuthError("buyer bootstrap token is not configured")
+    token = _payload_buyer_bootstrap_token(payload)
+    if not token:
+        raise AuthError("buyer bootstrap token required")
+    if not token_matches(token, expected):
+        raise AuthError("invalid buyer bootstrap token")
 
 
 def _channel_token_map() -> dict[str, str]:
@@ -366,6 +385,21 @@ def _result_limit(value: Any, default: int = DEFAULT_RESULT_LIMIT) -> int:
 
 def _result_offset(value: Any) -> int:
     return _non_negative_whole_int(value, "offset", default=0)
+
+
+def _public_merchant_summary(merchant: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(merchant)
+    summary.pop("contact", None)
+    summary.pop("automation_boundaries", None)
+    return summary
+
+
+def _public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(product)
+    merchant = summary.get("merchant")
+    if isinstance(merchant, dict):
+        summary["merchant"] = _public_merchant_summary(merchant)
+    return summary
 
 
 def _token_is_expired(expires_at: str) -> bool:
@@ -642,7 +676,7 @@ def _update_merchant(db_path: str | Path, merchant_id: str, payload: dict[str, A
 
 def _get_merchant(db_path: str | Path, merchant_id: str) -> dict[str, Any]:
     with db_session(db_path) as conn:
-        return {"ok": True, "merchant": catalog.merchant_summary(conn, merchant_id)}
+        return {"ok": True, "merchant": _public_merchant_summary(catalog.merchant_summary(conn, merchant_id))}
 
 
 def _list_merchants(db_path: str | Path, query: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -650,11 +684,14 @@ def _list_merchants(db_path: str | Path, query: dict[str, Any] | None = None) ->
     with db_session(db_path) as conn:
         return {
             "ok": True,
-            "results": _merchant_list(
-                conn,
-                limit=_result_limit(query.get("limit")),
-                offset=_result_offset(query.get("offset")),
-            ),
+            "results": [
+                _public_merchant_summary(merchant)
+                for merchant in _merchant_list(
+                    conn,
+                    limit=_result_limit(query.get("limit")),
+                    offset=_result_offset(query.get("offset")),
+                )
+            ],
         }
 
 
@@ -701,7 +738,7 @@ def _update_product(db_path: str | Path, sku: str, payload: dict[str, Any]) -> d
 
 def _get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
     with db_session(db_path) as conn:
-        return {"ok": True, "product": catalog.product_summary(conn, sku)}
+        return {"ok": True, "product": _public_product_summary(catalog.product_summary(conn, sku))}
 
 
 def _search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
@@ -709,16 +746,19 @@ def _search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
     with db_session(db_path) as conn:
         return {
             "ok": True,
-            "results": catalog.search_products(
-                conn,
-                query=str(query.get("query") or ""),
-                city=str(query.get("city") or ""),
-                area=str(query.get("area") or ""),
-                max_price=max_price if str(max_price or "") else None,
-                include_out_of_stock=_bool_from_query(query.get("include_out_of_stock")),
-                limit=_result_limit(query.get("limit"), default=10),
-                offset=_result_offset(query.get("offset")),
-            ),
+            "results": [
+                _public_product_summary(product)
+                for product in catalog.search_products(
+                    conn,
+                    query=str(query.get("query") or ""),
+                    city=str(query.get("city") or ""),
+                    area=str(query.get("area") or ""),
+                    max_price=max_price if str(max_price or "") else None,
+                    include_out_of_stock=_bool_from_query(query.get("include_out_of_stock")),
+                    limit=_result_limit(query.get("limit"), default=10),
+                    offset=_result_offset(query.get("offset")),
+                )
+            ],
         }
 
 
@@ -726,17 +766,21 @@ def _search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, A
     with db_session(db_path) as conn:
         return {
             "ok": True,
-            "results": catalog.search_merchants(
-                conn,
-                query=str(query.get("query") or ""),
-                city=str(query.get("city") or ""),
-                limit=_result_limit(query.get("limit"), default=10),
-                offset=_result_offset(query.get("offset")),
-            ),
+            "results": [
+                _public_merchant_summary(merchant)
+                for merchant in catalog.search_merchants(
+                    conn,
+                    query=str(query.get("query") or ""),
+                    city=str(query.get("city") or ""),
+                    limit=_result_limit(query.get("limit"), default=10),
+                    offset=_result_offset(query.get("offset")),
+                )
+            ],
         }
 
 
 def _buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    _require_buyer_bootstrap_token(payload)
     with db_session(db_path) as conn:
         buyer_id = str(payload["buyer_id"])
         result = buyer_cli.ask(
@@ -780,6 +824,7 @@ def _get_conversation(db_path: str | Path, conversation_id: str, payload: dict[s
 
 
 def _create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    _require_buyer_bootstrap_token(payload)
     with db_session(db_path) as conn:
         buyer_id = str(payload["buyer_id"])
         conversation = ensure_conversation(
@@ -1422,7 +1467,7 @@ def _resolve_human_review_item(db_path: str | Path, review_id: str | int, payloa
         if conversation["status"] == "closed":
             raise SystemExit(f"Conversation {conversation_id} is closed")
         now = now_iso()
-        conn.execute(
+        resolved = conn.execute(
             """
             update moderation_flags
             set resolved_at = ?, resolution = ?, resolved_by = ?
@@ -1430,6 +1475,8 @@ def _resolve_human_review_item(db_path: str | Path, review_id: str | int, payloa
             """,
             (now, action, sender, int(review_id)),
         )
+        if resolved.rowcount != 1:
+            raise SystemExit(f"Human review already resolved: {review_id}")
         remaining_rows = conn.execute(
             """
             select reason from moderation_flags
@@ -1801,12 +1848,12 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         return _ingest_channel_message(db_path, _payload_with_auth(payload, authorization))
 
     @app.post("/buyer/ask")
-    def buyer_ask(payload: dict[str, Any]) -> dict[str, Any]:
-        return _buyer_ask(db_path, payload)
+    def buyer_ask(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _buyer_ask(db_path, _payload_with_auth(payload, authorization))
 
     @app.post("/conversations")
-    def create_conversation(payload: dict[str, Any]) -> dict[str, Any]:
-        return _create_conversation(db_path, payload)
+    def create_conversation(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _create_conversation(db_path, _payload_with_auth(payload, authorization))
 
     @app.get("/buyers/{buyer_id}/conversations")
     def get_buyer_conversations(

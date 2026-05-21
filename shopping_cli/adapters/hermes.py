@@ -57,19 +57,24 @@ def buyer_ask_request(
     city: str = "",
     area: str = "",
     session_id: str = "",
+    buyer_bootstrap_token: str = "",
 ) -> dict:
+    token = buyer_bootstrap_token or os.environ.get("SHOPPING_BUYER_BOOTSTRAP_TOKEN", "")
+    payload = {
+        "buyer_id": buyer_id,
+        "text": text,
+        "city": city,
+        "area": area,
+        "source_id": f"hermes-buyer:{buyer_id}",
+        "host": "hermes",
+        "session_id": session_id,
+    }
+    if token:
+        payload["buyer_bootstrap_token"] = token
     return {
         "method": "POST",
         "path": "/buyer/ask",
-        "payload": {
-            "buyer_id": buyer_id,
-            "text": text,
-            "city": city,
-            "area": area,
-            "source_id": f"hermes-buyer:{buyer_id}",
-            "host": "hermes",
-            "session_id": session_id,
-        },
+        "payload": payload,
     }
 
 

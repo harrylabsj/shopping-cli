@@ -10,6 +10,8 @@ from typing import Any, Mapping
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
+DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT = 1000
+MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT = 5000
 
 
 def parse_tags(value: str | list[str] | None) -> list[str]:
@@ -589,10 +591,20 @@ def search_products(
     include_out_of_stock: bool = False,
     limit: int = 10,
     offset: int = 0,
+    candidate_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     query = str(query or "").strip()
     city = str(city or "").strip()
     area = str(area or "").strip()
+    window_start = _safe_non_negative_int(offset)
+    window_limit = _safe_non_negative_int(limit)
+    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+    default_candidate_limit = max(DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT, requested_window)
+    if candidate_limit is None:
+        candidate_cap = default_candidate_limit
+    else:
+        candidate_cap = _safe_non_negative_int(candidate_limit)
+    candidate_cap = min(candidate_cap, MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT)
     if max_price is not None:
         max_price = _finite_float(max_price, "--max-price must be finite")
     values: list[Any] = []
@@ -629,6 +641,8 @@ def search_products(
         values.append(max_price)
     if not include_out_of_stock:
         sql += " and p.stock > 0"
+    sql += " order by p.sku limit ?"
+    values.append(candidate_cap)
     rows = conn.execute(sql, values).fetchall()
     matches: list[tuple[float, float, str, sqlite3.Row]] = []
     for row in rows:
@@ -647,8 +661,6 @@ def search_products(
         matches.append((score, price, str(row["sku"]), row))
 
     ordered = sorted(matches, key=lambda item: (-item[0], item[1], item[2]))
-    window_start = _safe_non_negative_int(offset)
-    window_limit = _safe_non_negative_int(limit)
     results: list[dict[str, Any]] = []
     for score, _price, _sku, row in ordered[window_start : window_start + window_limit]:
         summary = _product_summary_from_search_row(row)
