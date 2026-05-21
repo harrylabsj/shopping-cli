@@ -29,9 +29,17 @@ class Response:
 
 class HostAdapterAPIE2ETest(unittest.TestCase):
     TEST_ADMIN_TOKEN = "test-admin-bootstrap-token"
+    TEST_BUYER_BOOTSTRAP_TOKEN = "test-buyer-bootstrap-token"
 
     def setUp(self):
-        self._env_patcher = patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": self.TEST_ADMIN_TOKEN}, clear=False)
+        self._env_patcher = patch.dict(
+            os.environ,
+            {
+                "SHOPPING_ADMIN_TOKEN": self.TEST_ADMIN_TOKEN,
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": self.TEST_BUYER_BOOTSTRAP_TOKEN,
+            },
+            clear=False,
+        )
         self._env_patcher.start()
 
     def tearDown(self):

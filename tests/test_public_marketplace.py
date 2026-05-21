@@ -10,7 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from shopping_cli.api.app import AuthError, MarketplaceASGIApp, _list_agents, _resolve_agent_token, route_info
+from shopping_cli.api.app import (
+    AuthError,
+    MarketplaceASGIApp,
+    _list_agents,
+    _resolve_agent_token,
+    _resolve_human_review_item,
+    route_info,
+)
 from shopping_cli.api.app import create_app
 from shopping_cli.core import catalog
 from shopping_cli.core.conversations import conversation_summary
@@ -65,6 +72,7 @@ class FakeFastAPI:
 class PublicMarketplaceTest(unittest.TestCase):
     TEST_ADMIN_TOKEN = "test-admin-bootstrap-token"
     TEST_CHANNEL_TOKEN = "test-telegram-channel-token"
+    TEST_BUYER_BOOTSTRAP_TOKEN = "test-buyer-bootstrap-token"
 
     def setUp(self):
         self._env_patcher = patch.dict(
@@ -72,6 +80,7 @@ class PublicMarketplaceTest(unittest.TestCase):
             {
                 "SHOPPING_ADMIN_TOKEN": self.TEST_ADMIN_TOKEN,
                 "SHOPPING_CHANNEL_TOKENS": f"telegram:{self.TEST_CHANNEL_TOKEN}",
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": self.TEST_BUYER_BOOTSTRAP_TOKEN,
             },
             clear=False,
         )
@@ -84,7 +93,16 @@ class PublicMarketplaceTest(unittest.TestCase):
         authorization = (headers or {}).get("authorization") or (headers or {}).get("Authorization") or ""
         return str(authorization).lower().startswith("bearer ")
 
-    def _payload_with_test_auth(self, method, path, payload, headers, auto_admin=True, auto_channel=True):
+    def _payload_with_test_auth(
+        self,
+        method,
+        path,
+        payload,
+        headers,
+        auto_admin=True,
+        auto_channel=True,
+        auto_buyer=True,
+    ):
         if payload is None or not isinstance(payload, dict):
             return payload
         merged = dict(payload)
@@ -104,6 +122,14 @@ class PublicMarketplaceTest(unittest.TestCase):
             and "channel_token" not in merged
         ):
             merged["channel_token"] = self.TEST_CHANNEL_TOKEN
+        if (
+            auto_buyer
+            and method == "POST"
+            and path in {"/buyer/ask", "/conversations"}
+            and not self._has_bearer_auth(headers)
+            and "buyer_bootstrap_token" not in merged
+        ):
+            merged["buyer_bootstrap_token"] = self.TEST_BUYER_BOOTSTRAP_TOKEN
         return merged
 
     async def asgi_request(
@@ -116,8 +142,9 @@ class PublicMarketplaceTest(unittest.TestCase):
         headers=None,
         auto_admin=True,
         auto_channel=True,
+        auto_buyer=True,
     ):
-        payload = self._payload_with_test_auth(method, path, payload, headers, auto_admin, auto_channel)
+        payload = self._payload_with_test_auth(method, path, payload, headers, auto_admin, auto_channel, auto_buyer)
         body = json.dumps(payload or {}).encode("utf-8") if payload is not None else b""
         return await self.asgi_raw_request(
             app,
@@ -170,6 +197,7 @@ class PublicMarketplaceTest(unittest.TestCase):
         headers=None,
         auto_admin=True,
         auto_channel=True,
+        auto_buyer=True,
     ):
         return asyncio.run(
             self.asgi_request(
@@ -181,6 +209,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                 headers=headers,
                 auto_admin=auto_admin,
                 auto_channel=auto_channel,
+                auto_buyer=auto_buyer,
             )
         )
 
@@ -212,7 +241,7 @@ class PublicMarketplaceTest(unittest.TestCase):
 
         self.assertIn("ambiguous", str(raised.exception))
 
-    def fastapi_request(self, app, method, path, *args, auto_admin=True, auto_channel=True):
+    def fastapi_request(self, app, method, path, *args, auto_admin=True, auto_channel=True, auto_buyer=True):
         endpoint = next(
             route.endpoint
             for route in app.routes
@@ -228,6 +257,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                     headers=None,
                     auto_admin=auto_admin,
                     auto_channel=auto_channel,
+                    auto_buyer=auto_buyer,
                 )
                 break
         try:
@@ -377,6 +407,43 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             self.assertEqual(created["merchant"]["id"], "seller-a")
+
+    def test_public_buyer_entry_points_require_bootstrap_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+
+            status, anonymous_ask = self.request(
+                app,
+                "POST",
+                "/buyer/ask",
+                {"buyer_id": "alice", "text": "longjing"},
+                auto_buyer=False,
+            )
+            self.assertEqual(status, 403)
+            self.assertIn("buyer bootstrap token", anonymous_ask["error"])
+
+            status, anonymous_create = self.request(
+                app,
+                "POST",
+                "/conversations",
+                {"buyer_id": "alice", "merchant_id": "seller-a", "text": "hello"},
+                auto_buyer=False,
+            )
+            self.assertEqual(status, 403)
+            self.assertIn("buyer bootstrap token", anonymous_create["error"])
+
+            status, created = self.request(
+                app,
+                "POST",
+                "/conversations",
+                {"buyer_id": "alice", "merchant_id": "seller-a", "text": "hello"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(created["conversation"]["merchant_id"], merchant["merchant"]["id"])
 
     def test_fastapi_auth_errors_are_mapped_to_403_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -609,6 +676,66 @@ class PublicMarketplaceTest(unittest.TestCase):
                 {"tea-cheap", "tea-soldout"},
             )
 
+    def test_public_catalog_responses_hide_internal_merchant_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(
+                app,
+                "POST",
+                "/merchants",
+                {
+                    "id": "seller-a",
+                    "name": "West Lake Tea",
+                    "city": "Hangzhou",
+                    "contact": "wechat:westlake",
+                    "automation_boundaries": "Escalate discounts.",
+                    "tags": ["tea"],
+                },
+            )
+            self.assertEqual(status, 200)
+            status, _product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "tags": ["longjing"],
+                    "merchant_token": merchant["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+
+            status, merchant_detail = self.request(app, "GET", "/merchants/seller-a")
+            self.assertEqual(status, 200)
+            self.assertNotIn("contact", merchant_detail["merchant"])
+            self.assertNotIn("automation_boundaries", merchant_detail["merchant"])
+
+            status, merchant_list = self.request(app, "GET", "/merchants")
+            self.assertEqual(status, 200)
+            self.assertNotIn("contact", merchant_list["results"][0])
+            self.assertNotIn("automation_boundaries", merchant_list["results"][0])
+
+            status, product_detail = self.request(app, "GET", "/products/tea-a")
+            self.assertEqual(status, 200)
+            self.assertNotIn("contact", product_detail["product"]["merchant"])
+            self.assertNotIn("automation_boundaries", product_detail["product"]["merchant"])
+
+            status, product_search = self.request(app, "GET", "/search/products", query_string="query=longjing")
+            self.assertEqual(status, 200)
+            self.assertNotIn("contact", product_search["results"][0]["merchant"])
+            self.assertNotIn("automation_boundaries", product_search["results"][0]["merchant"])
+
+            status, merchant_search = self.request(app, "GET", "/search/merchants", query_string="query=west")
+            self.assertEqual(status, 200)
+            self.assertNotIn("contact", merchant_search["results"][0])
+            self.assertNotIn("automation_boundaries", merchant_search["results"][0])
+
     def test_public_list_search_and_conversation_routes_apply_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
@@ -786,7 +913,30 @@ class PublicMarketplaceTest(unittest.TestCase):
         self.assertIn("lower(m.city) = lower(?)", conn.sql)
         self.assertIn("p.price <= ?", conn.sql)
         self.assertIn("p.stock > 0", conn.sql)
-        self.assertEqual(conn.params, ("Hangzhou", 100.0))
+        self.assertIn("limit ?", conn.sql)
+        self.assertEqual(conn.params, ("Hangzhou", 100.0, 1000))
+
+    def test_product_search_accepts_explicit_candidate_cap(self):
+        class EmptyCursor:
+            def fetchall(self):
+                return []
+
+        class RecordingConnection:
+            sql = ""
+            params = ()
+
+            def execute(self, sql, params=()):
+                self.sql = " ".join(sql.split()).lower()
+                self.params = tuple(params)
+                return EmptyCursor()
+
+        conn = RecordingConnection()
+
+        results = catalog.search_products(conn, query="longjing", candidate_limit=25)
+
+        self.assertEqual(results, [])
+        self.assertIn("limit ?", conn.sql)
+        self.assertEqual(conn.params, (25,))
 
     def test_merchant_search_pushes_city_filter_into_sql(self):
         class EmptyCursor:
@@ -2749,6 +2899,44 @@ class PublicMarketplaceTest(unittest.TestCase):
                 "conversation_closed",
                 [event["event"] for event in closed_by_conversation["conversation"]["audit_events"]],
             )
+
+    def test_human_review_item_resolution_rejects_lost_update(self):
+        class LostUpdate:
+            rowcount = 0
+
+        class FakeConnection:
+            def execute(self, sql, params=()):
+                if "update moderation_flags" in " ".join(sql.split()).lower():
+                    return LostUpdate()
+                raise AssertionError("resolution should stop after the lost update is detected")
+
+        class FakeSession:
+            def __enter__(self):
+                return FakeConnection()
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        review_row = {
+            "id": 1,
+            "conversation_id": "CONV-0001",
+            "reason": "low_confidence",
+            "resolved_at": "",
+        }
+        conversation = {"id": "CONV-0001", "merchant_id": "seller-a", "status": "human_required"}
+
+        with patch("shopping_cli.api.app.db_session", return_value=FakeSession()):
+            with patch("shopping_cli.api.app._human_review_row", return_value=review_row):
+                with patch("shopping_cli.api.app.conversation_summary", return_value=conversation):
+                    with patch("shopping_cli.api.app._require_merchant_token", return_value=None):
+                        with self.assertRaises(SystemExit) as raised:
+                            _resolve_human_review_item(
+                                Path(":memory:"),
+                                1,
+                                {"action": "reply", "merchant_token": "merchant-token"},
+                            )
+
+        self.assertIn("Human review already resolved", str(raised.exception))
 
     def test_human_review_api_normalizes_blank_reason_and_severity(self):
         with tempfile.TemporaryDirectory() as tmp:
