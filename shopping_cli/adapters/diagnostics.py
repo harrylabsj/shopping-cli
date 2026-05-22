@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import os
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,10 @@ def inspect_host(
     skill_target = _safe_resolve(skill) if skill_installed or skill_is_symlink else ""
     project_target = _safe_resolve(root)
     skill_points_to_project = bool(skill_target and project_target and Path(skill_target) == Path(project_target))
+    admin_token_configured = bool(str(os.environ.get("SHOPPING_ADMIN_TOKEN") or "").strip())
+    buyer_bootstrap_token_configured = bool(
+        str(os.environ.get("SHOPPING_BUYER_BOOTSTRAP_TOKEN") or "").strip()
+    )
     return {
         "ok": bool(command_path and project_root_valid and skill_installed and (not skill_is_symlink or skill_points_to_project)),
         "host": host,
@@ -70,11 +75,14 @@ def inspect_host(
         "skill_target": skill_target,
         "skill_points_to_project": skill_points_to_project,
         "db_path": str(Path(db_path).expanduser()) if db_path is not None else "",
+        "admin_token_configured": admin_token_configured,
+        "buyer_bootstrap_token_configured": buyer_bootstrap_token_configured,
     }
 
 
 def doctor_from_inspection(info: dict[str, Any]) -> dict[str, Any]:
     issues: list[str] = []
+    warnings: list[str] = []
     if not info["command_available"]:
         issues.append(f"{info['command']} command not found")
     if not info["project_root_valid"]:
@@ -83,7 +91,11 @@ def doctor_from_inspection(info: dict[str, Any]) -> dict[str, Any]:
         issues.append(f"{info['host']} skill is not installed")
     elif info["skill_is_symlink"] and not info["skill_points_to_project"]:
         issues.append(f"{info['host']} skill points to a different project root")
-    return {"ok": not issues, "host": info["host"], "issues": issues, "inspection": info}
+    if not info.get("admin_token_configured"):
+        warnings.append("SHOPPING_ADMIN_TOKEN is not configured")
+    if not info.get("buyer_bootstrap_token_configured"):
+        warnings.append("SHOPPING_BUYER_BOOTSTRAP_TOKEN is not configured")
+    return {"ok": not issues, "host": info["host"], "issues": issues, "warnings": warnings, "inspection": info}
 
 
 def install_command(
