@@ -110,7 +110,7 @@ python3 scripts/shopping.py adapter doctor --host hermes --format json
 python3 scripts/shopping.py adapter install-command --host openclaw --dry-run --format json
 ```
 
-`inspect` reports host command availability, project root validity, skill root status, symlink target, stale skill detection, and DB path. `doctor` turns those checks into actionable issues. Their default text output is meant for quick human setup checks, while `--format json` remains the stable adapter/script contract. `install-command` prints the install command without executing it.
+`inspect` reports host command availability, project root validity, skill root status, symlink target, stale skill detection, DB path, and whether API bootstrap tokens are configured. `doctor` turns broken setup checks into actionable issues and reports missing API bootstrap tokens as warnings so local-only CLI usage is not blocked. Their default text output is meant for quick human setup checks, while `--format json` remains the stable adapter/script contract. `install-command` prints the install command without executing it.
 
 The API-backed host adapter E2E test proves the intended production boundary: Hermes creates the buyer consultation through the Marketplace API, OpenClaw runs the merchant agent through API-backed tools, and `shopping-cli` owns all commerce state, tokens, conversation routing, and audit events.
 

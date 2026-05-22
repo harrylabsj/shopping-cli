@@ -1254,6 +1254,8 @@ def emit_adapter_inspect_text(result: dict[str, Any]) -> None:
     print(f"Skill symlink: {yes_no(result.get('skill_is_symlink'))}")
     print(f"Skill target: {result.get('skill_target') or '-'}")
     print(f"Skill points to project: {yes_no(result.get('skill_points_to_project'))}")
+    print(f"Admin token configured: {yes_no(result.get('admin_token_configured'))}")
+    print(f"Buyer bootstrap token configured: {yes_no(result.get('buyer_bootstrap_token_configured'))}")
     if result.get("db_path"):
         print(f"DB: {result['db_path']}")
 
@@ -1275,12 +1277,18 @@ def emit_adapter_doctor_text(result: dict[str, Any]) -> None:
     print(f"Adapter doctor: {result.get('host') or '-'}")
     print(f"OK: {yes_no(result.get('ok'))}")
     issues = result.get("issues") or []
-    if not issues:
+    warnings = result.get("warnings") or []
+    if not issues and not warnings:
         print("Issues: none")
         return
-    print("Issues:")
-    for issue in issues:
-        print(f"- {issue}")
+    if issues:
+        print("Issues:")
+        for issue in issues:
+            print(f"- {issue}")
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
 
 
 def cmd_adapter_install_command(args: argparse.Namespace) -> None:

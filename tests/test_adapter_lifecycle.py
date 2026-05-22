@@ -24,7 +24,14 @@ class AdapterLifecycleTest(unittest.TestCase):
             skill_root.symlink_to(Path.cwd(), target_is_directory=True)
             db_file = tmp_path / "shopping.sqlite"
 
-            with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "SHOPPING_ADMIN_TOKEN": "admin-token",
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "buyer-bootstrap-token",
+                },
+            ):
                 info = openclaw.inspect_host(db_path=db_file, project_root=Path.cwd(), skill_root=skill_root)
                 doctor = openclaw.doctor(db_path=db_file, project_root=Path.cwd(), skill_root=skill_root)
 
@@ -34,9 +41,40 @@ class AdapterLifecycleTest(unittest.TestCase):
             self.assertEqual(info["skill_target"], str(Path.cwd().resolve()))
             self.assertTrue(info["skill_points_to_project"])
             self.assertEqual(info["db_path"], str(db_file))
+            self.assertTrue(info["admin_token_configured"])
+            self.assertTrue(info["buyer_bootstrap_token_configured"])
             self.assertTrue(doctor["ok"])
+            self.assertEqual(doctor["warnings"], [])
             install = openclaw.install_command(project_root=Path.cwd(), dry_run=True, force=True)
             self.assertEqual(install[-3:], ["--openclaw", "--dry-run", "--force"])
+
+    def test_doctor_warns_when_api_bootstrap_tokens_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            self.make_fake_command(bin_dir, "hermes")
+            skill_root = tmp_path / ".hermes" / "skills" / "commerce" / "shopping"
+            skill_root.parent.mkdir(parents=True)
+            skill_root.symlink_to(Path.cwd(), target_is_directory=True)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "SHOPPING_ADMIN_TOKEN": "",
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "",
+                },
+            ):
+                info = hermes.inspect_host(project_root=Path.cwd(), skill_root=skill_root)
+                doctor = hermes.doctor(project_root=Path.cwd(), skill_root=skill_root)
+
+            self.assertTrue(info["ok"])
+            self.assertFalse(info["admin_token_configured"])
+            self.assertFalse(info["buyer_bootstrap_token_configured"])
+            self.assertTrue(doctor["ok"])
+            self.assertIn("SHOPPING_ADMIN_TOKEN is not configured", doctor["warnings"])
+            self.assertIn("SHOPPING_BUYER_BOOTSTRAP_TOKEN is not configured", doctor["warnings"])
 
     def test_doctor_reports_stale_skill_symlink_target(self):
         with tempfile.TemporaryDirectory() as tmp:
