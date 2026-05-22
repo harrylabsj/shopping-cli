@@ -2066,11 +2066,16 @@ class ShoppingCliTest(unittest.TestCase):
             self.assertIn("Command available: yes", inspect_output)
             self.assertIn("Project root valid: yes", inspect_output)
             self.assertIn("Skill installed: no", inspect_output)
+            self.assertIn("Admin token configured: no", inspect_output)
+            self.assertIn("Buyer bootstrap token configured: no", inspect_output)
             self.assertNotIn('"command_available"', inspect_output)
 
             self.assertIn("Adapter doctor: OpenClaw", doctor_output)
             self.assertIn("OK: no", doctor_output)
             self.assertIn("- OpenClaw skill is not installed", doctor_output)
+            self.assertIn("Warnings:", doctor_output)
+            self.assertIn("- SHOPPING_ADMIN_TOKEN is not configured", doctor_output)
+            self.assertIn("- SHOPPING_BUYER_BOOTSTRAP_TOKEN is not configured", doctor_output)
             self.assertNotIn('"issues"', doctor_output)
 
     def test_agent_token_command_issues_scoped_agent_token(self):
