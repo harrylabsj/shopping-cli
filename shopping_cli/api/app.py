@@ -7,10 +7,13 @@ not been installed yet.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import os
 import secrets
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +22,12 @@ from urllib.parse import parse_qs
 
 from shopping_cli import VERSION
 from shopping_cli.agents import buyer_cli, merchant_agent
-from shopping_cli.config import agent_stale_ttl_seconds_from
+from shopping_cli.config import (
+    agent_stale_ttl_seconds_from,
+    deployment_profile_from,
+    production_config_checks,
+    validate_production_config,
+)
 from shopping_cli.core import catalog
 from shopping_cli.core.channels import ingest_buyer_message, normalize_channel
 from shopping_cli.core.conversations import (
@@ -42,8 +50,8 @@ from shopping_cli.core.harness import (
     fail_agent_message,
     next_actor_for_status,
 )
-from shopping_cli.db.session import db_session, decode_json, now_iso
-from shopping_cli.core.tokens import token_digest, token_matches, token_prefix, token_suffix
+from shopping_cli.db.session import db_session, decode_json, encode_json, now_iso
+from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_matches, token_prefix, token_suffix
 
 try:  # pragma: no cover - exercised when optional dependency is installed
     from fastapi import FastAPI, Header
@@ -60,11 +68,22 @@ class AuthError(Exception):
     pass
 
 
+class IdempotencyConflict(Exception):
+    pass
+
+
+class RateLimitError(Exception):
+    pass
+
+
 HUMAN_REVIEW_ACTIONS = {"reply", "approve_public_answer", "reject", "close"}
 HUMAN_REVIEW_SENDERS = {"merchant", "merchant_agent", "operator"}
 MAX_SQLITE_INTEGER = 2**63 - 1
 DEFAULT_RESULT_LIMIT = 50
 MAX_RESULT_LIMIT = 100
+DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE = 60
+BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = 60
+MAX_IDEMPOTENCY_KEY_LENGTH = 160
 
 
 def _json_error_response(status_code: int, error: str) -> Any:
@@ -126,6 +145,9 @@ class MarketplaceASGIApp:
         authorization = headers.get("authorization", "")
         if authorization.lower().startswith("bearer "):
             payload["_auth_token"] = authorization.split(" ", 1)[1].strip()
+        idempotency_key = headers.get("idempotency-key", "").strip()
+        if idempotency_key:
+            payload["_idempotency_key"] = idempotency_key
         try:
             raw_query = scope.get("query_string", b"").decode("utf-8")
         except UnicodeDecodeError:
@@ -226,10 +248,25 @@ def _auth_header_default() -> Any:
 AUTHORIZATION_HEADER = _auth_header_default()
 
 
-def _payload_with_auth(payload: dict[str, Any], authorization: Any = "") -> dict[str, Any]:
+def _idempotency_key_header_default() -> Any:
+    if Header is None:
+        return ""
+    return Header(default="", alias="Idempotency-Key")
+
+
+IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
+
+
+def _payload_with_auth(
+    payload: dict[str, Any],
+    authorization: Any = "",
+    idempotency_key: Any = "",
+) -> dict[str, Any]:
     merged = dict(payload or {})
     if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
         merged["_auth_token"] = authorization.split(" ", 1)[1].strip()
+    if isinstance(idempotency_key, str) and idempotency_key.strip():
+        merged["_idempotency_key"] = idempotency_key.strip()
     return merged
 
 
@@ -259,7 +296,7 @@ def _require_admin_token(payload: dict[str, Any]) -> None:
         raise AuthError("invalid admin bootstrap token")
 
 
-def _require_buyer_bootstrap_token(payload: dict[str, Any]) -> None:
+def _require_buyer_bootstrap_token(payload: dict[str, Any]) -> str:
     expected = _configured_buyer_bootstrap_token()
     if not expected:
         raise AuthError("buyer bootstrap token is not configured")
@@ -268,6 +305,7 @@ def _require_buyer_bootstrap_token(payload: dict[str, Any]) -> None:
         raise AuthError("buyer bootstrap token required")
     if not token_matches(token, expected):
         raise AuthError("invalid buyer bootstrap token")
+    return token_digest(token)
 
 
 def _channel_token_map() -> dict[str, str]:
@@ -438,15 +476,15 @@ def _agent_token_summary(row: Any) -> dict[str, Any]:
 
 
 def _agent_token_row(conn: Any, token: str) -> Any:
-    raw = str(token or "")
-    digest = token_digest(raw)
+    stored = str(token or "")
+    digest = stored if is_sha256_digest(stored) else token_digest(stored)
     return conn.execute(
         """
         select token, token_hash, token_prefix, token_suffix, role, merchant_id, agent_id, created_at, expires_at, revoked_at
         from api_tokens
-        where token = ? or token = ? or token_hash = ?
+        where token = ? or token_hash = ?
         """,
-        (raw, digest, digest),
+        (digest, digest),
     ).fetchone()
 
 
@@ -534,15 +572,266 @@ def _issue_agent_token(conn: Any, merchant_id: str, agent_id: str, ttl_seconds: 
 
 def _issue_buyer_token(conn: Any, buyer_id: str, conversation_id: str) -> str:
     token = f"shopping_buyer_{secrets.token_urlsafe(24)}"
+    _store_buyer_token(conn, token, buyer_id, conversation_id)
+    return token
+
+
+def _ensure_buyer_token(conn: Any, buyer_id: str, conversation_id: str, token: str) -> str:
+    _store_buyer_token(conn, token, buyer_id, conversation_id, ignore_conflict=True)
+    return token
+
+
+def _store_buyer_token(
+    conn: Any,
+    token: str,
+    buyer_id: str,
+    conversation_id: str,
+    ignore_conflict: bool = False,
+) -> None:
     digest = token_digest(token)
+    insert = "insert or ignore" if ignore_conflict else "insert"
     conn.execute(
-        """
-        insert into api_tokens(token, token_hash, token_prefix, token_suffix, role, merchant_id, buyer_id, agent_id, conversation_id, created_at)
+        f"""
+        {insert} into api_tokens(
+            token, token_hash, token_prefix, token_suffix, role,
+            merchant_id, buyer_id, agent_id, conversation_id, created_at
+        )
         values (?, ?, ?, ?, 'buyer', '', ?, '', ?, ?)
         """,
         (digest, digest, token_prefix(token), token_suffix(token), buyer_id, conversation_id, now_iso()),
     )
-    return token
+
+
+def _buyer_bootstrap_rate_limit_per_minute() -> int:
+    raw = str(os.environ.get("SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE") or "").strip()
+    if not raw:
+        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
+    try:
+        limit = int(raw)
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
+    if limit < 0:
+        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
+    return min(limit, MAX_SQLITE_INTEGER)
+
+
+def _rate_limit_window_start(current: datetime) -> str:
+    epoch_seconds = int(current.timestamp())
+    window_epoch = epoch_seconds - (epoch_seconds % BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS)
+    return datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
+
+
+def _enforce_buyer_bootstrap_rate_limit(conn: Any, bootstrap_token_hash: str) -> None:
+    limit = _buyer_bootstrap_rate_limit_per_minute()
+    if limit <= 0:
+        return
+    current = datetime.now().replace(microsecond=0)
+    cursor = conn.execute(
+        """
+        insert into buyer_bootstrap_rate_limits(token_hash, window_start, request_count, updated_at)
+        values (?, ?, 1, ?)
+        on conflict(token_hash, window_start) do update set
+            request_count = buyer_bootstrap_rate_limits.request_count + 1,
+            updated_at = excluded.updated_at
+        where buyer_bootstrap_rate_limits.request_count < ?
+        """,
+        (bootstrap_token_hash, _rate_limit_window_start(current), current.isoformat(), limit),
+    )
+    if cursor.rowcount != 1:
+        raise RateLimitError(f"buyer bootstrap rate limit exceeded ({limit}/minute)")
+
+
+def _idempotency_key_from_payload(payload: dict[str, Any]) -> str:
+    key = str(payload.get("idempotency_key") or payload.get("_idempotency_key") or "").strip()
+    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        raise ValueError(f"idempotency_key must be <= {MAX_IDEMPOTENCY_KEY_LENGTH} characters")
+    return key
+
+
+def _request_hash(values: dict[str, Any]) -> str:
+    canonical = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return token_digest(canonical)
+
+
+def _buyer_ask_request_hash(payload: dict[str, Any]) -> str:
+    return _request_hash(
+        {
+            "buyer_id": str(payload["buyer_id"]).strip(),
+            "text": str(payload["text"]),
+            "city": str(payload.get("city") or ""),
+            "area": str(payload.get("area") or ""),
+            "source_id": str(payload.get("source_id") or "buyer-cli"),
+            "host": str(payload.get("host") or ""),
+            "session_id": str(payload.get("session_id") or ""),
+        }
+    )
+
+
+def _conversation_create_request_hash(payload: dict[str, Any]) -> str:
+    return _request_hash(
+        {
+            "buyer_id": str(payload["buyer_id"]).strip(),
+            "merchant_id": str(payload["merchant_id"]).strip(),
+            "sku": str(payload.get("sku") or ""),
+            "text": str(payload.get("text") or ""),
+            "intent": str(payload.get("intent") or "ask_product"),
+            "source_id": str(payload.get("source_id") or ""),
+        }
+    )
+
+
+def _deterministic_buyer_token(
+    payload: dict[str, Any],
+    endpoint: str,
+    idempotency_key: str,
+    buyer_id: str,
+    conversation_id: str,
+) -> str:
+    secret = _payload_buyer_bootstrap_token(payload)
+    material = f"{endpoint}\n{idempotency_key}\n{buyer_id}\n{conversation_id}"
+    digest = hmac.new(secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"shopping_buyer_{digest}"
+
+
+def _idempotency_row(
+    conn: Any,
+    endpoint: str,
+    bootstrap_token_hash: str,
+    idempotency_key: str,
+) -> Any:
+    return conn.execute(
+        """
+        select endpoint, token_hash, idempotency_key, request_hash, status, response_json,
+               buyer_id, conversation_id, message_id
+        from buyer_request_idempotency
+        where endpoint = ? and token_hash = ? and idempotency_key = ?
+        """,
+        (endpoint, bootstrap_token_hash, idempotency_key),
+    ).fetchone()
+
+
+def _response_from_idempotency_row(conn: Any, payload: dict[str, Any], row: Any) -> dict[str, Any]:
+    response = decode_json(row["response_json"], {})
+    if not isinstance(response, dict):
+        response = {"ok": True}
+    result = dict(response)
+    buyer_id = str(row["buyer_id"] or "")
+    conversation_id = str(row["conversation_id"] or "")
+    if buyer_id and conversation_id:
+        token = _deterministic_buyer_token(
+            payload,
+            str(row["endpoint"]),
+            str(row["idempotency_key"]),
+            buyer_id,
+            conversation_id,
+        )
+        result["buyer_token"] = _ensure_buyer_token(conn, buyer_id, conversation_id, token)
+    result["idempotent"] = True
+    return result
+
+
+def _replay_buyer_idempotency(
+    conn: Any,
+    payload: dict[str, Any],
+    endpoint: str,
+    bootstrap_token_hash: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    row = _idempotency_row(conn, endpoint, bootstrap_token_hash, idempotency_key)
+    if row is None:
+        return None
+    if str(row["request_hash"]) != request_hash:
+        raise IdempotencyConflict("idempotency key was reused with a different request")
+    if row["status"] != "completed":
+        raise IdempotencyConflict("idempotent request is still processing")
+    return _response_from_idempotency_row(conn, payload, row)
+
+
+def _claim_buyer_idempotency(
+    conn: Any,
+    payload: dict[str, Any],
+    endpoint: str,
+    bootstrap_token_hash: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    current = now_iso()
+    try:
+        conn.execute(
+            """
+            insert into buyer_request_idempotency(
+                endpoint, token_hash, idempotency_key, request_hash, status,
+                response_json, created_at, updated_at
+            )
+            values (?, ?, ?, ?, 'processing', '{}', ?, ?)
+            """,
+            (endpoint, bootstrap_token_hash, idempotency_key, request_hash, current, current),
+        )
+    except sqlite3.IntegrityError:
+        return _replay_buyer_idempotency(conn, payload, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
+    return None
+
+
+def _complete_buyer_idempotency(
+    conn: Any,
+    endpoint: str,
+    bootstrap_token_hash: str,
+    idempotency_key: str,
+    request_hash: str,
+    response: dict[str, Any],
+) -> None:
+    if not idempotency_key:
+        return
+    stored_response = dict(response)
+    stored_response.pop("buyer_token", None)
+    conversation = stored_response.get("conversation") if isinstance(stored_response.get("conversation"), dict) else {}
+    message = stored_response.get("message") if isinstance(stored_response.get("message"), dict) else {}
+    conn.execute(
+        """
+        update buyer_request_idempotency
+        set status = 'completed',
+            response_json = ?,
+            buyer_id = ?,
+            conversation_id = ?,
+            message_id = ?,
+            updated_at = ?
+        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ?
+        """,
+        (
+            encode_json(stored_response),
+            str(stored_response.get("buyer_id") or (conversation or {}).get("buyer_id") or ""),
+            str((conversation or {}).get("id") or ""),
+            _non_negative_whole_int((message or {}).get("id"), "message_id"),
+            now_iso(),
+            endpoint,
+            bootstrap_token_hash,
+            idempotency_key,
+            request_hash,
+        ),
+    )
+
+
+def _clear_buyer_idempotency_claim(
+    conn: Any,
+    endpoint: str,
+    bootstrap_token_hash: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> None:
+    if not idempotency_key:
+        return
+    conn.execute(
+        """
+        delete from buyer_request_idempotency
+        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ? and status = 'processing'
+        """,
+        (endpoint, bootstrap_token_hash, idempotency_key, request_hash),
+    )
 
 
 def _require_api_token(conn: Any, payload: dict[str, Any], missing_error: str = "authorization token required") -> Any:
@@ -629,8 +918,28 @@ def _require_merchant_read_token(conn: Any, merchant_id: str, payload: dict[str,
 
 
 def _health(db_path: str | Path) -> dict[str, Any]:
-    with db_session(db_path):
-        return {"ok": True, "service": "shopping-cli-marketplace", "version": VERSION, "storage": "sqlite"}
+    profile = deployment_profile_from()
+    checks: dict[str, Any] = production_config_checks()
+    checks["database"] = "ok"
+    ok = True
+    try:
+        validate_production_config()
+    except ValueError:
+        ok = False
+    try:
+        with db_session(db_path):
+            pass
+    except Exception:
+        checks["database"] = "error"
+        ok = False
+    return {
+        "ok": ok,
+        "service": "shopping-cli-marketplace",
+        "version": VERSION,
+        "storage": "sqlite",
+        "deployment_profile": profile,
+        "checks": checks,
+    }
 
 
 def _create_merchant(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -780,23 +1089,68 @@ def _search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, A
 
 
 def _buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    _require_buyer_bootstrap_token(payload)
+    bootstrap_token_hash = _require_buyer_bootstrap_token(payload)
+    idempotency_key = _idempotency_key_from_payload(payload)
+    request_hash = _buyer_ask_request_hash(payload)
+    endpoint = "/buyer/ask"
     with db_session(db_path) as conn:
-        buyer_id = str(payload["buyer_id"])
-        result = buyer_cli.ask(
+        replayed = _replay_buyer_idempotency(
             conn,
-            buyer_id=buyer_id,
-            text=str(payload["text"]),
-            city=str(payload.get("city") or ""),
-            area=str(payload.get("area") or ""),
-            source_id=str(payload.get("source_id") or "buyer-cli"),
-            host=str(payload.get("host") or ""),
-            session_id=str(payload.get("session_id") or ""),
-            reuse_open=False,
+            payload,
+            endpoint,
+            bootstrap_token_hash,
+            idempotency_key,
+            request_hash,
         )
-        if result.get("conversation"):
-            result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
-        return result
+        if replayed is not None:
+            return replayed
+        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
+        replayed = _claim_buyer_idempotency(
+            conn,
+            payload,
+            endpoint,
+            bootstrap_token_hash,
+            idempotency_key,
+            request_hash,
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            buyer_id = str(payload["buyer_id"])
+            result = buyer_cli.ask(
+                conn,
+                buyer_id=buyer_id,
+                text=str(payload["text"]),
+                city=str(payload.get("city") or ""),
+                area=str(payload.get("area") or ""),
+                source_id=str(payload.get("source_id") or "buyer-cli"),
+                host=str(payload.get("host") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                reuse_open=False,
+            )
+            if result.get("conversation"):
+                if idempotency_key:
+                    token = _deterministic_buyer_token(
+                        payload,
+                        endpoint,
+                        idempotency_key,
+                        result["buyer_id"],
+                        result["conversation"]["id"],
+                    )
+                    result["buyer_token"] = _ensure_buyer_token(
+                        conn,
+                        result["buyer_id"],
+                        result["conversation"]["id"],
+                        token,
+                    )
+                else:
+                    result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
+            result["idempotent"] = False
+            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
+            return result
+        except (Exception, SystemExit):
+            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
+            raise
 
 
 def _ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -824,31 +1178,73 @@ def _get_conversation(db_path: str | Path, conversation_id: str, payload: dict[s
 
 
 def _create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    _require_buyer_bootstrap_token(payload)
+    bootstrap_token_hash = _require_buyer_bootstrap_token(payload)
+    idempotency_key = _idempotency_key_from_payload(payload)
+    request_hash = _conversation_create_request_hash(payload)
+    endpoint = "/conversations"
     with db_session(db_path) as conn:
-        buyer_id = str(payload["buyer_id"])
-        conversation = ensure_conversation(
+        replayed = _replay_buyer_idempotency(
             conn,
-            buyer_id=buyer_id,
-            merchant_id=str(payload["merchant_id"]),
-            sku=str(payload.get("sku") or ""),
-            reuse_open=False,
+            payload,
+            endpoint,
+            bootstrap_token_hash,
+            idempotency_key,
+            request_hash,
         )
-        if payload.get("text"):
-            append_message(
+        if replayed is not None:
+            return replayed
+        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
+        replayed = _claim_buyer_idempotency(
+            conn,
+            payload,
+            endpoint,
+            bootstrap_token_hash,
+            idempotency_key,
+            request_hash,
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            buyer_id = str(payload["buyer_id"])
+            conversation = ensure_conversation(
                 conn,
-                conversation["id"],
-                "buyer",
-                str(payload.get("intent") or "ask_product"),
-                str(payload["text"]),
-                structured_payload={"source_id": payload.get("source_id") or ""},
+                buyer_id=buyer_id,
+                merchant_id=str(payload["merchant_id"]),
+                sku=str(payload.get("sku") or ""),
+                reuse_open=False,
             )
-            conversation = conversation_summary(conn, conversation["id"])
-        return {
-            "ok": True,
-            "conversation": conversation,
-            "buyer_token": _issue_buyer_token(conn, conversation["buyer_id"], conversation["id"]),
-        }
+            if payload.get("text"):
+                append_message(
+                    conn,
+                    conversation["id"],
+                    "buyer",
+                    str(payload.get("intent") or "ask_product"),
+                    str(payload["text"]),
+                    structured_payload={"source_id": payload.get("source_id") or ""},
+                )
+                conversation = conversation_summary(conn, conversation["id"])
+            if idempotency_key:
+                token = _deterministic_buyer_token(
+                    payload,
+                    endpoint,
+                    idempotency_key,
+                    conversation["buyer_id"],
+                    conversation["id"],
+                )
+                buyer_token = _ensure_buyer_token(conn, conversation["buyer_id"], conversation["id"], token)
+            else:
+                buyer_token = _issue_buyer_token(conn, conversation["buyer_id"], conversation["id"])
+            result = {
+                "ok": True,
+                "conversation": conversation,
+                "buyer_token": buyer_token,
+                "idempotent": False,
+            }
+            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
+            return result
+        except (Exception, SystemExit):
+            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
+            raise
 
 
 def _append_conversation_message(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1736,6 +2132,10 @@ def handle_request(
             return 200, _resolve_human_review(db_path, parts[1], payload)
     except AuthError as exc:
         return 403, {"ok": False, "error": str(exc)}
+    except IdempotencyConflict as exc:
+        return 409, {"ok": False, "error": str(exc)}
+    except RateLimitError as exc:
+        return 429, {"ok": False, "error": str(exc)}
     except (KeyError, ValueError, SystemExit) as exc:
         return 400, {"ok": False, "error": str(exc)}
     return 404, {"ok": False, "error": f"No route for {method} {path}"}
@@ -1758,6 +2158,14 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     @app.exception_handler(AuthError)
     def auth_error_handler(_request: Any, exc: AuthError) -> Any:
         return _json_error_response(403, str(exc))
+
+    @app.exception_handler(IdempotencyConflict)
+    def idempotency_conflict_handler(_request: Any, exc: IdempotencyConflict) -> Any:
+        return _json_error_response(409, str(exc))
+
+    @app.exception_handler(RateLimitError)
+    def rate_limit_error_handler(_request: Any, exc: RateLimitError) -> Any:
+        return _json_error_response(429, str(exc))
 
     @app.exception_handler(KeyError)
     def key_error_handler(_request: Any, exc: KeyError) -> Any:
@@ -1848,12 +2256,20 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         return _ingest_channel_message(db_path, _payload_with_auth(payload, authorization))
 
     @app.post("/buyer/ask")
-    def buyer_ask(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _buyer_ask(db_path, _payload_with_auth(payload, authorization))
+    def buyer_ask(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _buyer_ask(db_path, _payload_with_auth(payload, authorization, idempotency_key))
 
     @app.post("/conversations")
-    def create_conversation(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _create_conversation(db_path, _payload_with_auth(payload, authorization))
+    def create_conversation(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _create_conversation(db_path, _payload_with_auth(payload, authorization, idempotency_key))
 
     @app.get("/buyers/{buyer_id}/conversations")
     def get_buyer_conversations(

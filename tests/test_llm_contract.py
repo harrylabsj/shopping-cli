@@ -665,7 +665,9 @@ class LlmContractTest(unittest.TestCase):
                 db_file,
                 "human_review_flag",
                 {"conversation_id": "CONV-0001", "reason": "bargaining", "severity": "review"},
+                token_scope="merchant_agent",
                 source_id="llm-merchant",
+                actor="seller-a",
             )
             self.assertEqual(review["result"]["conversation"]["status"], "human_required")
             self.assertEqual(review["result"]["review"]["reason"], "bargaining")
@@ -680,7 +682,9 @@ class LlmContractTest(unittest.TestCase):
                     "human_required": True,
                     "reason": "low_stock",
                 },
+                token_scope="merchant_agent",
                 source_id="llm-merchant",
+                actor="seller-a",
             )
             self.assertEqual(reply["result"]["message"]["sender"], "merchant_agent")
             self.assertEqual(reply["result"]["conversation"]["status"], "human_required")
@@ -695,7 +699,9 @@ class LlmContractTest(unittest.TestCase):
                 db_file,
                 "human_review_flag",
                 {"conversation_id": "CONV-0001", "reason": " suspicious_content ", "severity": " urgent "},
+                token_scope="merchant_agent",
                 source_id="llm-merchant",
+                actor="seller-a",
             )
 
             self.assertEqual(review["result"]["review"]["reason"], "suspicious_content")
@@ -717,7 +723,9 @@ class LlmContractTest(unittest.TestCase):
                     "human_required": True,
                     "reason": " suspicious_content ",
                 },
+                token_scope="merchant_agent",
                 source_id="llm-merchant",
+                actor="seller-a",
             )
 
             self.assertEqual(reply["result"]["message"]["structured_payload"]["reason"], "suspicious_content")
@@ -728,8 +736,10 @@ class LlmContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             self.seed_consultation(db_file)
+            with self.assertRaises(TypeError):
+                dispatch_marketplace_tool(db_file, "catalog_search", {"query": "longjing"})
             with self.assertRaises(SystemExit):
-                dispatch_marketplace_tool(db_file, "create_order", {"conversation_id": "CONV-0001"})
+                dispatch_marketplace_tool(db_file, "create_order", {"conversation_id": "CONV-0001"}, token_scope="operator")
             with self.assertRaises(SystemExit):
                 dispatch_marketplace_tool(
                     db_file,
@@ -740,6 +750,7 @@ class LlmContractTest(unittest.TestCase):
                         "intent": "ask_stock",
                         "text": "Not allowed through buyer send tool.",
                     },
+                    token_scope="buyer",
                 )
 
             with db_session(db_file) as conn:

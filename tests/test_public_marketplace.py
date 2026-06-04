@@ -222,6 +222,47 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(body["ok"])
 
+    def test_health_reports_deployment_checks_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(Path(tmp) / "marketplace.sqlite")
+
+            status, body = self.request(app, "GET", "/health")
+
+        serialized = json.dumps(body)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["storage"], "sqlite")
+        self.assertEqual(body["deployment_profile"], "local")
+        self.assertEqual(body["checks"]["database"], "ok")
+        self.assertTrue(body["checks"]["admin_token_configured"])
+        self.assertTrue(body["checks"]["buyer_bootstrap_token_configured"])
+        self.assertTrue(body["checks"]["channel_tokens_configured"])
+        self.assertNotIn(self.TEST_ADMIN_TOKEN, serialized)
+        self.assertNotIn(self.TEST_BUYER_BOOTSTRAP_TOKEN, serialized)
+        self.assertNotIn(self.TEST_CHANNEL_TOKEN, serialized)
+
+    def test_production_health_marks_missing_required_tokens_not_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "SHOPPING_DEPLOYMENT_PROFILE": "production",
+                    "SHOPPING_ADMIN_TOKEN": "replace-with-a-long-random-secret",
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "",
+                    "SHOPPING_CHANNEL_TOKENS": "",
+                },
+                clear=False,
+            ):
+                app = create_app(Path(tmp) / "marketplace.sqlite")
+                status, body = self.request(app, "GET", "/health")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["deployment_profile"], "production")
+        self.assertFalse(body["checks"]["admin_token_configured"])
+        self.assertFalse(body["checks"]["buyer_bootstrap_token_configured"])
+        self.assertFalse(body["checks"]["channel_tokens_configured"])
+
     def test_agent_token_prefix_resolution_reads_at_most_two_matches(self):
         class Cursor:
             def __init__(self, sql):
@@ -444,6 +485,133 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             self.assertEqual(created["conversation"]["merchant_id"], merchant["merchant"]["id"])
+
+    def test_buyer_ask_idempotency_key_replays_without_duplicate_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            status, _product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "tags": ["longjing"],
+                    "merchant_token": merchant["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+
+            payload = {"buyer_id": "alice", "text": "longjing delivery today", "idempotency_key": "ask-alice-1"}
+            status, first = self.request(app, "POST", "/buyer/ask", payload)
+            self.assertEqual(status, 200)
+            self.assertFalse(first["idempotent"])
+            status, replayed = self.request(app, "POST", "/buyer/ask", payload)
+            self.assertEqual(status, 200)
+            self.assertTrue(replayed["idempotent"])
+            self.assertEqual(replayed["conversation"]["id"], first["conversation"]["id"])
+            self.assertEqual(replayed["message"]["id"], first["message"]["id"])
+            self.assertEqual(replayed["buyer_token"], first["buyer_token"])
+
+            status, conflict = self.request(
+                app,
+                "POST",
+                "/buyer/ask",
+                {**payload, "text": "different request body"},
+            )
+            self.assertEqual(status, 409)
+            self.assertIn("different request", conflict["error"])
+
+            with db_session(db_file) as conn:
+                conversation_count = conn.execute("select count(*) as count from conversations").fetchone()["count"]
+                message_count = conn.execute("select count(*) as count from messages").fetchone()["count"]
+                token_count = conn.execute(
+                    "select count(*) as count from api_tokens where role = 'buyer'"
+                ).fetchone()["count"]
+
+            self.assertEqual(conversation_count, 1)
+            self.assertEqual(message_count, 1)
+            self.assertEqual(token_count, 1)
+
+    def test_create_conversation_idempotency_key_replays_without_duplicate_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            payload = {
+                "buyer_id": "alice",
+                "merchant_id": "seller-a",
+                "text": "Can I get delivery today?",
+                "idempotency_key": "conversation-alice-1",
+            }
+
+            status, first = self.request(app, "POST", "/conversations", payload)
+            self.assertEqual(status, 200)
+            self.assertFalse(first["idempotent"])
+            status, replayed = self.request(app, "POST", "/conversations", payload)
+            self.assertEqual(status, 200)
+            self.assertTrue(replayed["idempotent"])
+            self.assertEqual(replayed["conversation"]["id"], first["conversation"]["id"])
+            self.assertEqual(replayed["buyer_token"], first["buyer_token"])
+
+            with db_session(db_file) as conn:
+                conversation_count = conn.execute("select count(*) as count from conversations").fetchone()["count"]
+                message_count = conn.execute("select count(*) as count from messages").fetchone()["count"]
+
+            self.assertEqual(conversation_count, 1)
+            self.assertEqual(message_count, 1)
+
+    def test_buyer_bootstrap_rate_limit_counts_new_requests_not_idempotent_replays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            status, _product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "tags": ["longjing"],
+                    "merchant_token": merchant["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+
+            with patch.dict(os.environ, {"SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE": "1"}, clear=False):
+                payload = {"buyer_id": "alice", "text": "longjing", "idempotency_key": "rate-alice-1"}
+                status, first = self.request(app, "POST", "/buyer/ask", payload)
+                self.assertEqual(status, 200)
+                self.assertFalse(first["idempotent"])
+
+                status, replayed = self.request(app, "POST", "/buyer/ask", payload)
+                self.assertEqual(status, 200)
+                self.assertTrue(replayed["idempotent"])
+
+                status, limited = self.request(
+                    app,
+                    "POST",
+                    "/buyer/ask",
+                    {"buyer_id": "bob", "text": "longjing", "idempotency_key": "rate-bob-1"},
+                )
+
+            self.assertEqual(status, 429)
+            self.assertIn("rate limit", limited["error"])
 
     def test_fastapi_auth_errors_are_mapped_to_403_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -958,7 +1126,30 @@ class PublicMarketplaceTest(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertIn("lower(city) = lower(?)", conn.sql)
-        self.assertEqual(conn.params, ("Hangzhou",))
+        self.assertIn("limit ?", conn.sql)
+        self.assertEqual(conn.params, ("Hangzhou", 1000))
+
+    def test_merchant_search_accepts_explicit_candidate_cap(self):
+        class EmptyCursor:
+            def fetchall(self):
+                return []
+
+        class RecordingConnection:
+            sql = ""
+            params = ()
+
+            def execute(self, sql, params=()):
+                self.sql = " ".join(sql.split()).lower()
+                self.params = tuple(params)
+                return EmptyCursor()
+
+        conn = RecordingConnection()
+
+        results = catalog.search_merchants(conn, query="west", candidate_limit=25)
+
+        self.assertEqual(results, [])
+        self.assertIn("limit ?", conn.sql)
+        self.assertEqual(conn.params, (25,))
 
     def test_core_merchant_list_treats_negative_limit_as_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
