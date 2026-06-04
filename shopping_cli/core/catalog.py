@@ -12,6 +12,8 @@ from shopping_cli.db.session import decode_json, encode_json, now_iso
 MAX_SQLITE_INTEGER = 2**63 - 1
 DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT = 1000
 MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT = 5000
+DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT = 1000
+MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT = 5000
 
 
 def parse_tags(value: str | list[str] | None) -> list[str]:
@@ -678,11 +680,21 @@ def search_merchants(
     city: str = "",
     limit: int = 10,
     offset: int = 0,
+    candidate_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     query = str(query or "").strip()
     city = str(city or "").strip()
     query_lower = query.lower()
     query_tokens = tokenize(query_lower)
+    window_start = _safe_non_negative_int(offset)
+    window_limit = _safe_non_negative_int(limit)
+    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+    default_candidate_limit = max(DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT, requested_window)
+    if candidate_limit is None:
+        candidate_cap = default_candidate_limit
+    else:
+        candidate_cap = _safe_non_negative_int(candidate_limit)
+    candidate_cap = min(candidate_cap, MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT)
     values: list[Any] = []
     sql = """
         select m.*,
@@ -700,7 +712,8 @@ def search_merchants(
     if city:
         sql += " where lower(city) = lower(?)"
         values.append(city)
-    sql += " group by m.id order by m.name, m.id"
+    sql += " group by m.id order by m.name, m.id limit ?"
+    values.append(candidate_cap)
     rows = conn.execute(sql, values).fetchall()
     matches: list[tuple[float, str, str, sqlite3.Row]] = []
     for merchant in rows:
@@ -728,8 +741,6 @@ def search_merchants(
         matches.append((round(score, 4), str(merchant["name"]), str(merchant["id"]), merchant))
 
     ordered = sorted(matches, key=lambda item: (-item[0], item[1], item[2]))
-    window_start = _safe_non_negative_int(offset)
-    window_limit = _safe_non_negative_int(limit)
     results: list[dict[str, Any]] = []
     for score, _name, _merchant_id, merchant in ordered[window_start : window_start + window_limit]:
         summary = _merchant_summary_from_search_row(merchant)
