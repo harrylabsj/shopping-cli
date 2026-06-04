@@ -13,6 +13,8 @@ from shopping_cli import VERSION
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 from shopping_cli.db.models import EXTRA_COLUMNS, INDEXES, SCHEMA
 
+SQLITE_BUSY_TIMEOUT_MS = 5000
+
 
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -48,21 +50,50 @@ def decode_json(value: str | None, default: Any) -> Any:
 def open_connection(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("pragma journal_mode = wal")
     conn.execute("pragma foreign_keys = on")
     init_db(conn)
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    previous_schema_version = _schema_version(conn)
     for statement in SCHEMA:
         conn.execute(statement)
+    added_columns: set[tuple[str, str]] = set()
     for table, columns in EXTRA_COLUMNS.items():
         existing = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
         for name, definition in columns:
             if name not in existing:
                 conn.execute(f"alter table {table} add column {name} {definition}")
+                added_columns.add((table, name))
+    should_run_versioned_migrations = previous_schema_version != VERSION
+    if should_run_versioned_migrations or ("conversations", "next_actor") in added_columns:
+        backfill_conversation_next_actor(conn)
+    if should_run_versioned_migrations or any(table == "api_tokens" for table, _name in added_columns):
+        migrate_api_tokens_to_hashes(conn)
+    for statement in INDEXES:
+        conn.execute(statement)
+    if previous_schema_version != VERSION:
+        conn.execute(
+            "insert or replace into meta(key, value) values('schema_version', ?)",
+            (VERSION,),
+        )
+    conn.commit()
+
+
+def _schema_version(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("select value from meta where key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    return str(row["value"] or "") if row is not None else ""
+
+
+def backfill_conversation_next_actor(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         update conversations
@@ -76,14 +107,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         where next_actor = ''
         """
     )
-    migrate_api_tokens_to_hashes(conn)
-    for statement in INDEXES:
-        conn.execute(statement)
-    conn.execute(
-        "insert or ignore into meta(key, value) values('schema_version', ?)",
-        (VERSION,),
-    )
-    conn.commit()
 
 
 def migrate_api_tokens_to_hashes(conn: sqlite3.Connection) -> None:

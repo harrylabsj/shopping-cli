@@ -72,6 +72,108 @@ class ProjectShapeTest(unittest.TestCase):
 
         self.assertTrue(expected.issubset(indexes), sorted(expected - indexes))
 
+    def test_runtime_config_reads_api_environment(self):
+        from shopping_cli import config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "shopping.sqlite"
+            with patch.dict(
+                "os.environ",
+                {
+                    "SHOPPING_DB": str(db_path),
+                    "SHOPPING_API_HOST": "0.0.0.0",
+                    "SHOPPING_API_PORT": "9876",
+                    "SHOPPING_DEPLOYMENT_PROFILE": "production",
+                    "SHOPPING_PUBLIC_BASE_URL": "https://marketplace.example.test",
+                },
+                clear=False,
+            ):
+                runtime = config.RuntimeConfig.from_env()
+
+        self.assertEqual(runtime.db_path, db_path)
+        self.assertEqual(runtime.api_host, "0.0.0.0")
+        self.assertEqual(runtime.api_port, 9876)
+        self.assertEqual(runtime.deployment_profile, "production")
+        self.assertEqual(runtime.public_base_url, "https://marketplace.example.test")
+
+    def test_runtime_config_rejects_invalid_api_port(self):
+        from shopping_cli import config
+
+        for value in ("not-a-port", "0", "70000"):
+            with self.subTest(value=value):
+                with patch.dict("os.environ", {"SHOPPING_API_PORT": value}, clear=False):
+                    with self.assertRaises(config.ConfigError):
+                        config.RuntimeConfig.from_env()
+
+    def test_runtime_config_rejects_unsupported_database_url(self):
+        from shopping_cli import config
+
+        with patch.dict("os.environ", {"SHOPPING_DATABASE_URL": "postgresql://user:pass@db/shopping"}, clear=False):
+            with self.assertRaises(config.ConfigError) as raised:
+                config.RuntimeConfig.from_env()
+
+        self.assertIn("Postgres/RDS is not supported", str(raised.exception))
+
+    def test_production_preflight_rejects_placeholder_tokens(self):
+        from shopping_cli import config
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SHOPPING_DEPLOYMENT_PROFILE": "production",
+                "SHOPPING_ADMIN_TOKEN": "replace-with-a-long-random-secret",
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "buyer-token",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_production_config()
+
+        self.assertIn("SHOPPING_ADMIN_TOKEN", str(raised.exception))
+
+    def test_production_preflight_requires_channel_tokens(self):
+        from shopping_cli import config
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SHOPPING_DEPLOYMENT_PROFILE": "production",
+                "SHOPPING_ADMIN_TOKEN": "admin-token",
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "buyer-token",
+                "SHOPPING_CHANNEL_TOKEN": "",
+                "SHOPPING_CHANNEL_TOKENS": "telegram:replace-with-channel-token",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(config.ConfigError) as raised:
+                config.validate_production_config()
+
+        self.assertIn("SHOPPING_CHANNEL_TOKEN", str(raised.exception))
+
+    def test_release_metadata_versions_stay_aligned(self):
+        import json
+        import re
+
+        root = Path(".")
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        clawhub = json.loads((root / "clawhub.json").read_text(encoding="utf-8"))
+        plugin_package = json.loads((root / "plugins" / "shopping-plugin" / "package.json").read_text(encoding="utf-8"))
+        plugin = json.loads((root / "plugins" / "shopping-plugin" / "openclaw.plugin.json").read_text(encoding="utf-8"))
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        skill_version = re.search(r"^version:\s*([^\n]+)$", skill, flags=re.MULTILINE)
+
+        version = package["version"]
+        self.assertEqual(pyproject["project"]["version"], version)
+        self.assertEqual(clawhub["version"], version)
+        self.assertEqual(plugin_package["version"], version)
+        self.assertEqual(plugin["version"], version)
+        self.assertIsNotNone(skill_version)
+        self.assertEqual(skill_version.group(1).strip(), version)
+        self.assertEqual(set(package["bin"]), set(pyproject["project"]["scripts"]))
+        for script_path in package["bin"].values():
+            self.assertTrue((root / script_path).exists(), script_path)
+
     def test_config_and_host_adapters_expose_stable_entrypoints(self):
         from shopping_cli import config
         from shopping_cli.adapters import hermes, openclaw

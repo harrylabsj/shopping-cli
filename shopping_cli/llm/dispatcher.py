@@ -550,6 +550,14 @@ def dispatch_marketplace_tool(
     db_path: str | Path,
     tool_name: str,
     arguments: dict[str, Any] | None = None,
+    *,
+    token_scope: str,
     source_id: str = "llm-tool",
+    actor: str = "",
 ) -> dict[str, Any]:
-    return MarketplaceToolDispatcher(db_path, source_id=source_id).dispatch(tool_name, arguments)
+    return MarketplaceToolDispatcher(
+        db_path,
+        source_id=source_id,
+        actor=actor,
+        token_scope=token_scope,
+    ).dispatch(tool_name, arguments)
