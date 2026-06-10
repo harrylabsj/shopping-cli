@@ -58,8 +58,11 @@ python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer intent \
 
 python3 - "$ROOT_DIR" "$DB_FILE" "$TMP_DIR/ask.json" "$TMP_DIR/agent.json" "$TMP_DIR/summary.json" "$TMP_DIR/intent.json" <<'PY'
 import json
+import re
 import sqlite3
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -91,14 +94,35 @@ assert "name: shopping-cli" in skill
 assert "TODO" not in skill
 
 package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 clawhub = json.loads((root / "clawhub.json").read_text(encoding="utf-8"))
-assert package["name"] == clawhub["name"] == "shopping-cli"
-assert package["version"] == clawhub["version"]
+skill_version = re.search(r"^version:\s*([^\n]+)$", skill, flags=re.MULTILINE)
+assert package["name"] == clawhub["name"] == pyproject["project"]["name"] == "shopping-cli"
+assert skill_version is not None
+assert package["version"] == clawhub["version"] == pyproject["project"]["version"] == skill_version.group(1).strip()
+assert set(package["bin"]) == set(pyproject["project"]["scripts"])
+for script_path in package["bin"].values():
+    assert (root / script_path).exists(), script_path
 plugin_package = json.loads((root / "plugins" / "shopping-plugin" / "package.json").read_text(encoding="utf-8"))
 plugin = json.loads((root / "plugins" / "shopping-plugin" / "openclaw.plugin.json").read_text(encoding="utf-8"))
 assert plugin_package["name"] == plugin["id"] == "shopping-plugin"
 assert plugin["version"] == plugin_package["version"] == package["version"]
 assert plugin_package["openclaw"]["extensions"] == ["./index.js"]
+
+pack = subprocess.run(
+    ["npm", "pack", "--dry-run", "--json"],
+    cwd=root,
+    check=True,
+    text=True,
+    stdout=subprocess.PIPE,
+)
+pack_files = {entry["path"] for entry in json.loads(pack.stdout)[0]["files"]}
+for path in pack_files:
+    assert "__pycache__" not in path, path
+    assert not path.endswith((".pyc", ".pyo", ".pyd")), path
+    assert not path.startswith("docs/code-review-"), path
+for required in ("SKILL.md", "pyproject.toml", "shopping_cli/cli.py", "plugins/shopping-plugin/index.js", "scripts/shopping.py"):
+    assert required in pack_files, required
 
 openai_yaml = (root / "agents" / "openai.yaml").read_text(encoding="utf-8")
 assert 'display_name: "shopping-cli"' in openai_yaml

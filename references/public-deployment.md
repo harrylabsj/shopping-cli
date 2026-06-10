@@ -1,20 +1,70 @@
-# Local API Deployment Notes
+# Marketplace Deployment Guide
 
-Hosted deployment is deferred for the MVP. For local demos, run the API with SQLite:
+`shopping-cli` can run the Marketplace API as a standalone consultation service for a small public pilot. This release is still SQLite-backed and consultation-only: it does not process payments, create orders, reserve stock, handle refunds, dispatch couriers, or claim delivery success.
 
-```bash
-pip install -e '.[api]'
-export SHOPPING_ADMIN_TOKEN='replace-with-a-long-random-secret'
-export SHOPPING_CHANNEL_TOKENS='telegram:replace-with-channel-secret'
-python3 scripts/shopping_api.py --db /data/shopping-cli.sqlite --host 0.0.0.0 --port 8765
-```
+## Local container deployment
 
-Docker Compose runs the same API service and stores SQLite data in a volume:
+Create a deployment env file from `marketplace.example.env` and replace every `replace-with-*` value with a long random secret before starting the service.
 
 ```bash
 docker compose --env-file marketplace.example.env up --build
 ```
 
-`SHOPPING_ADMIN_TOKEN` is required for API merchant onboarding. Channel ingress through `/channels/messages` is disabled unless `SHOPPING_CHANNEL_TOKENS` or `SHOPPING_CHANNEL_TOKEN` is configured.
+The compose file binds the API to `127.0.0.1` by default. To expose it through a reverse proxy on the host, set `SHOPPING_API_BIND=0.0.0.0` intentionally and terminate TLS at Nginx, Caddy, SLB, or another edge proxy.
 
-Before any public launch, add TLS, identity, authorization policy, audit logs, backups, monitoring, abuse handling, and formal merchant confirmation workflows.
+## Required production configuration
+
+Set these values for a public pilot:
+
+```bash
+SHOPPING_DEPLOYMENT_PROFILE=production
+SHOPPING_API_HOST=0.0.0.0
+SHOPPING_API_PORT=8765
+SHOPPING_DB=/data/shopping-cli.sqlite
+SHOPPING_PUBLIC_BASE_URL=https://marketplace.example.com
+SHOPPING_ADMIN_TOKEN=<long-random-secret>
+SHOPPING_BUYER_BOOTSTRAP_TOKEN=<long-random-secret>
+SHOPPING_CHANNEL_TOKENS=telegram:<long-random-secret>,whatsapp:<long-random-secret>
+```
+
+`SHOPPING_ADMIN_TOKEN` protects merchant onboarding. `SHOPPING_BUYER_BOOTSTRAP_TOKEN` protects buyer conversation creation. Channel ingress through `/channels/messages` is disabled unless `SHOPPING_CHANNEL_TOKENS` or `SHOPPING_CHANNEL_TOKEN` is configured.
+
+## Health check
+
+Use `/health` for container and load-balancer health checks:
+
+```bash
+curl -fsS http://127.0.0.1:8765/health
+```
+
+The response reports non-secret deployment status, including database connectivity and whether required tokens are configured. In `production`, placeholder or missing required tokens make `ok` false.
+
+## Alibaba Cloud pilot shape
+
+A small pilot can run on Alibaba Cloud with:
+
+- ECS or a single container host for the API.
+- A persistent disk mounted at `/data` for SQLite.
+- SLB or Nginx/Caddy for HTTPS termination.
+- Security groups that expose only HTTPS publicly.
+- SLS or host log collection for API/container logs.
+- Scheduled backups of `/data/shopping-cli.sqlite`.
+- Secret storage outside the image and repo.
+
+Do not run multiple API replicas against the same SQLite file. If you need horizontal scaling, failover, multi-region availability, or high write concurrency, migrate the database layer first.
+
+## RDS/Postgres boundary
+
+This release does not support Postgres or RDS. `SHOPPING_DATABASE_URL=postgres://...` fails fast so operators do not accidentally deploy with an unsupported database. RDS support requires a separate migration plan for SQL dialects, schema migrations, connection pooling, transaction semantics, and integration tests.
+
+## Public launch checklist
+
+Before opening the marketplace beyond a controlled pilot:
+
+- HTTPS is mandatory.
+- Rotate every placeholder token and store secrets outside source control.
+- Back up SQLite regularly and test restore.
+- Capture API logs and audit events for merchant/buyer support.
+- Put rate limiting or abuse controls at the edge.
+- Document merchant human-review operations.
+- Keep the product boundary clear: consultation only, no payments, no order creation, no stock reservation, no refunds, no delivery claims.

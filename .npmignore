@@ -10,7 +10,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
-.git/
 build/
 dist/
 *.egg-info/
@@ -18,7 +17,3 @@ docs/code-review-*.md
 *.sqlite
 *.sqlite3
 shopping-cli.sqlite
-mai-demo.json
-mai-registry.json
-seller.json
-buyer.json
