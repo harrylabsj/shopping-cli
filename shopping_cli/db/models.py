@@ -40,6 +40,22 @@ SCHEMA = [
     )
     """,
     """
+    create table if not exists policies (
+        merchant_id text not null,
+        code text not null,
+        category text not null default '',
+        title text not null default '',
+        body text not null,
+        tags_json text not null default '[]',
+        high_risk integer not null default 0,
+        active integer not null default 1,
+        created_at text not null,
+        updated_at text not null,
+        primary key (merchant_id, code),
+        foreign key (merchant_id) references merchants(id)
+    )
+    """,
+    """
     create table if not exists delivery_rules (
         merchant_id text primary key,
         service_area text not null default '',
@@ -261,6 +277,10 @@ INDEXES = [
     """
     create index if not exists idx_merchants_city_lower
     on merchants(lower(city), id)
+    """,
+    """
+    create index if not exists idx_policies_merchant_active_code
+    on policies(merchant_id, active, code)
     """,
     """
     create index if not exists idx_buyer_request_idempotency_updated

@@ -44,6 +44,7 @@ from shopping_cli.core.catalog import (
     upsert_delivery_rule,
 )
 from shopping_cli.core.channels import ingest_buyer_message
+from shopping_cli.core.policies import create_policy, list_policies, policy_summary, search_policies
 from shopping_cli.core.conversations import merchant_conversations
 from shopping_cli.core.conversations import add_flag, append_message, conversation_summary, ensure_conversation, require_open_conversation
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
@@ -390,6 +391,73 @@ def cmd_search_merchants(args: argparse.Namespace) -> None:
                 f"{merchant['service_area'] or '-':<22} "
                 f"{merchant['name']}"
             )
+        return
+    emit({"ok": True, "query": args.query or "", "results": results}, args.format)
+
+
+def emit_policy_table(policies: list[dict[str, Any]], empty_message: str) -> None:
+    if not policies:
+        print(empty_message)
+        return
+    print(f"{'CODE':<14} {'RISK':<5} {'CATEGORY':<20} TITLE")
+    for policy in policies:
+        risk = "HIGH" if policy.get("high_risk") else "-"
+        print(
+            f"{policy['code']:<14} "
+            f"{risk:<5} "
+            f"{(policy['category'] or '-'):<20} "
+            f"{policy['title'] or ''}"
+        )
+
+
+def cmd_policy_add(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        policy = create_policy(
+            conn,
+            merchant_id=args.merchant,
+            code=args.code,
+            body=args.body,
+            category=args.category or "",
+            title=args.title or "",
+            tags=args.tags or "",
+            high_risk=args.high_risk,
+        )
+    emit({"ok": True, "policy": policy, "message": f"Policy added: {args.merchant}/{args.code}"}, args.format)
+
+
+def cmd_policy_list(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        policies = list_policies(
+            conn,
+            merchant_id=args.merchant or "",
+            category=args.category or "",
+            limit=args.limit,
+            offset=args.offset,
+        )
+    if args.format == "text":
+        emit_policy_table(policies, "No policies found.")
+        return
+    emit({"ok": True, "results": policies}, args.format)
+
+
+def cmd_policy_show(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        policy = policy_summary(conn, args.merchant, args.code)
+    emit({"ok": True, "policy": policy}, args.format)
+
+
+def cmd_search_policies(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        results = search_policies(
+            conn,
+            query=args.query or "",
+            merchant_id=args.merchant or "",
+            category=args.category or "",
+            limit=args.limit,
+            offset=args.offset,
+        )
+    if args.format == "text":
+        emit_policy_table(results, f"No policies found for {args.query or 'all policies'}.")
         return
     emit({"ok": True, "query": args.query or "", "results": results}, args.format)
 
@@ -1888,6 +1956,31 @@ def build_parser() -> argparse.ArgumentParser:
     product_update.add_argument("--format", choices=["text", "json"], default="text")
     product_update.set_defaults(func=cmd_product_update)
 
+    policy = subparsers.add_parser("policy", help="Manage merchant policy reference clauses")
+    policy_sub = policy.add_subparsers(dest="policy_command", required=True)
+    policy_add = policy_sub.add_parser("add", help="Publish a policy clause")
+    policy_add.add_argument("--merchant", required=True)
+    policy_add.add_argument("--code", required=True)
+    policy_add.add_argument("--body", required=True)
+    policy_add.add_argument("--category", default="")
+    policy_add.add_argument("--title", default="")
+    policy_add.add_argument("--tags", default="")
+    policy_add.add_argument("--high-risk", action="store_true")
+    policy_add.add_argument("--format", choices=["text", "json"], default="text")
+    policy_add.set_defaults(func=cmd_policy_add)
+    policy_list = policy_sub.add_parser("list", help="List policy clauses")
+    policy_list.add_argument("--merchant", default="")
+    policy_list.add_argument("--category", default="")
+    policy_list.add_argument("--limit", type=positive_int, default=50)
+    policy_list.add_argument("--offset", type=non_negative_int, default=0)
+    policy_list.add_argument("--format", choices=["text", "json"], default="text")
+    policy_list.set_defaults(func=cmd_policy_list)
+    policy_show = policy_sub.add_parser("show", help="Show one policy clause")
+    policy_show.add_argument("--merchant", required=True)
+    policy_show.add_argument("--code", required=True)
+    policy_show.add_argument("--format", choices=["text", "json"], default="text")
+    policy_show.set_defaults(func=cmd_policy_show)
+
     search = subparsers.add_parser("search", help="Search marketplace inventory")
     search_sub = search.add_subparsers(dest="search_command", required=True)
     search_products_parser = search_sub.add_parser("products", help="Search products")
@@ -1907,6 +2000,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_merchants_parser.add_argument("--offset", type=non_negative_int, default=0)
     search_merchants_parser.add_argument("--format", choices=["text", "json"], default="text")
     search_merchants_parser.set_defaults(func=cmd_search_merchants)
+    search_policies_parser = search_sub.add_parser("policies", help="Search merchant policies")
+    search_policies_parser.add_argument("--query", default="")
+    search_policies_parser.add_argument("--merchant", default="")
+    search_policies_parser.add_argument("--category", default="")
+    search_policies_parser.add_argument("--limit", type=positive_int, default=10)
+    search_policies_parser.add_argument("--offset", type=non_negative_int, default=0)
+    search_policies_parser.add_argument("--format", choices=["text", "json"], default="text")
+    search_policies_parser.set_defaults(func=cmd_search_policies)
 
     channel = subparsers.add_parser("channel", help="Ingest external channel messages")
     channel_sub = channel.add_subparsers(dest="channel_command", required=True)
