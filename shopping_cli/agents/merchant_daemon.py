@@ -12,6 +12,16 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional runtime dependency
+    psutil = None  # type: ignore[assignment]
+
 from shopping_cli.agents import merchant_agent
 from shopping_cli.db.session import db_session, decode_json, now_iso
 
@@ -109,9 +119,62 @@ def write_json_atomic(path: Path, value: Any) -> None:
     tmp.replace(path)
 
 
+class _PidFileLock:
+    """Advisory exclusive lock on a companion lock file for the PID file.
+
+    Uses ``fcntl`` on POSIX. On platforms without ``fcntl`` (e.g. Windows)
+    the lock is a no-op so the daemon remains functional; concurrent starts
+    are still guarded by the atomic PID-file write and the process check.
+    """
+
+    def __init__(self, pid_file: Path) -> None:
+        self.lock_path = Path(pid_file).with_suffix(pid_file.suffix + ".lock")
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_PidFileLock":
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(
+            str(self.lock_path),
+            os.O_RDWR | os.O_CREAT,
+            0o644,
+        )
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._fd is None:
+            return
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = None
+
+
 def is_process_running(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if psutil is None:
+        return _is_process_running_legacy(pid)
+    try:
+        if not psutil.pid_exists(pid):
+            return False
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+
+
+def _is_process_running_legacy(pid: int) -> bool:
+    """Unix-only fallback when psutil is unavailable."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -202,84 +265,87 @@ def start_agent(
 
     paths = agent_paths(merchant_id, state_dir)
     ensure_agent_dirs(paths)
-    pid_record = read_json(paths["pid_file"], {})
-    existing_pid = safe_non_negative_int(pid_record.get("pid"))
-    stale_replaced = bool(existing_pid and not is_process_running(existing_pid))
-    if existing_pid and not stale_replaced:
-        raise SystemExit(f"Agent already running for merchant {merchant_id}: pid {existing_pid}")
-    if paths["stop_file"].exists():
-        paths["stop_file"].unlink()
 
-    if not api_url:
-        with db_session(db_path) as conn:
-            merchant_agent.heartbeat(conn, merchant_id, status="online")
+    with _PidFileLock(paths["pid_file"]):
+        pid_record = read_json(paths["pid_file"], {})
+        existing_pid = safe_non_negative_int(pid_record.get("pid"))
+        stale_replaced = bool(existing_pid and not is_process_running(existing_pid))
+        if existing_pid and not stale_replaced:
+            raise SystemExit(f"Agent already running for merchant {merchant_id}: pid {existing_pid}")
+        if paths["stop_file"].exists():
+            paths["stop_file"].unlink()
 
-    repo_root = Path(__file__).resolve().parents[2]
-    command = [
-        sys.executable,
-        "-m",
-        "shopping_cli.cli",
-        "--db",
-        str(Path(db_path).expanduser()),
-        "agent",
-        "run",
-        "--merchant",
-        merchant_id,
-        "--interval",
-        str(interval),
-        "--format",
-        "json",
-        "--state-file",
-        str(paths["state_file"]),
-        "--stop-file",
-        str(paths["stop_file"]),
-    ]
-    if host:
-        command.extend(["--host", host])
-    if session_id:
-        command.extend(["--session-id", session_id])
-    env = os.environ.copy()
-    env["SHOPPING_CLI_STATE_DIR"] = str(paths["state_dir"])
-    if api_url:
-        env["SHOPPING_MARKETPLACE_API_URL"] = api_url
+        if not api_url:
+            with db_session(db_path) as conn:
+                merchant_agent.heartbeat(conn, merchant_id, status="online")
+
+        repo_root = Path(__file__).resolve().parents[2]
+        command = [
+            sys.executable,
+            "-m",
+            "shopping_cli.cli",
+            "--db",
+            str(Path(db_path).expanduser()),
+            "agent",
+            "run",
+            "--merchant",
+            merchant_id,
+            "--interval",
+            str(interval),
+            "--format",
+            "json",
+            "--state-file",
+            str(paths["state_file"]),
+            "--stop-file",
+            str(paths["stop_file"]),
+        ]
         if host:
-            env["SHOPPING_AGENT_HOST"] = host
+            command.extend(["--host", host])
         if session_id:
-            env["SHOPPING_AGENT_SESSION_ID"] = session_id
-        if agent_token:
-            env["SHOPPING_AGENT_TOKEN"] = agent_token
-            env.pop("SHOPPING_MERCHANT_TOKEN", None)
-        elif merchant_token:
-            env["SHOPPING_MERCHANT_TOKEN"] = merchant_token
-            env.pop("SHOPPING_AGENT_TOKEN", None)
-    with paths["log_file"].open("ab", buffering=0) as log:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            cwd=str(repo_root),
-            env=env,
-            start_new_session=True,
-        )
+            command.extend(["--session-id", session_id])
+        env = os.environ.copy()
+        env["SHOPPING_CLI_STATE_DIR"] = str(paths["state_dir"])
+        if api_url:
+            env["SHOPPING_MARKETPLACE_API_URL"] = api_url
+            if host:
+                env["SHOPPING_AGENT_HOST"] = host
+            if session_id:
+                env["SHOPPING_AGENT_SESSION_ID"] = session_id
+            if agent_token:
+                env["SHOPPING_AGENT_TOKEN"] = agent_token
+                env.pop("SHOPPING_MERCHANT_TOKEN", None)
+            elif merchant_token:
+                env["SHOPPING_MERCHANT_TOKEN"] = merchant_token
+                env.pop("SHOPPING_AGENT_TOKEN", None)
+        with paths["log_file"].open("ab", buffering=0) as log:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                cwd=str(repo_root),
+                env=env,
+                start_new_session=True,
+            )
 
-    started_at = now_iso()
-    pid_payload = {
-        "pid": process.pid,
-        "merchant_id": merchant_id,
-        "db_path": str(Path(db_path).expanduser()),
-        "interval": interval,
-        "mode": mode,
-        "api_url": api_url,
-        "host": host,
-        "session_id": session_id,
-        "started_at": started_at,
-        "command": command,
-        "log_file": str(paths["log_file"]),
-        "state_file": str(paths["state_file"]),
-        "stop_file": str(paths["stop_file"]),
-    }
-    write_json_atomic(paths["pid_file"], pid_payload)
+        started_at = now_iso()
+        pid_payload = {
+            "pid": process.pid,
+            "merchant_id": merchant_id,
+            "db_path": str(Path(db_path).expanduser()),
+            "interval": interval,
+            "mode": mode,
+            "api_url": api_url,
+            "host": host,
+            "session_id": session_id,
+            "started_at": started_at,
+            "command": command,
+            "log_file": str(paths["log_file"]),
+            "state_file": str(paths["state_file"]),
+            "stop_file": str(paths["stop_file"]),
+        }
+        write_json_atomic(paths["pid_file"], pid_payload)
+
     write_state(
         paths["state_file"],
         merchant_id,
@@ -313,12 +379,15 @@ def stop_agent(
 ) -> dict[str, Any]:
     timeout = safe_non_negative_float(timeout, 5.0, maximum=MAX_AGENT_STOP_TIMEOUT_SECONDS)
     paths = agent_paths(merchant_id, state_dir)
-    pid_record = read_json(paths["pid_file"], {})
-    pid = safe_non_negative_int(pid_record.get("pid"))
-    mode = str(pid_record.get("mode") or "sqlite")
-    host = str(pid_record.get("host") or "")
-    session_id = str(pid_record.get("session_id") or "")
-    was_running = is_process_running(pid)
+    with _PidFileLock(paths["pid_file"]):
+        pid_record = read_json(paths["pid_file"], {})
+        pid = safe_non_negative_int(pid_record.get("pid"))
+        mode = str(pid_record.get("mode") or "sqlite")
+        host = str(pid_record.get("host") or "")
+        session_id = str(pid_record.get("session_id") or "")
+        api_url = str(pid_record.get("api_url") or "")
+        was_running = is_process_running(pid)
+
     paths["stop_file"].parent.mkdir(parents=True, exist_ok=True)
     paths["stop_file"].write_text(now_iso(), encoding="utf-8")
     if was_running:
@@ -332,10 +401,12 @@ def stop_agent(
             if state.get("running") is False or not is_process_running(pid):
                 break
             time.sleep(0.1)
-    state_after_stop = read_json(paths["state_file"], {})
-    running = is_process_running(pid) and state_after_stop.get("running") is not False
-    if not running and paths["pid_file"].exists():
-        paths["pid_file"].unlink()
+
+    with _PidFileLock(paths["pid_file"]):
+        state_after_stop = read_json(paths["state_file"], {})
+        running = is_process_running(pid) and state_after_stop.get("running") is not False
+        if not running and paths["pid_file"].exists():
+            paths["pid_file"].unlink()
 
     if mode != "api":
         with db_session(db_path) as conn:
@@ -354,7 +425,7 @@ def stop_agent(
             "stopped_at": now_iso(),
             "stop_timeout": running,
             "mode": mode,
-            "api_url": str(pid_record.get("api_url") or ""),
+            "api_url": api_url,
             "host": host,
             "session_id": session_id,
         },
@@ -364,7 +435,7 @@ def stop_agent(
         "merchant_id": merchant_id,
         "pid": pid or None,
         "mode": mode,
-        "api_url": str(pid_record.get("api_url") or ""),
+        "api_url": api_url,
         "host": host,
         "session_id": session_id,
         "was_running": was_running,
@@ -378,8 +449,9 @@ def stop_agent(
 
 def status_agent(db_path: str | Path, merchant_id: str, state_dir: str | Path | None = None) -> dict[str, Any]:
     paths = agent_paths(merchant_id, state_dir)
-    pid_record = read_json(paths["pid_file"], {})
-    pid = safe_non_negative_int(pid_record.get("pid"))
+    with _PidFileLock(paths["pid_file"]):
+        pid_record = read_json(paths["pid_file"], {})
+        pid = safe_non_negative_int(pid_record.get("pid"))
     state = read_json(paths["state_file"], {})
     mode = str(pid_record.get("mode") or state.get("mode") or "sqlite")
     host = str(pid_record.get("host") or state.get("host") or "")

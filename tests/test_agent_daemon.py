@@ -460,7 +460,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
             state_dir = tmp_path / "state"
 
             class FakeProcess:
-                pid = 12345
+                pid = 987654321
 
             with (
                 patch.dict(os.environ, {"SHOPPING_MERCHANT_TOKEN": "stale_merchant_secret"}, clear=False),
@@ -516,7 +516,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
             state_dir = tmp_path / "state"
 
             class FakeProcess:
-                pid = 12345
+                pid = 987654321
 
             with patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=FakeProcess()):
                 started = merchant_daemon.start_agent(
@@ -541,7 +541,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
             state_dir = tmp_path / "state"
 
             class FakeProcess:
-                pid = 12345
+                pid = 987654321
 
             with patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=FakeProcess()):
                 started = merchant_daemon.start_agent(
@@ -565,7 +565,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
             state_dir = tmp_path / "state"
 
             class FakeProcess:
-                pid = 12345
+                pid = 987654321
 
             with patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=FakeProcess()):
                 started = merchant_daemon.start_agent(

@@ -10,6 +10,24 @@ python3 "$ROOT_DIR/scripts/shopping_registry.py" --help >/dev/null
 bash "$ROOT_DIR/scripts/install.sh" --both --dry-run >/dev/null
 python3 -m unittest discover -s "$ROOT_DIR/tests"
 node --test "$ROOT_DIR/tests/shopping_plugin.test.mjs"
+PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -s "$ROOT_DIR/tests" -p 'test_db_session.py'
+python3 "$ROOT_DIR/scripts/benchmark_search.py" \
+  --merchants 2 \
+  --products-per-merchant 3 \
+  --iterations 2 \
+  --limit 2 >"$TMP_DIR/search_benchmark.json"
+
+python3 - "$TMP_DIR/search_benchmark.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+benchmark = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert benchmark["index_after"]["healthy"] is True
+assert benchmark["index_after"]["active_product_count"] == benchmark["seeded_products"]
+assert benchmark["iterations"] == 2
+assert benchmark["last_result_count"] >= 1
+PY
 
 python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" merchant create \
   --id seller-a \

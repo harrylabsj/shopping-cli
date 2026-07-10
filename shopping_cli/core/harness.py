@@ -7,7 +7,10 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
+from shopping_cli.core.errors import NotFoundError
 from shopping_cli.db.session import decode_json, encode_json, now_iso
+
+AUDIT_EVENT_SCHEMA_VERSION = 1
 
 
 def next_actor_for_review_reason(reason: str) -> str:
@@ -27,6 +30,13 @@ def next_actor_for_status(status: str, reason: str = "") -> str:
     }.get(status, "")
 
 
+def structured_audit_details(event: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(details or {})
+    payload.setdefault("schema_version", AUDIT_EVENT_SCHEMA_VERSION)
+    payload.setdefault("event_type", str(event or ""))
+    return payload
+
+
 def append_audit_event(
     conn: sqlite3.Connection,
     conversation_id: str,
@@ -34,12 +44,13 @@ def append_audit_event(
     event: str,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_details = structured_audit_details(event, details)
     cursor = conn.execute(
         """
         insert into audit_events(conversation_id, actor, event, details_json, created_at)
         values (?, ?, ?, ?, ?)
         """,
-        (conversation_id, actor, event, encode_json(details or {}), now_iso()),
+        (conversation_id, actor, event, encode_json(normalized_details), now_iso()),
     )
     return audit_event_summary(conn, int(cursor.lastrowid))
 
@@ -58,7 +69,7 @@ def audit_event_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
 def audit_event_summary(conn: sqlite3.Connection, event_id: int) -> dict[str, Any]:
     row = conn.execute("select * from audit_events where id = ?", (event_id,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown audit event: {event_id}")
+        raise NotFoundError(f"Unknown audit event: {event_id}")
     return audit_event_summary_from_row(row)
 
 
@@ -301,7 +312,7 @@ def agent_message_process_summary(conn: sqlite3.Connection, agent_id: str, messa
         (agent_id, message_id),
     ).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown agent message process: {agent_id} {message_id}")
+        raise NotFoundError(f"Unknown agent message process: {agent_id} {message_id}")
     return {
         "agent_id": row["agent_id"],
         "message_id": row["message_id"],

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from shopping_cli import cli  # noqa: E402
 from shopping_cli.core.catalog import create_merchant  # noqa: E402
+from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError  # noqa: E402
 from shopping_cli.core.policies import (  # noqa: E402
     create_policy,
     list_policies,
@@ -89,16 +90,16 @@ class PolicyCoreTest(unittest.TestCase):
         self.assertTrue(policy["high_risk"])
 
     def test_blank_body_is_rejected(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ValidationError):
             create_policy(self.conn, "yunqi-tea", code="POL-X", body="   ")
 
     def test_unknown_merchant_is_rejected(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(NotFoundError):
             create_policy(self.conn, "ghost", code="POL-X", body="something")
 
     def test_duplicate_code_for_same_merchant_is_rejected(self):
         create_policy(self.conn, "yunqi-tea", code="POL-SHIP-1", body="原条目")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ConflictError):
             create_policy(self.conn, "yunqi-tea", code="POL-SHIP-1", body="重复条目")
 
     def test_same_code_allowed_across_merchants(self):

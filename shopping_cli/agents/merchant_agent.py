@@ -11,6 +11,7 @@ from typing import Any
 from shopping_cli import VERSION
 from shopping_cli.agents.buyer_cli import MVP_WARNINGS
 from shopping_cli.agents.tools import DEFAULT_CAPABILITIES, MerchantAgentTools, SQLiteMerchantAgentTools, record_heartbeat
+from shopping_cli.core.errors import NotFoundError
 from shopping_cli.core.harness import MAX_STALE_TTL_SECONDS, message_idempotency_key
 from shopping_cli.core.risk import human_review_reason
 
@@ -146,7 +147,7 @@ def generate_reply(
     if conversation.get("sku"):
         try:
             product = tools.product_summary(conversation["sku"])
-        except SystemExit:
+        except (NotFoundError, SystemExit):
             product = None
     reason = human_review_reason(buyer_message["text"], product_found=product is not None)
     if not reason and buyer_message.get("intent") in {"negotiate", "quote_request"}:

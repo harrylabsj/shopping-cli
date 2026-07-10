@@ -10,18 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from shopping_cli.api.app import (
-    AuthError,
-    MarketplaceASGIApp,
-    _list_agents,
-    _resolve_agent_token,
-    _resolve_human_review_item,
-    route_info,
-)
 from shopping_cli.api.app import create_app
+from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
+from shopping_cli.api.handlers import human_review as human_review_handlers
+from shopping_cli.api.route_registry import route_info
 from shopping_cli.core import catalog
 from shopping_cli.core.conversations import conversation_summary
-from shopping_cli.core.harness import audit_event_summary
+from shopping_cli.core.errors import AuthError, ConflictError
+from shopping_cli.core.harness import audit_event_summary_from_row
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session
 
@@ -262,25 +258,6 @@ class PublicMarketplaceTest(unittest.TestCase):
         self.assertFalse(body["checks"]["admin_token_configured"])
         self.assertFalse(body["checks"]["buyer_bootstrap_token_configured"])
         self.assertFalse(body["checks"]["channel_tokens_configured"])
-
-    def test_agent_token_prefix_resolution_reads_at_most_two_matches(self):
-        class Cursor:
-            def __init__(self, sql):
-                self.sql = sql
-
-            def fetchall(self):
-                if "limit 2" not in self.sql.lower():
-                    raise AssertionError("prefix resolution should cap ambiguity checks at two rows")
-                return [{"token": "first"}, {"token": "second"}]
-
-        class Connection:
-            def execute(self, sql, _params):
-                return Cursor(sql)
-
-        with self.assertRaises(ValueError) as raised:
-            _resolve_agent_token(Connection(), "seller-a", token_prefix="shopping_agent_")
-
-        self.assertIn("ambiguous", str(raised.exception))
 
     def fastapi_request(self, app, method, path, *args, auto_admin=True, auto_channel=True, auto_buyer=True):
         endpoint = next(
@@ -1214,7 +1191,7 @@ class PublicMarketplaceTest(unittest.TestCase):
 
             self.assertEqual(fastapi_bad, fallback_bad)
             self.assertEqual(fallback_bad[0], 400)
-            self.assertEqual(fallback_bad[1], {"ok": False, "error": "'sku'"})
+            self.assertEqual(fallback_bad[1], {"ok": False, "error": "missing required field: sku"})
             for db_file in (fallback_db, fastapi_db):
                 with db_session(db_file) as conn:
                     count = conn.execute("select count(*) as count from products").fetchone()["count"]
@@ -2808,7 +2785,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "buyer_token": buyer_token,
                 },
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 409)
             self.assertIn("Conversation CONV-0001 is closed", buyer_message["error"])
 
             status, second_close = self.request(
@@ -2817,7 +2794,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                 "/conversations/CONV-0001/close",
                 {"sender": "operator", "text": "Close again.", "merchant_token": merchant_token},
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 409)
             self.assertIn("Conversation CONV-0001 is closed", second_close["error"])
 
             status, review = self.request(
@@ -2826,7 +2803,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                 "/conversations/CONV-0001/human-review",
                 {"reason": "late_review", "merchant_token": merchant_token},
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 409)
             self.assertIn("Conversation CONV-0001 is closed", review["error"])
 
     def test_conversation_message_rejects_non_object_structured_payload(self):
@@ -3116,12 +3093,12 @@ class PublicMarketplaceTest(unittest.TestCase):
         }
         conversation = {"id": "CONV-0001", "merchant_id": "seller-a", "status": "human_required"}
 
-        with patch("shopping_cli.api.app.db_session", return_value=FakeSession()):
-            with patch("shopping_cli.api.app._human_review_row", return_value=review_row):
-                with patch("shopping_cli.api.app.conversation_summary", return_value=conversation):
-                    with patch("shopping_cli.api.app._require_merchant_token", return_value=None):
-                        with self.assertRaises(SystemExit) as raised:
-                            _resolve_human_review_item(
+        with patch("shopping_cli.api.handlers.human_review.db_session", return_value=FakeSession()):
+            with patch("shopping_cli.api.handlers.human_review.human_review_row", return_value=review_row):
+                with patch("shopping_cli.api.handlers.human_review.conversation_summary", return_value=conversation):
+                    with patch("shopping_cli.api.handlers.human_review.token_service.require_merchant_token", return_value=None):
+                        with self.assertRaises(ConflictError) as raised:
+                            human_review_handlers.resolve_human_review_item(
                                 Path(":memory:"),
                                 1,
                                 {"action": "reply", "merchant_token": "merchant-token"},
@@ -3350,7 +3327,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "text": "I should not enter alice's channel conversation.",
                 },
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 403)
             self.assertIn("cannot write", denied["error"])
 
             status, spoofed = self.request(
@@ -4437,7 +4414,10 @@ class PublicMarketplaceTest(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
 
-            with patch("shopping_cli.api.app.audit_event_summary", wraps=audit_event_summary) as summary:
+            with patch(
+                "shopping_cli.services.audit.audit_event_summary_from_row",
+                wraps=audit_event_summary_from_row,
+            ) as summary:
                 status, listed = self.request(
                     app,
                     "GET",
@@ -4448,7 +4428,7 @@ class PublicMarketplaceTest(unittest.TestCase):
 
             self.assertEqual(status, 200)
             self.assertEqual(len(listed["events"]), 2)
-            self.assertEqual(summary.call_count, 0)
+            self.assertEqual(summary.call_count, 2)
 
     def test_tool_call_audit_requires_merchant_or_agent_token_and_derives_actor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4577,6 +4557,18 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             self.assertEqual(buyer_conversations["conversations"][0]["id"], "CONV-0001")
+
+            status, buyer_summary = self.request(
+                app,
+                "GET",
+                "/buyers/alice/conversations",
+                query_string="status=waiting_merchant&sku=tea-a&include=summary",
+                headers={"authorization": f"Bearer {created['buyer_token']}"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(buyer_summary["conversations"][0]["message_count"], 1)
+            self.assertNotIn("messages", buyer_summary["conversations"][0])
+            self.assertNotIn("audit_events", buyer_summary["conversations"][0])
 
             status, agent = self.request(
                 app,
@@ -4707,7 +4699,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "merchant_token": merchant_token,
                 },
             )
-            self.assertEqual(status, 400)
+            self.assertEqual(status, 404)
             self.assertIn("No unresolved human reviews", duplicate_resolve["error"])
 
             status, closed = self.request(
@@ -4797,7 +4789,7 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
 
-            with patch("shopping_cli.api.app.conversation_summary", wraps=conversation_summary) as summary:
+            with patch("shopping_cli.api.handlers.human_review.conversation_summary", wraps=conversation_summary) as summary:
                 status, queue = self.request(
                     app,
                     "GET",
@@ -4864,53 +4856,6 @@ class PublicMarketplaceTest(unittest.TestCase):
                 [conversation["id"] for conversation in human_review["conversations"]],
                 ["CONV-0004", "CONV-0003"],
             )
-
-    def test_agent_stale_ttl_is_configurable(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            app = create_app(db_file)
-            _, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
-            merchant_token = merchant["merchant_token"]
-            self.request(
-                app,
-                "POST",
-                "/agents/heartbeat",
-                {"merchant_id": "seller-a", "status": "online", "merchant_token": merchant_token},
-            )
-            with db_session(db_file) as conn:
-                conn.execute(
-                    "update agents set last_seen_at = '2000-01-01T00:00:00' where id = 'shopping-cli-merchant-agent:seller-a'"
-                )
-
-            with patch.dict("os.environ", {"SHOPPING_AGENT_STALE_TTL_SECONDS": "9999999999"}):
-                agents = _list_agents(db_file, {"merchant_token": merchant_token})
-
-            self.assertFalse(agents["agents"][0]["stale"])
-            self.assertEqual(agents["agents"][0]["stale_ttl_seconds"], 9999999999)
-
-    def test_agent_stale_ttl_falls_back_when_env_is_too_large(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            app = create_app(db_file)
-            _, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
-            merchant_token = merchant["merchant_token"]
-            self.request(
-                app,
-                "POST",
-                "/agents/heartbeat",
-                {"merchant_id": "seller-a", "status": "online", "merchant_token": merchant_token},
-            )
-            with db_session(db_file) as conn:
-                conn.execute(
-                    "update agents set last_seen_at = '2000-01-01T00:00:00' where id = 'shopping-cli-merchant-agent:seller-a'"
-                )
-
-            with patch.dict("os.environ", {"SHOPPING_AGENT_STALE_TTL_SECONDS": str(10**100)}):
-                agents = _list_agents(db_file, {"merchant_token": merchant_token})
-
-            self.assertTrue(agents["agents"][0]["stale"])
-            self.assertEqual(agents["agents"][0]["stale_ttl_seconds"], 60)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,14 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import shopping  # noqa: E402
+from helpers import run_cli as run_cli_helper  # noqa: E402
 
 
 class ShoppingCliMvpTest(unittest.TestCase):
     def run_cli(self, db_file, *args):
-        output = StringIO()
-        with redirect_stdout(output):
-            shopping.main(["--db", str(db_file), *args])
-        return output.getvalue()
+        return run_cli_helper(db_file, *args)
 
     def run_cli_with_input(self, db_file, input_text, *args):
         output = StringIO()

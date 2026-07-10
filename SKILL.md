@@ -24,17 +24,20 @@ If a conversation is `waiting_merchant` or `human_required`, treat it as pending
 
 ## Quick Start
 
+Use Python **>=3.11**. On 东哥's macOS, system `/usr/bin/python3` may be 3.9 and will fail on PEP 604 type hints; prefer `python3.11` from the Hermes venv when running from source.
+
 ```bash
-python3 scripts/shopping.py --db ./shopping-cli.sqlite merchant create --id seller-a --name "West Lake Tea" --city Hangzhou --service-area "West Lake" --contact "wechat:westlake" --delivery-fee 12 --delivery-eta-minutes 45 --tags "tea,gift,longjing"
-python3 scripts/shopping.py --db ./shopping-cli.sqlite product add --merchant seller-a --sku tea-a --title "Longjing Gift Box" --price 88 --stock 5 --category tea --tags "longjing,gift" --delivery-attributes "same-city,courier"
-python3 scripts/shopping.py --db ./shopping-cli.sqlite buyer ask --buyer alice --text "longjing gift delivery today" --city Hangzhou --area "West Lake" --format json
-python3 scripts/shopping.py --db ./shopping-cli.sqlite agent run --merchant seller-a --once --format json
-python3 scripts/shopping.py --db ./shopping-cli.sqlite buyer summarize --conversation CONV-0001 --format json
-python3 scripts/shopping.py --db ./shopping-cli.sqlite buyer intent --conversation CONV-0001 --intent purchase_intent --text "Buyer wants merchant confirmation." --format json
-python3 scripts/shopping.py agent start --merchant seller-a --db ./shopping-cli.sqlite --interval 3 --format json
-python3 scripts/shopping.py agent status --merchant seller-a --db ./shopping-cli.sqlite --format json
-python3 scripts/shopping.py agent logs --merchant seller-a --tail 20 --format json
-python3 scripts/shopping.py agent stop --merchant seller-a --db ./shopping-cli.sqlite --format json
+PY=${PYTHON:-python3.11}
+$PY scripts/shopping.py --db ./shopping-cli.sqlite merchant create --id seller-a --name "West Lake Tea" --city Hangzhou --service-area "West Lake" --contact "wechat:westlake" --delivery-fee 12 --delivery-eta-minutes 45 --tags "tea,gift,longjing"
+$PY scripts/shopping.py --db ./shopping-cli.sqlite product add --merchant seller-a --sku tea-a --title "Longjing Gift Box" --price 88 --stock 5 --category tea --tags "longjing,gift" --delivery-attributes "same-city,courier"
+$PY scripts/shopping.py --db ./shopping-cli.sqlite buyer ask --buyer alice --text "longjing gift delivery today" --city Hangzhou --area "West Lake" --format json
+$PY scripts/shopping.py --db ./shopping-cli.sqlite agent run --merchant seller-a --once --format json
+$PY scripts/shopping.py --db ./shopping-cli.sqlite buyer summarize --conversation CONV-0001 --format json
+$PY scripts/shopping.py --db ./shopping-cli.sqlite buyer intent --conversation CONV-0001 --intent purchase_intent --text "Buyer wants merchant confirmation." --format json
+$PY scripts/shopping.py agent start --merchant seller-a --db ./shopping-cli.sqlite --interval 3 --format json
+$PY scripts/shopping.py agent status --merchant seller-a --db ./shopping-cli.sqlite --format json
+$PY scripts/shopping.py agent logs --merchant seller-a --tail 20 --format json
+$PY scripts/shopping.py agent stop --merchant seller-a --db ./shopping-cli.sqlite --format json
 ```
 
 Default database: `~/.local/share/shopping-cli/shopping-cli.sqlite`.
@@ -69,9 +72,9 @@ Use `legacy import --from-json PATH` to import merchants and products from the o
 
 ## Verification
 
-Before claiming the package is ready:
+Before claiming the package is ready, use Python >=3.11:
 
-- `python3 scripts/shopping.py --help`
-- `python3 -m unittest discover -s tests`
+- `$PY scripts/shopping.py --help`
+- `$PY -m unittest discover -s tests`
 - `node --test tests/shopping_plugin.test.mjs`
 - `bash scripts/verify.sh`

@@ -9,6 +9,7 @@ from typing import Any
 
 from shopping_cli.core.catalog import search_products
 from shopping_cli.core.conversations import append_message, conversation_summary, ensure_conversation, message_summary
+from shopping_cli.core.errors import ConflictError, PermissionDenied, ValidationError
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.risk import infer_intent
 from shopping_cli.db.session import now_iso
@@ -44,9 +45,9 @@ def channel_buyer_id(channel: str, external_user_id: str) -> str:
     channel = normalize_channel(channel)
     external_user_id = str(external_user_id or "").strip()
     if not channel:
-        raise SystemExit("channel is required")
+        raise ValidationError("channel is required")
     if not external_user_id:
-        raise SystemExit("external_user_id is required")
+        raise ValidationError("external_user_id is required")
     return f"{channel}:{external_user_id}"
 
 
@@ -104,7 +105,7 @@ def _record_ingress_replay(conn: sqlite3.Connection, row: sqlite3.Row, channel: 
 
 def _existing_ingress_response(conn: sqlite3.Connection, row: sqlite3.Row, buyer_id: str, channel: str) -> dict[str, Any]:
     if row["status"] != PROCESSED_STATUS:
-        raise SystemExit(
+        raise ConflictError(
             f"Channel message {row['external_message_id']} is already being processed for {channel}:{row['external_user_id']}"
         )
     message_id = _safe_non_negative_int(row["message_id"])
@@ -233,7 +234,7 @@ def ingest_buyer_message(
     external_user_id = str(external_user_id or "").strip()
     text = str(text or "")
     if not text.strip():
-        raise SystemExit("text is required")
+        raise ValidationError("text is required")
 
     resolved_buyer_id = channel_buyer_id(channel, external_user_id)
     source_id = f"channel:{channel}"
@@ -244,7 +245,7 @@ def ingest_buyer_message(
             return existing
         conversation = conversation_summary(conn, conversation_id)
         if conversation["buyer_id"] != resolved_buyer_id:
-            raise SystemExit(f"Channel buyer {resolved_buyer_id} cannot write to conversation {conversation_id}")
+            raise PermissionDenied(f"Channel buyer {resolved_buyer_id} cannot write to conversation {conversation_id}")
         message = append_message(
             conn,
             conversation_id,
