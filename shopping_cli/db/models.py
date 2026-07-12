@@ -40,6 +40,22 @@ SCHEMA = [
     )
     """,
     """
+    create table if not exists policies (
+        merchant_id text not null,
+        code text not null,
+        category text not null default '',
+        title text not null default '',
+        body text not null,
+        tags_json text not null default '[]',
+        high_risk integer not null default 0,
+        active integer not null default 1,
+        created_at text not null,
+        updated_at text not null,
+        primary key (merchant_id, code),
+        foreign key (merchant_id) references merchants(id)
+    )
+    """,
+    """
     create table if not exists delivery_rules (
         merchant_id text primary key,
         service_area text not null default '',
@@ -263,6 +279,10 @@ INDEXES = [
     on merchants(lower(city), id)
     """,
     """
+    create index if not exists idx_policies_merchant_active_code
+    on policies(merchant_id, active, code)
+    """,
+    """
     create index if not exists idx_buyer_request_idempotency_updated
     on buyer_request_idempotency(updated_at desc)
     """,
@@ -271,30 +291,3 @@ INDEXES = [
     on buyer_bootstrap_rate_limits(updated_at desc)
     """,
 ]
-
-EXTRA_COLUMNS = {
-    "conversations": [
-        ("next_actor", "text not null default ''"),
-    ],
-    "agents": [
-        ("pid", "integer not null default 0"),
-        ("version", "text not null default ''"),
-        ("last_error", "text not null default ''"),
-        ("checked_count", "integer not null default 0"),
-        ("replied_count", "integer not null default 0"),
-    ],
-    "moderation_flags": [
-        ("resolved_at", "text not null default ''"),
-        ("resolution", "text not null default ''"),
-        ("resolved_by", "text not null default ''"),
-    ],
-    "api_tokens": [
-        ("token_hash", "text not null default ''"),
-        ("token_prefix", "text not null default ''"),
-        ("token_suffix", "text not null default ''"),
-        ("agent_id", "text not null default ''"),
-        ("conversation_id", "text not null default ''"),
-        ("revoked_at", "text not null default ''"),
-        ("expires_at", "text not null default ''"),
-    ],
-}

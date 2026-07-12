@@ -11,7 +11,15 @@ from shopping_cli.llm.dispatcher import (
     HTTPMarketplaceError,
     HTTPMarketplaceToolDispatcher,
     MarketplaceToolDispatcher,
+    ToolAccessDenied,
     dispatch_marketplace_tool,
+)
+from shopping_cli.llm.contracts import (
+    ToolContractError,
+    marketplace_tool_contracts,
+    normalize_tool_arguments,
+    prepare_tool_call,
+    require_tool_contract,
 )
 from shopping_cli.llm.prompts import buyer_system_prompt, merchant_system_prompt
 from shopping_cli.llm.providers import OpenAICompatibleProvider, provider_from_env
@@ -63,6 +71,29 @@ class LlmContractTest(unittest.TestCase):
             parameters = tool["function"]["parameters"]
             self.assertEqual(parameters["type"], "object")
             self.assertFalse(parameters["additionalProperties"])
+
+    def test_marketplace_tool_contracts_define_schemas_scopes_and_argument_rules(self):
+        contracts = marketplace_tool_contracts()
+        self.assertEqual(
+            [contract.name for contract in contracts],
+            [tool["function"]["name"] for tool in marketplace_tool_schemas()],
+        )
+        conversation_send = require_tool_contract("conversation_send", "buyer")
+        self.assertEqual(conversation_send.handler_name, "_dispatch_conversation_send")
+        self.assertIn("buyer_cli", conversation_send.allowed_scopes)
+
+        with self.assertRaises(ToolContractError):
+            require_tool_contract("merchant_reply", "buyer")
+        with self.assertRaises(ToolContractError):
+            require_tool_contract("create_order", "operator")
+        with self.assertRaises(ToolContractError):
+            normalize_tool_arguments("conversation_send", {"sender": "merchant"})
+
+        normalized = normalize_tool_arguments("conversation_send", {"sender": "buyer_cli", "text": "hello"})
+        self.assertEqual(normalized["sender"], "buyer_cli")
+        prepared = prepare_tool_call("conversation_send", "buyer_cli", {"sender": "buyer_cli", "text": "hello"})
+        self.assertEqual(prepared.contract.name, "conversation_send")
+        self.assertEqual(prepared.arguments["sender"], "buyer_cli")
 
     def test_openai_compatible_provider_builds_payload_with_tools(self):
         calls = []
@@ -738,9 +769,9 @@ class LlmContractTest(unittest.TestCase):
             self.seed_consultation(db_file)
             with self.assertRaises(TypeError):
                 dispatch_marketplace_tool(db_file, "catalog_search", {"query": "longjing"})
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolContractError):
                 dispatch_marketplace_tool(db_file, "create_order", {"conversation_id": "CONV-0001"}, token_scope="operator")
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolContractError):
                 dispatch_marketplace_tool(
                     db_file,
                     "conversation_send",
@@ -781,7 +812,7 @@ class LlmContractTest(unittest.TestCase):
             )
             self.assertEqual(sent["result"]["message"]["sender"], "buyer")
 
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolContractError):
                 buyer_dispatcher.dispatch(
                     "merchant_reply",
                     {
@@ -845,7 +876,7 @@ class LlmContractTest(unittest.TestCase):
                 token_scope="merchant_agent",
             )
 
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolAccessDenied):
                 dispatcher.dispatch(
                     "merchant_reply",
                     {
@@ -854,12 +885,12 @@ class LlmContractTest(unittest.TestCase):
                         "text": "seller-b must not reply to seller-a conversations.",
                     },
                 )
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolAccessDenied):
                 dispatcher.dispatch(
                     "human_review_flag",
                     {"conversation_id": "CONV-0001", "reason": "cross_merchant", "severity": "review"},
                 )
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolAccessDenied):
                 dispatcher.dispatch("conversation_summarize", {"conversation_id": "CONV-0001"})
 
             with db_session(db_file) as conn:
@@ -883,7 +914,7 @@ class LlmContractTest(unittest.TestCase):
                 token_scope="buyer",
             )
 
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolAccessDenied):
                 dispatcher.dispatch(
                     "conversation_send",
                     {
@@ -893,7 +924,7 @@ class LlmContractTest(unittest.TestCase):
                         "text": "bob must not write to alice conversations.",
                     },
                 )
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ToolAccessDenied):
                 dispatcher.dispatch("conversation_summarize", {"conversation_id": "CONV-0001"})
 
             with db_session(db_file) as conn:
@@ -1009,7 +1040,7 @@ class LlmContractTest(unittest.TestCase):
         )
 
         with patch("shopping_cli.llm.dispatcher.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
-            with self.assertRaises(SystemExit) as raised:
+            with self.assertRaises(HTTPMarketplaceError) as raised:
                 dispatcher.dispatch("conversation_summarize", {"conversation_id": "CONV-0001"})
 
         self.assertIn("Marketplace API request timed out", str(raised.exception))
@@ -1108,7 +1139,7 @@ class LlmContractTest(unittest.TestCase):
             },
         )
 
-        with self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(ToolContractError) as raised:
             dispatcher.dispatch(
                 "merchant_reply",
                 {"conversation_id": "CONV-0001", "intent": "support", "text": "Not allowed."},
@@ -1129,12 +1160,12 @@ class LlmContractTest(unittest.TestCase):
             or {"ok": True, "event": {"event": "llm_tool_call", "details": payload}},
         )
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ToolContractError):
             dispatcher.dispatch(
                 "merchant_reply",
                 {"conversation_id": "CONV-0001", "intent": "support", "text": "Not allowed."},
             )
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ToolContractError):
             dispatcher.dispatch("create_order", {})
         self.assertEqual([call["path"] for call in calls], ["/audit/tool-calls", "/audit/tool-calls"])
         self.assertEqual([call["payload"]["tool"] for call in calls], ["merchant_reply", "create_order"])

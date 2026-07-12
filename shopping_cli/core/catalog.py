@@ -7,6 +7,7 @@ import re
 import sqlite3
 from typing import Any, Mapping
 
+from shopping_cli.core.errors import NotFoundError, ValidationError
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -14,6 +15,8 @@ DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT = 1000
 MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT = 5000
 DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT = 1000
 MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT = 5000
+PRODUCT_SEARCH_INDEX_TABLE = "product_search_index"
+MERCHANT_SEARCH_INDEX_TABLE = "merchant_search_index"
 
 
 def parse_tags(value: str | list[str] | None) -> list[str]:
@@ -32,48 +35,48 @@ def tokenize(value: str) -> list[str]:
 def require_merchant(conn: sqlite3.Connection, merchant_id: str) -> sqlite3.Row:
     row = conn.execute("select * from merchants where id = ?", (merchant_id,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown merchant: {merchant_id}")
+        raise NotFoundError(f"Unknown merchant: {merchant_id}")
     return row
 
 
 def require_product(conn: sqlite3.Connection, sku: str) -> sqlite3.Row:
     row = conn.execute("select * from products where sku = ?", (sku,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown product SKU: {sku}")
+        raise NotFoundError(f"Unknown product SKU: {sku}")
     return row
 
 
 def _finite_float(value: Any, message: str) -> float:
     if isinstance(value, bool):
-        raise SystemExit(message)
+        raise ValidationError(message)
     try:
         number = float(value)
     except (OverflowError, TypeError, ValueError) as exc:
-        raise SystemExit(message) from exc
+        raise ValidationError(message) from exc
     if not math.isfinite(number):
-        raise SystemExit(message)
+        raise ValidationError(message)
     return number
 
 
 def _whole_int(value: Any, message: str) -> int:
     if isinstance(value, bool):
-        raise SystemExit(message)
+        raise ValidationError(message)
     if isinstance(value, int):
         number = value
     elif isinstance(value, float):
         if not math.isfinite(value) or not value.is_integer():
-            raise SystemExit(message)
+            raise ValidationError(message)
         number = int(value)
     else:
         text = str(value or "").strip()
         if not text:
-            raise SystemExit(message)
+            raise ValidationError(message)
         try:
             number = int(text)
         except ValueError as exc:
-            raise SystemExit(message) from exc
+            raise ValidationError(message) from exc
     if number > MAX_SQLITE_INTEGER:
-        raise SystemExit(f"{message}; must be <= {MAX_SQLITE_INTEGER}")
+        raise ValidationError(f"{message}; must be <= {MAX_SQLITE_INTEGER}")
     return number
 
 
@@ -118,9 +121,9 @@ def create_merchant(
     merchant_id = str(merchant_id or "").strip()
     name = str(name or "").strip()
     if not merchant_id:
-        raise SystemExit("merchant id is required")
+        raise ValidationError("merchant id is required")
     if not name:
-        raise SystemExit("merchant name is required")
+        raise ValidationError("merchant name is required")
     now = now_iso()
     conn.execute(
         """
@@ -151,6 +154,7 @@ def create_merchant(
         eta_minutes=delivery_eta_minutes,
         radius_km=delivery_radius_km,
     )
+    sync_merchant_search_index(conn, merchant_id=merchant_id)
     return merchant_summary(conn, merchant_id)
 
 
@@ -172,7 +176,7 @@ def update_merchant(
     if name is not None:
         name = str(name or "").strip()
         if not name:
-            raise SystemExit("merchant name is required")
+            raise ValidationError("merchant name is required")
     updates: list[str] = []
     values: list[Any] = []
     field_map = {
@@ -208,6 +212,13 @@ def update_merchant(
             notes=delivery["notes"],
             currency=delivery["currency"],
         )
+    # Only sync product search index when search-relevant merchant fields change.
+    merchant_search_fields_changed = any(
+        value is not None for value in (name, city, service_area, tags)
+    )
+    if merchant_search_fields_changed:
+        sync_product_search_index(conn, merchant_id=merchant_id)
+    sync_merchant_search_index(conn, merchant_id=merchant_id)
     return merchant_summary(conn, merchant_id)
 
 
@@ -225,11 +236,11 @@ def upsert_delivery_rule(
     radius_km = _finite_float(radius_km, "delivery radius must be finite")
     eta_minutes = _whole_int(eta_minutes, "delivery eta minutes must be a whole number")
     if fee < 0:
-        raise SystemExit("delivery fee must be non-negative")
+        raise ValidationError("delivery fee must be non-negative")
     if eta_minutes < 0:
-        raise SystemExit("delivery eta minutes must be non-negative")
+        raise ValidationError("delivery eta minutes must be non-negative")
     if radius_km < 0:
-        raise SystemExit("delivery radius must be non-negative")
+        raise ValidationError("delivery radius must be non-negative")
     require_merchant(conn, merchant_id)
     now = now_iso()
     conn.execute(
@@ -270,17 +281,17 @@ def create_product(
     sku = str(sku or "").strip()
     title = str(title or "").strip()
     if not merchant_id:
-        raise SystemExit("merchant id is required")
+        raise ValidationError("merchant id is required")
     if not sku:
-        raise SystemExit("product sku is required")
+        raise ValidationError("product sku is required")
     if not title:
-        raise SystemExit("product title is required")
+        raise ValidationError("product title is required")
     price = _finite_float(price, "--price must be finite")
     stock = _whole_int(stock, "--stock must be a whole number")
     if price < 0:
-        raise SystemExit("--price must be non-negative")
+        raise ValidationError("--price must be non-negative")
     if stock < 0:
-        raise SystemExit("--stock must be non-negative")
+        raise ValidationError("--stock must be non-negative")
     require_merchant(conn, merchant_id)
     now = now_iso()
     conn.execute(
@@ -306,6 +317,7 @@ def create_product(
             now,
         ),
     )
+    sync_product_search_index(conn, sku=sku)
     return product_summary(conn, sku)
 
 
@@ -324,19 +336,19 @@ def update_product(
 ) -> dict[str, Any]:
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
-        raise SystemExit(f"Product {sku} does not belong to merchant {merchant_id}")
+        raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
     if title is not None:
         title = str(title or "").strip()
         if not title:
-            raise SystemExit("product title is required")
+            raise ValidationError("product title is required")
     if price is not None:
         price = _finite_float(price, "--price must be finite")
     if price is not None and price < 0:
-        raise SystemExit("--price must be non-negative")
+        raise ValidationError("--price must be non-negative")
     if stock is not None:
         stock = _whole_int(stock, "--stock must be a whole number")
     if stock is not None and stock < 0:
-        raise SystemExit("--stock must be non-negative")
+        raise ValidationError("--stock must be non-negative")
     updates: list[str] = []
     values: list[Any] = []
     field_map = {
@@ -362,20 +374,22 @@ def update_product(
         values.append(now_iso())
         values.append(sku)
         conn.execute(f"update products set {', '.join(updates)} where sku = ?", values)
+        sync_product_search_index(conn, sku=sku)
     return product_summary(conn, sku)
 
 
 def set_stock(conn: sqlite3.Connection, sku: str, stock: int, merchant_id: str = "") -> dict[str, Any]:
     stock = _whole_int(stock, "--stock must be a whole number")
     if stock < 0:
-        raise SystemExit("--stock must be non-negative")
+        raise ValidationError("--stock must be non-negative")
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
-        raise SystemExit(f"Product {sku} does not belong to merchant {merchant_id}")
+        raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
     conn.execute(
         "update products set stock = ?, updated_at = ? where sku = ?",
         (int(stock), now_iso(), sku),
     )
+    sync_product_search_index(conn, sku=sku)
     return product_summary(conn, sku)
 
 
@@ -554,6 +568,367 @@ def _search_text(product: sqlite3.Row, merchant: Mapping[str, Any]) -> str:
     return " ".join(str(field) for field in fields if field)
 
 
+def _fts_query(query: str) -> str:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in tokenize(query):
+        candidates = [token]
+        for cjk_text in re.findall(r"[\u4e00-\u9fff]+", token):
+            if len(cjk_text) > 2:
+                candidates.extend(cjk_text[index : index + 2] for index in range(0, len(cjk_text) - 1))
+        for candidate in candidates:
+            if candidate and candidate not in seen:
+                terms.append(candidate)
+                seen.add(candidate)
+    quoted = []
+    for token in terms:
+        quoted.append(f'"{token.replace(chr(34), chr(34) + chr(34))}"')
+    return " OR ".join(quoted)
+
+
+def product_search_index_available(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute(
+            f"""
+            create virtual table if not exists {PRODUCT_SEARCH_INDEX_TABLE}
+            using fts5(sku unindexed, merchant_id unindexed, text, tokenize='unicode61')
+            """
+        )
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _product_search_document(row: sqlite3.Row) -> str:
+    merchant = {
+        "name": row["merchant_name"],
+        "city": row["merchant_city"],
+        "service_area": row["merchant_service_area"],
+        "tags_json": row["merchant_tags_json"],
+    }
+    return _search_text(row, merchant)
+
+
+def _joined_product_search_rows(conn: sqlite3.Connection, merchant_id: str = "", sku: str = "") -> list[sqlite3.Row]:
+    values: list[Any] = []
+    sql = """
+        select p.*,
+               m.name as merchant_name,
+               m.city as merchant_city,
+               m.service_area as merchant_service_area,
+               m.tags_json as merchant_tags_json
+        from products p
+        join merchants m on m.id = p.merchant_id
+        where p.active = 1
+    """
+    if merchant_id:
+        sql += " and p.merchant_id = ?"
+        values.append(merchant_id)
+    if sku:
+        sql += " and p.sku = ?"
+        values.append(sku)
+    sql += " order by p.sku"
+    return conn.execute(sql, values).fetchall()
+
+
+def rebuild_product_search_index(conn: sqlite3.Connection) -> bool:
+    if not product_search_index_available(conn):
+        return False
+    conn.execute(f"delete from {PRODUCT_SEARCH_INDEX_TABLE}")
+    for row in _joined_product_search_rows(conn):
+        conn.execute(
+            f"insert into {PRODUCT_SEARCH_INDEX_TABLE}(sku, merchant_id, text) values (?, ?, ?)",
+            (row["sku"], row["merchant_id"], _product_search_document(row)),
+        )
+    return True
+
+
+def product_search_index_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    if not product_search_index_available(conn):
+        return {
+            "available": False,
+            "healthy": False,
+            "active_product_count": 0,
+            "indexed_count": 0,
+            "missing_count": 0,
+            "stale_count": 0,
+            "extra_count": 0,
+        }
+    active_rows = _joined_product_search_rows(conn)
+    active_skus = {str(row["sku"]) for row in active_rows}
+    indexed_rows = conn.execute(f"select sku, merchant_id, text from {PRODUCT_SEARCH_INDEX_TABLE}").fetchall()
+    indexed_by_sku = {str(row["sku"]): row for row in indexed_rows}
+    missing_count = 0
+    stale_count = 0
+    for row in active_rows:
+        sku = str(row["sku"])
+        indexed = indexed_by_sku.get(sku)
+        if indexed is None:
+            missing_count += 1
+            continue
+        if str(indexed["merchant_id"] or "") != str(row["merchant_id"] or ""):
+            stale_count += 1
+            continue
+        if str(indexed["text"] or "") != _product_search_document(row):
+            stale_count += 1
+    extra_count = sum(1 for row in indexed_rows if str(row["sku"]) not in active_skus)
+    indexed_count = len(indexed_rows)
+    active_product_count = len(active_rows)
+    healthy = (
+        indexed_count == active_product_count
+        and missing_count == 0
+        and stale_count == 0
+        and extra_count == 0
+    )
+    return {
+        "available": True,
+        "healthy": healthy,
+        "active_product_count": active_product_count,
+        "indexed_count": indexed_count,
+        "missing_count": missing_count,
+        "stale_count": stale_count,
+        "extra_count": extra_count,
+    }
+
+
+def sync_product_search_index(conn: sqlite3.Connection, sku: str = "", merchant_id: str = "") -> None:
+    if not product_search_index_available(conn):
+        return
+    if sku:
+        conn.execute(f"delete from {PRODUCT_SEARCH_INDEX_TABLE} where sku = ?", (sku,))
+    elif merchant_id:
+        conn.execute(f"delete from {PRODUCT_SEARCH_INDEX_TABLE} where merchant_id = ?", (merchant_id,))
+    else:
+        conn.execute(f"delete from {PRODUCT_SEARCH_INDEX_TABLE}")
+    for row in _joined_product_search_rows(conn, merchant_id=merchant_id, sku=sku):
+        conn.execute(
+            f"insert into {PRODUCT_SEARCH_INDEX_TABLE}(sku, merchant_id, text) values (?, ?, ?)",
+            (row["sku"], row["merchant_id"], _product_search_document(row)),
+        )
+
+
+def _ensure_product_search_index_populated(conn: sqlite3.Connection) -> bool:
+    if not product_search_index_available(conn):
+        return False
+    try:
+        indexed_count = conn.execute(f"select count(*) from {PRODUCT_SEARCH_INDEX_TABLE}").fetchone()[0]
+        product_count = conn.execute("select count(*) from products where active = 1").fetchone()[0]
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    if indexed_count == product_count:
+        # Count alone is not enough: the index could contain stale rows while
+        # missing active products. Verify consistency before skipping sync.
+        try:
+            stale_count = conn.execute(
+                f"""
+                select count(*) from {PRODUCT_SEARCH_INDEX_TABLE}
+                where sku not in (select sku from products where active = 1)
+                """
+            ).fetchone()[0]
+            missing_count = conn.execute(
+                f"""
+                select count(*) from products p
+                where p.active = 1 and p.sku not in (select sku from {PRODUCT_SEARCH_INDEX_TABLE})
+                """
+            ).fetchone()[0]
+        except (AttributeError, TypeError, sqlite3.OperationalError):
+            return False
+        if stale_count == 0 and missing_count == 0:
+            return True
+    # Incremental sync avoids rebuilding the entire FTS table on every startup:
+    # insert missing active rows and delete stale/extra rows.
+    try:
+        missing_rows = conn.execute(
+            f"""
+            select p.*, m.name as merchant_name, m.city as merchant_city,
+                   m.service_area as merchant_service_area, m.tags_json as merchant_tags_json
+            from products p
+            join merchants m on m.id = p.merchant_id
+            left join {PRODUCT_SEARCH_INDEX_TABLE} psi on psi.sku = p.sku
+            where p.active = 1 and psi.sku is null
+            order by p.sku
+            """
+        ).fetchall()
+        for row in missing_rows:
+            conn.execute(
+                f"insert into {PRODUCT_SEARCH_INDEX_TABLE}(sku, merchant_id, text) values (?, ?, ?)",
+                (row["sku"], row["merchant_id"], _product_search_document(row)),
+            )
+        conn.execute(
+            f"""
+            delete from {PRODUCT_SEARCH_INDEX_TABLE}
+            where sku not in (select sku from products where active = 1)
+            """
+        )
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    return True
+
+
+def merchant_search_index_available(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute(
+            f"""
+            create virtual table if not exists {MERCHANT_SEARCH_INDEX_TABLE}
+            using fts5(id unindexed, text, tokenize='unicode61')
+            """
+        )
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def _merchant_search_document(row: sqlite3.Row) -> str:
+    fields = [
+        row["id"],
+        row["name"],
+        row["city"],
+        row["service_area"],
+        " ".join(decode_json(row["tags_json"], [])),
+    ]
+    return " ".join(str(field) for field in fields if field)
+
+
+def _joined_merchant_search_rows(conn: sqlite3.Connection, merchant_id: str = "") -> list[sqlite3.Row]:
+    values: list[Any] = []
+    sql = """
+        select m.*
+        from merchants m
+        where 1 = 1
+    """
+    if merchant_id:
+        sql += " and m.id = ?"
+        values.append(merchant_id)
+    sql += " order by m.id"
+    return conn.execute(sql, values).fetchall()
+
+
+def rebuild_merchant_search_index(conn: sqlite3.Connection) -> bool:
+    if not merchant_search_index_available(conn):
+        return False
+    conn.execute(f"delete from {MERCHANT_SEARCH_INDEX_TABLE}")
+    for row in _joined_merchant_search_rows(conn):
+        conn.execute(
+            f"insert into {MERCHANT_SEARCH_INDEX_TABLE}(id, text) values (?, ?)",
+            (row["id"], _merchant_search_document(row)),
+        )
+    return True
+
+
+def merchant_search_index_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    if not merchant_search_index_available(conn):
+        return {
+            "available": False,
+            "healthy": False,
+            "active_merchant_count": 0,
+            "indexed_count": 0,
+            "missing_count": 0,
+            "stale_count": 0,
+            "extra_count": 0,
+        }
+    active_rows = _joined_merchant_search_rows(conn)
+    active_ids = {str(row["id"]) for row in active_rows}
+    indexed_rows = conn.execute(f"select id, text from {MERCHANT_SEARCH_INDEX_TABLE}").fetchall()
+    indexed_by_id = {str(row["id"]): row for row in indexed_rows}
+    missing_count = 0
+    stale_count = 0
+    for row in active_rows:
+        merchant_id = str(row["id"])
+        indexed = indexed_by_id.get(merchant_id)
+        if indexed is None:
+            missing_count += 1
+            continue
+        if str(indexed["text"] or "") != _merchant_search_document(row):
+            stale_count += 1
+    extra_count = sum(1 for row in indexed_rows if str(row["id"]) not in active_ids)
+    indexed_count = len(indexed_rows)
+    active_merchant_count = len(active_rows)
+    healthy = (
+        indexed_count == active_merchant_count
+        and missing_count == 0
+        and stale_count == 0
+        and extra_count == 0
+    )
+    return {
+        "available": True,
+        "healthy": healthy,
+        "active_merchant_count": active_merchant_count,
+        "indexed_count": indexed_count,
+        "missing_count": missing_count,
+        "stale_count": stale_count,
+        "extra_count": extra_count,
+    }
+
+
+def sync_merchant_search_index(conn: sqlite3.Connection, merchant_id: str = "") -> None:
+    if not merchant_search_index_available(conn):
+        return
+    if merchant_id:
+        conn.execute(f"delete from {MERCHANT_SEARCH_INDEX_TABLE} where id = ?", (merchant_id,))
+    else:
+        conn.execute(f"delete from {MERCHANT_SEARCH_INDEX_TABLE}")
+    for row in _joined_merchant_search_rows(conn, merchant_id=merchant_id):
+        conn.execute(
+            f"insert into {MERCHANT_SEARCH_INDEX_TABLE}(id, text) values (?, ?)",
+            (row["id"], _merchant_search_document(row)),
+        )
+
+
+def _ensure_merchant_search_index_populated(conn: sqlite3.Connection) -> bool:
+    if not merchant_search_index_available(conn):
+        return False
+    try:
+        indexed_count = conn.execute(f"select count(*) from {MERCHANT_SEARCH_INDEX_TABLE}").fetchone()[0]
+        merchant_count = conn.execute("select count(*) from merchants").fetchone()[0]
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    if indexed_count == merchant_count:
+        # Count alone is not enough: verify no stale or missing rows.
+        try:
+            stale_count = conn.execute(
+                f"""
+                select count(*) from {MERCHANT_SEARCH_INDEX_TABLE}
+                where id not in (select id from merchants)
+                """
+            ).fetchone()[0]
+            missing_count = conn.execute(
+                f"""
+                select count(*) from merchants m
+                where m.id not in (select id from {MERCHANT_SEARCH_INDEX_TABLE})
+                """
+            ).fetchone()[0]
+        except (AttributeError, TypeError, sqlite3.OperationalError):
+            return False
+        if stale_count == 0 and missing_count == 0:
+            return True
+    # Incremental sync avoids rebuilding the entire FTS table on every startup:
+    # insert missing active rows and delete stale/extra rows.
+    try:
+        missing_rows = conn.execute(
+            f"""
+            select m.*
+            from merchants m
+            left join {MERCHANT_SEARCH_INDEX_TABLE} msi on msi.id = m.id
+            where msi.id is null
+            order by m.id
+            """
+        ).fetchall()
+        for row in missing_rows:
+            conn.execute(
+                f"insert into {MERCHANT_SEARCH_INDEX_TABLE}(id, text) values (?, ?)",
+                (row["id"], _merchant_search_document(row)),
+            )
+        conn.execute(
+            f"""
+            delete from {MERCHANT_SEARCH_INDEX_TABLE}
+            where id not in (select id from merchants)
+            """
+        )
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    return True
+
+
 def _match_score(query: str, product: sqlite3.Row, merchant: Mapping[str, Any]) -> float:
     query_lower = query.lower()
     searchable = _search_text(product, merchant).lower()
@@ -600,17 +975,12 @@ def search_products(
     area = str(area or "").strip()
     window_start = _safe_non_negative_int(offset)
     window_limit = _safe_non_negative_int(limit)
-    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
-    default_candidate_limit = max(DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT, requested_window)
-    if candidate_limit is None:
-        candidate_cap = default_candidate_limit
-    else:
-        candidate_cap = _safe_non_negative_int(candidate_limit)
-    candidate_cap = min(candidate_cap, MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT)
     if max_price is not None:
         max_price = _finite_float(max_price, "--max-price must be finite")
+    fts_match = _fts_query(query) if query else ""
+    use_index = bool(fts_match and _ensure_product_search_index_populated(conn))
     values: list[Any] = []
-    sql = """
+    select_sql = """
         select p.*,
                m.name as merchant_name,
                m.city as merchant_city,
@@ -630,11 +1000,38 @@ def search_products(
                    from products pc
                    where pc.merchant_id = m.id and pc.active = 1
                ) as active_product_count
+    """
+    if use_index:
+        sql = (
+            select_sql
+            + f""",
+               rank
+        from {PRODUCT_SEARCH_INDEX_TABLE} psi
+        join products p on p.sku = psi.sku
+        join merchants m on m.id = p.merchant_id
+        left join delivery_rules dr on dr.merchant_id = m.id
+        where psi.text match ?
+          and p.active = 1
+    """
+        )
+        values.append(fts_match)
+    else:
+        requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+        default_candidate_limit = max(DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT, requested_window)
+        if candidate_limit is None:
+            candidate_cap = default_candidate_limit
+        else:
+            candidate_cap = _safe_non_negative_int(candidate_limit)
+        candidate_cap = min(candidate_cap, MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT)
+        sql = (
+            select_sql
+            + """
         from products p
         join merchants m on m.id = p.merchant_id
         left join delivery_rules dr on dr.merchant_id = m.id
         where p.active = 1
     """
+        )
     if city:
         sql += " and lower(m.city) = lower(?)"
         values.append(city)
@@ -643,6 +1040,20 @@ def search_products(
         values.append(max_price)
     if not include_out_of_stock:
         sql += " and p.stock > 0"
+    if use_index:
+        sql += " order by rank, p.sku limit ? offset ?"
+        values.extend([window_limit, window_start])
+        rows = conn.execute(sql, values).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            merchant = _joined_product_merchant(row)
+            summary = _product_summary_from_search_row(row)
+            service_area = str(summary["merchant"].get("service_area") or "")
+            if area and area.lower() not in service_area.lower():
+                summary.setdefault("warnings", []).append("requested area may need merchant confirmation")
+            summary["match_score"] = _match_score(query, row, merchant)
+            results.append(summary)
+        return results
     sql += " order by p.sku limit ?"
     values.append(candidate_cap)
     rows = conn.execute(sql, values).fetchall()
@@ -663,7 +1074,7 @@ def search_products(
         matches.append((score, price, str(row["sku"]), row))
 
     ordered = sorted(matches, key=lambda item: (-item[0], item[1], item[2]))
-    results: list[dict[str, Any]] = []
+    results = []
     for score, _price, _sku, row in ordered[window_start : window_start + window_limit]:
         summary = _product_summary_from_search_row(row)
         service_area = str(summary["merchant"].get("service_area") or "")
@@ -688,15 +1099,10 @@ def search_merchants(
     query_tokens = tokenize(query_lower)
     window_start = _safe_non_negative_int(offset)
     window_limit = _safe_non_negative_int(limit)
-    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
-    default_candidate_limit = max(DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT, requested_window)
-    if candidate_limit is None:
-        candidate_cap = default_candidate_limit
-    else:
-        candidate_cap = _safe_non_negative_int(candidate_limit)
-    candidate_cap = min(candidate_cap, MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT)
+    fts_match = _fts_query(query) if query else ""
+    use_index = bool(fts_match and _ensure_merchant_search_index_populated(conn))
     values: list[Any] = []
-    sql = """
+    select_sql = """
         select m.*,
                dr.service_area as delivery_service_area,
                dr.fee as delivery_fee,
@@ -705,16 +1111,57 @@ def search_merchants(
                dr.radius_km as delivery_radius_km,
                dr.notes as delivery_notes,
                count(p.sku) as active_product_count
+    """
+    if use_index:
+        sql = (
+            select_sql
+            + f""",
+               rank
+        from {MERCHANT_SEARCH_INDEX_TABLE} msi
+        join merchants m on m.id = msi.id
+        left join delivery_rules dr on dr.merchant_id = m.id
+        left join products p on p.merchant_id = m.id and p.active = 1
+        where msi.text match ?
+    """
+        )
+        values.append(fts_match)
+    else:
+        requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+        default_candidate_limit = max(DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT, requested_window)
+        if candidate_limit is None:
+            candidate_cap = default_candidate_limit
+        else:
+            candidate_cap = _safe_non_negative_int(candidate_limit)
+        candidate_cap = min(candidate_cap, MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT)
+        sql = (
+            select_sql
+            + """
         from merchants m
         left join delivery_rules dr on dr.merchant_id = m.id
         left join products p on p.merchant_id = m.id and p.active = 1
     """
-    if city:
-        sql += " where lower(city) = lower(?)"
+        )
+        if city:
+            sql += " where lower(city) = lower(?)"
+            values.append(city)
+    if use_index and city:
+        sql += " and lower(m.city) = lower(?)"
         values.append(city)
-    sql += " group by m.id order by m.name, m.id limit ?"
-    values.append(candidate_cap)
+    sql += " group by m.id"
+    if use_index:
+        sql += " order by rank, m.id limit ? offset ?"
+        values.extend([window_limit, window_start])
+    else:
+        sql += " order by m.name, m.id limit ?"
+        values.append(candidate_cap)
     rows = conn.execute(sql, values).fetchall()
+    if use_index:
+        results: list[dict[str, Any]] = []
+        for merchant in rows:
+            summary = _merchant_summary_from_search_row(merchant)
+            summary["match_score"] = _match_merchant_score(query, merchant)
+            results.append(summary)
+        return results
     matches: list[tuple[float, str, str, sqlite3.Row]] = []
     for merchant in rows:
         if city and merchant["city"].lower() != city.lower():
@@ -741,9 +1188,32 @@ def search_merchants(
         matches.append((round(score, 4), str(merchant["name"]), str(merchant["id"]), merchant))
 
     ordered = sorted(matches, key=lambda item: (-item[0], item[1], item[2]))
-    results: list[dict[str, Any]] = []
+    results = []
     for score, _name, _merchant_id, merchant in ordered[window_start : window_start + window_limit]:
         summary = _merchant_summary_from_search_row(merchant)
         summary["match_score"] = score
         results.append(summary)
     return results
+
+
+def _match_merchant_score(query: str, merchant: sqlite3.Row) -> float:
+    query_lower = query.lower()
+    searchable = " ".join(
+        [
+            merchant["id"],
+            merchant["name"],
+            merchant["city"],
+            merchant["service_area"],
+            " ".join(decode_json(merchant["tags_json"], [])),
+        ]
+    ).lower()
+    query_tokens = tokenize(query_lower)
+    merchant_tokens = tokenize(searchable)
+    score = 0.0
+    for token in query_tokens:
+        if token in searchable:
+            score += 10
+    for token in merchant_tokens:
+        if len(token) >= 2 and token in query_lower:
+            score += 8
+    return round(score, 4)

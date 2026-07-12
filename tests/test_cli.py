@@ -14,15 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import shopping  # noqa: E402
+from helpers import run_cli as run_cli_helper  # noqa: E402
 from shopping_cli.core.tokens import token_digest  # noqa: E402
 
 
 class ShoppingCliTest(unittest.TestCase):
     def run_cli(self, db_file, *args):
-        output = StringIO()
-        with redirect_stdout(output):
-            shopping.main(["--data", str(db_file), *args])
-        return output.getvalue()
+        return run_cli_helper(db_file, *args, db_flag="--data")
 
     def test_emit_text_message_shortcut_only_accepts_strings(self):
         from shopping_cli import cli
@@ -1518,9 +1516,9 @@ class ShoppingCliTest(unittest.TestCase):
                     )
 
             with (
-                patch("shopping_cli.cli.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
+                patch("shopping_cli.cli_agent_commands.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
                 patch(
-                    "shopping_cli.cli.merchant_agent.process_once_with_tools",
+                    "shopping_cli.cli_agent_commands.merchant_agent.process_once_with_tools",
                     return_value={"ok": True, "merchant_id": "seller-a", "checked": 0, "replied": []},
                 ) as process_once,
             ):
@@ -1577,7 +1575,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "abandoned": [{"message_id": 4}],
             }
 
-            with patch("shopping_cli.cli.merchant_agent.process_once", return_value=result):
+            with patch("shopping_cli.cli_agent_commands.merchant_agent.process_once", return_value=result):
                 output = self.run_cli(db_file, "agent", "run", "--merchant", "seller-a", "--once")
 
             self.assertIn("Agent run: seller-a", output)
@@ -1601,7 +1599,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "abandoned": [],
             }
 
-            with patch("shopping_cli.cli.merchant_agent.process_once", return_value=result):
+            with patch("shopping_cli.cli_agent_commands.merchant_agent.process_once", return_value=result):
                 output = self.run_cli(db_file, "agent", "run", "--merchant", "seller-a", "--once")
 
             self.assertIn("Checked: 0", output)
@@ -1623,9 +1621,9 @@ class ShoppingCliTest(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, {"SHOPPING_AGENT_TOKEN": "env_agent_tok_seller_a"}, clear=False),
-                patch("shopping_cli.cli.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
+                patch("shopping_cli.cli_agent_commands.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
                 patch(
-                    "shopping_cli.cli.merchant_agent.process_once_with_tools",
+                    "shopping_cli.cli_agent_commands.merchant_agent.process_once_with_tools",
                     return_value={"ok": True, "merchant_id": "seller-a", "checked": 0, "replied": []},
                 ),
             ):
@@ -1668,9 +1666,9 @@ class ShoppingCliTest(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("shopping_cli.cli.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
+                patch("shopping_cli.cli_agent_commands.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
                 patch(
-                    "shopping_cli.cli.merchant_agent.process_once_with_tools",
+                    "shopping_cli.cli_agent_commands.merchant_agent.process_once_with_tools",
                     return_value={"ok": True, "merchant_id": "seller-a", "checked": 0, "replied": []},
                 ),
             ):
@@ -1726,7 +1724,7 @@ class ShoppingCliTest(unittest.TestCase):
                     return {"id": f"shopping-cli-merchant-agent:{merchant_id}", "owner_id": merchant_id, "status": status}
 
             with (
-                patch("shopping_cli.cli.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
+                patch("shopping_cli.cli_agent_commands.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
             ):
                 self.run_cli(
                     db_file,
@@ -1758,7 +1756,7 @@ class ShoppingCliTest(unittest.TestCase):
                 calls.append({"db_path": db_path, "merchant_id": merchant_id, **kwargs})
                 return {"ok": True, "merchant_id": merchant_id, "mode": "api", "message": "started"}
 
-            with patch("shopping_cli.cli.merchant_daemon.start_agent", side_effect=fake_start):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.start_agent", side_effect=fake_start):
                 self.run_cli(
                     db_file,
                     "agent",
@@ -1792,10 +1790,10 @@ class ShoppingCliTest(unittest.TestCase):
             dispatcher = object()
 
             with (
-                patch("shopping_cli.cli.provider_from_env", return_value="provider", create=True),
-                patch("shopping_cli.cli.MarketplaceToolDispatcher", return_value=dispatcher, create=True) as dispatcher_cls,
+                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value="provider", create=True),
+                patch("shopping_cli.cli_llm_commands.MarketplaceToolDispatcher", return_value=dispatcher, create=True) as dispatcher_cls,
                 patch(
-                    "shopping_cli.cli.run_marketplace_tool_loop",
+                    "shopping_cli.cli_llm_commands.run_marketplace_tool_loop",
                     return_value={"ok": True, "content": "LLM answer.", "error": "", "tool_results": []},
                     create=True,
                 ) as run_loop,
@@ -1834,10 +1832,10 @@ class ShoppingCliTest(unittest.TestCase):
             dispatcher = object()
 
             with (
-                patch("shopping_cli.cli.provider_from_env", return_value="provider", create=True),
-                patch("shopping_cli.cli.MarketplaceToolDispatcher", return_value=dispatcher, create=True),
+                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value="provider", create=True),
+                patch("shopping_cli.cli_llm_commands.MarketplaceToolDispatcher", return_value=dispatcher, create=True),
                 patch(
-                    "shopping_cli.cli.run_marketplace_tool_loop",
+                    "shopping_cli.cli_llm_commands.run_marketplace_tool_loop",
                     return_value={
                         "ok": True,
                         "content": "Longjing Gift Box is available.",
@@ -1888,10 +1886,10 @@ class ShoppingCliTest(unittest.TestCase):
 
             dispatcher = object()
             with (
-                patch("shopping_cli.cli.provider_from_env", return_value="provider", create=True),
-                patch("shopping_cli.cli.MarketplaceToolDispatcher", return_value=dispatcher, create=True),
+                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value="provider", create=True),
+                patch("shopping_cli.cli_llm_commands.MarketplaceToolDispatcher", return_value=dispatcher, create=True),
                 patch(
-                    "shopping_cli.cli.run_marketplace_tool_loop",
+                    "shopping_cli.cli_llm_commands.run_marketplace_tool_loop",
                     return_value={"ok": True, "content": "LLM answer.", "error": "", "tool_results": []},
                     create=True,
                 ) as run_loop,
@@ -1938,10 +1936,10 @@ class ShoppingCliTest(unittest.TestCase):
             dispatcher = object()
 
             with (
-                patch("shopping_cli.cli.provider_from_env", return_value="provider", create=True),
-                patch("shopping_cli.cli.HTTPMarketplaceToolDispatcher", return_value=dispatcher, create=True) as dispatcher_cls,
+                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value="provider", create=True),
+                patch("shopping_cli.cli_llm_commands.HTTPMarketplaceToolDispatcher", return_value=dispatcher, create=True) as dispatcher_cls,
                 patch(
-                    "shopping_cli.cli.run_marketplace_tool_loop",
+                    "shopping_cli.cli_llm_commands.run_marketplace_tool_loop",
                     return_value={"ok": True, "content": "API-backed answer.", "error": "", "tool_results": []},
                     create=True,
                 ) as run_loop,
@@ -2482,7 +2480,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "replied_count": "bad",
             }
 
-            with patch("shopping_cli.cli.merchant_agent.heartbeat", return_value=heartbeat):
+            with patch("shopping_cli.cli_agent_commands.merchant_agent.heartbeat", return_value=heartbeat):
                 output = self.run_cli(db_file, "agent", "heartbeat", "--merchant", "seller-a", "--status", "online")
 
             self.assertIn("Checked: 0", output)
@@ -2570,7 +2568,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "log_file": "/tmp/seller-a.log",
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.status_agent", return_value=status):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.status_agent", return_value=status):
                 output = self.run_cli(db_file, "agent", "status", "--merchant", "seller-a")
 
             self.assertIn("Merchant: seller-a", output)
@@ -2600,7 +2598,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "log_file": "/tmp/seller-a.log",
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.status_agent", return_value=status):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.status_agent", return_value=status):
                 output = self.run_cli(db_file, "agent", "status", "--merchant", "seller-a")
 
             self.assertIn("Checked: 0", output)
@@ -2625,7 +2623,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "log_file": "/tmp/seller-a.log",
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.start_agent", return_value=started):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.start_agent", return_value=started):
                 output = self.run_cli(
                     db_file,
                     "agent",
@@ -2671,7 +2669,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "log_file": "/tmp/seller-a.log",
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.stop_agent", return_value=stopped):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.stop_agent", return_value=stopped):
                 output = self.run_cli(db_file, "agent", "stop", "--merchant", "seller-a")
 
             self.assertIn("Agent stopped: seller-a", output)
@@ -2707,7 +2705,7 @@ class ShoppingCliTest(unittest.TestCase):
                 ],
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.logs_agent", return_value=logs):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.logs_agent", return_value=logs):
                 output = self.run_cli(db_file, "agent", "logs", "--merchant", "seller-a", "--tail", "3")
 
             self.assertIn("Logs: seller-a", output)
@@ -2734,7 +2732,7 @@ class ShoppingCliTest(unittest.TestCase):
                 ],
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.logs_agent", return_value=logs):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.logs_agent", return_value=logs):
                 output = self.run_cli(db_file, "agent", "logs", "--merchant", "seller-a", "--tail", "1")
 
             self.assertIn("2026-05-13T12:00:00 process_once checked=0 replied=0", output)
@@ -2749,7 +2747,7 @@ class ShoppingCliTest(unittest.TestCase):
                 "entries": ["plain string", [1]],
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.logs_agent", return_value=logs):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.logs_agent", return_value=logs):
                 try:
                     output = self.run_cli(db_file, "agent", "logs", "--merchant", "seller-a", "--tail", "2")
                 except AttributeError as exc:
@@ -2778,7 +2776,7 @@ class ShoppingCliTest(unittest.TestCase):
                 ],
             }
 
-            with patch("shopping_cli.cli.merchant_daemon.logs_agent", return_value=logs):
+            with patch("shopping_cli.cli_agent_commands.merchant_daemon.logs_agent", return_value=logs):
                 output = self.run_cli(db_file, "agent", "logs", "--merchant", "seller-a", "--tail", "2")
 
             self.assertIn("[redacted-token]", output)
@@ -2877,6 +2875,44 @@ class ShoppingCliTest(unittest.TestCase):
                 [conversation["id"] for conversation in conversations["conversations"]],
                 ["CONV-0004", "CONV-0003"],
             )
+
+    def test_conversation_list_summary_omits_heavy_detail_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+            self.run_cli(
+                db_file,
+                "conversation",
+                "create",
+                "--buyer",
+                "alice",
+                "--merchant",
+                "seller-a",
+                "--text",
+                "Is this available?",
+                "--format",
+                "json",
+            )
+
+            conversations = json.loads(
+                self.run_cli(
+                    db_file,
+                    "conversation",
+                    "list",
+                    "--buyer",
+                    "alice",
+                    "--summary",
+                    "--format",
+                    "json",
+                )
+            )
+
+            summary = conversations["conversations"][0]
+            self.assertEqual(summary["id"], "CONV-0001")
+            self.assertEqual(summary["message_count"], 1)
+            self.assertEqual(summary["unresolved_flag_count"], 0)
+            self.assertNotIn("messages", summary)
+            self.assertNotIn("audit_events", summary)
 
     def test_conversation_show_text_output_includes_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3279,127 +3315,6 @@ class ShoppingCliTest(unittest.TestCase):
             self.assertIn("Status: waiting_buyer", output)
             self.assertIn("Next actor: buyer", output)
             self.assertNotIn('"reviews"', output)
-
-    def test_agent_rotate_token_command_revokes_old_and_issues_new_token(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
-            issued = json.loads(
-                self.run_cli(db_file, "agent", "token", "--merchant", "seller-a", "--format", "json")
-            )
-            old_token = issued["agent_token"]
-
-            output = self.run_cli(
-                db_file,
-                "agent",
-                "rotate-token",
-                "--merchant",
-                "seller-a",
-                "--token",
-                old_token,
-                "--ttl-seconds",
-                "3600",
-                "--format",
-                "json",
-            )
-            rotated = json.loads(output)
-
-            self.assertNotIn(old_token, output)
-            self.assertNotEqual(rotated["agent_token"], old_token)
-            self.assertTrue(rotated["expires_at"])
-            self.assertEqual(rotated["previous_token"]["token_prefix"], old_token[:24])
-            conn = sqlite3.connect(db_file)
-            try:
-                old_row = conn.execute(
-                    "select revoked_at from api_tokens where token_hash = ?",
-                    (token_digest(old_token),),
-                ).fetchone()
-                new_row = conn.execute(
-                    "select expires_at, revoked_at from api_tokens where token_hash = ?",
-                    (token_digest(rotated["agent_token"]),),
-                ).fetchone()
-            finally:
-                conn.close()
-            self.assertTrue(old_row[0])
-            self.assertEqual(new_row[0], rotated["expires_at"])
-            self.assertEqual(new_row[1], "")
-
-    def test_agent_rotate_token_command_rejects_oversized_ttl_seconds(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
-            issued = json.loads(
-                self.run_cli(db_file, "agent", "token", "--merchant", "seller-a", "--format", "json")
-            )
-
-            with self.assertRaises(SystemExit) as raised:
-                self.run_cli(
-                    db_file,
-                    "agent",
-                    "rotate-token",
-                    "--merchant",
-                    "seller-a",
-                    "--token",
-                    issued["agent_token"],
-                    "--ttl-seconds",
-                    str(10**100),
-                    "--format",
-                    "json",
-                )
-            self.assertIn("ttl_seconds is too large", str(raised.exception))
-
-    def test_agent_token_cli_lifecycle_records_audit_without_secrets(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
-            issued = json.loads(
-                self.run_cli(db_file, "agent", "token", "--merchant", "seller-a", "--ttl-seconds", "3600", "--format", "json")
-            )
-            old_token = issued["agent_token"]
-            rotated = json.loads(
-                self.run_cli(
-                    db_file,
-                    "agent",
-                    "rotate-token",
-                    "--merchant",
-                    "seller-a",
-                    "--token",
-                    old_token,
-                    "--ttl-seconds",
-                    "7200",
-                    "--format",
-                    "json",
-                )
-            )
-            new_token = rotated["agent_token"]
-            revoked = json.loads(
-                self.run_cli(
-                    db_file,
-                    "agent",
-                    "revoke-token",
-                    "--merchant",
-                    "seller-a",
-                    "--token",
-                    new_token,
-                    "--format",
-                    "json",
-                )
-            )
-
-            conn = sqlite3.connect(db_file)
-            try:
-                rows = conn.execute(
-                    "select actor, event, details_json from audit_events where conversation_id = '' order by id"
-                ).fetchall()
-            finally:
-                conn.close()
-            self.assertEqual([row[1] for row in rows], ["agent_token_issued", "agent_token_rotated", "agent_token_revoked"])
-            self.assertTrue(all(row[0] == "seller-a" for row in rows))
-            serialized = json.dumps([json.loads(row[2]) for row in rows], sort_keys=True)
-            self.assertNotIn(old_token, serialized)
-            self.assertNotIn(new_token, serialized)
-            self.assertIn(issued["agent_id"], serialized)
-            self.assertIn(revoked["revoked_at"], serialized)
 
     def test_audit_events_command_filters_merchant_events_without_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

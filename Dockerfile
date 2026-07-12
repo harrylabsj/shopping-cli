@@ -13,6 +13,6 @@ VOLUME ["/data"]
 EXPOSE 8765
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()"
+  CMD python3 -c "import json, urllib.request; data=json.loads(urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()); raise SystemExit(0 if data.get('ok') else 1)"
 
-CMD ["python3", "scripts/shopping_api.py", "--db", "/data/shopping-cli.sqlite", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["python3", "scripts/shopping_api.py"]

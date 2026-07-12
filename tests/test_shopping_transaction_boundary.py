@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from shopping_cli.api.app import route_info  # noqa: E402
+from shopping_cli.api.route_registry import route_info  # noqa: E402
 from shopping_cli import cli  # noqa: E402
 from shopping_cli.db.session import open_connection  # noqa: E402
 

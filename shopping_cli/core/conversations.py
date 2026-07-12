@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any
 
 from shopping_cli.core.catalog import product_summary, require_merchant, require_product
+from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event, conversation_audit_events, next_actor_for_status
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
@@ -39,14 +40,14 @@ def ensure_conversation(
     merchant_id = str(merchant_id or "").strip()
     sku = str(sku or "").strip()
     if not buyer_id:
-        raise SystemExit("buyer id is required")
+        raise ValidationError("buyer id is required")
     if not merchant_id:
-        raise SystemExit("merchant id is required")
+        raise ValidationError("merchant id is required")
     require_merchant(conn, merchant_id)
     if sku:
         product = require_product(conn, sku)
         if product["merchant_id"] != merchant_id:
-            raise SystemExit(f"Product {sku} does not belong to merchant {merchant_id}")
+            raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
     if reuse_open:
         row = conn.execute(
             """
@@ -81,7 +82,9 @@ def ensure_conversation(
                 raise
             last_insert_error = exc
     else:
-        raise last_insert_error or SystemExit("Could not create conversation")
+        if last_insert_error is not None:
+            raise last_insert_error
+        raise ConflictError("Could not create conversation")
     append_audit_event(
         conn,
         conversation_id,
@@ -95,14 +98,14 @@ def ensure_conversation(
 def require_conversation(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
     row = conn.execute("select * from conversations where id = ?", (conversation_id,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown conversation: {conversation_id}")
+        raise NotFoundError(f"Unknown conversation: {conversation_id}")
     return row
 
 
 def require_open_conversation(conn: sqlite3.Connection, conversation_id: str) -> sqlite3.Row:
     row = require_conversation(conn, conversation_id)
     if row["status"] == "closed":
-        raise SystemExit(f"Conversation {conversation_id} is closed")
+        raise ConflictError(f"Conversation {conversation_id} is closed")
     return row
 
 
@@ -113,7 +116,7 @@ def _normalize_review_text(value: Any, default: str) -> str:
 def _normalize_conversation_status(value: Any) -> str:
     status = str(value or "").strip()
     if status not in CONVERSATION_STATUSES:
-        raise SystemExit(f"Unknown conversation status: {status or '-'}")
+        raise ValidationError(f"Unknown conversation status: {status or '-'}")
     return status
 
 
@@ -121,7 +124,7 @@ def normalize_structured_payload(value: Any) -> dict[str, Any]:
     if value in (None, ""):
         return {}
     if not isinstance(value, dict):
-        raise SystemExit("structured_payload must be an object")
+        raise ValidationError("structured_payload must be an object")
     return dict(value)
 
 
@@ -146,7 +149,7 @@ def append_message(
 ) -> dict[str, Any]:
     conversation = require_open_conversation(conn, conversation_id)
     if not text.strip():
-        raise SystemExit("message text is required")
+        raise ValidationError("message text is required")
     now = now_iso()
     payload = normalize_structured_payload(structured_payload)
     if status is None:
@@ -226,7 +229,7 @@ def add_flag(
 def message_summary(conn: sqlite3.Connection, message_id: int) -> dict[str, Any]:
     row = conn.execute("select * from messages where id = ?", (message_id,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown message: {message_id}")
+        raise NotFoundError(f"Unknown message: {message_id}")
     return message_summary_from_row(row)
 
 
@@ -245,7 +248,7 @@ def message_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
 def flag_summary(conn: sqlite3.Connection, flag_id: int) -> dict[str, Any]:
     row = conn.execute("select * from moderation_flags where id = ?", (flag_id,)).fetchone()
     if row is None:
-        raise SystemExit(f"Unknown moderation flag: {flag_id}")
+        raise NotFoundError(f"Unknown moderation flag: {flag_id}")
     return flag_summary_from_row(row)
 
 
@@ -298,9 +301,46 @@ def conversation_summary(conn: sqlite3.Connection, conversation_id: str) -> dict
     if row["sku"]:
         try:
             summary["product"] = product_summary(conn, row["sku"])
-        except SystemExit:
+        except NotFoundError:
             pass
     return summary
+
+
+def conversation_list_summary_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    conversation_id = str(row["id"])
+    counts = conn.execute(
+        """
+        select
+            count(distinct m.id) as message_count,
+            count(distinct case when f.resolved_at = '' then f.id end) as unresolved_flag_count,
+            count(distinct e.id) as audit_event_count
+        from conversations c
+        left join messages m on m.conversation_id = c.id
+        left join moderation_flags f on f.conversation_id = c.id
+        left join audit_events e on e.conversation_id = c.id
+        where c.id = ?
+        group by c.id
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return {
+        "id": row["id"],
+        "buyer_id": row["buyer_id"],
+        "merchant_id": row["merchant_id"],
+        "sku": row["sku"],
+        "status": row["status"],
+        "next_actor": row["next_actor"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_sender": row["last_sender"],
+        "message_count": _safe_non_negative_int(counts["message_count"] if counts else 0),
+        "unresolved_flag_count": _safe_non_negative_int(counts["unresolved_flag_count"] if counts else 0),
+        "audit_event_count": _safe_non_negative_int(counts["audit_event_count"] if counts else 0),
+    }
+
+
+def conversation_list_summary(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any]:
+    return conversation_list_summary_from_row(conn, require_conversation(conn, conversation_id))
 
 
 def merchant_conversations(
@@ -309,6 +349,7 @@ def merchant_conversations(
     status: str = "",
     limit: int | None = None,
     offset: int = 0,
+    summary_only: bool = True,
 ) -> list[dict[str, Any]]:
     require_merchant(conn, merchant_id)
     values: list[Any] = [merchant_id]
@@ -321,8 +362,10 @@ def merchant_conversations(
         sql += " limit ? offset ?"
         values.extend([_safe_non_negative_int(limit), _safe_non_negative_int(offset)])
     rows = conn.execute(sql, values).fetchall()
+    if summary_only:
+        return [conversation_list_summary(conn, row["id"]) for row in rows]
     return [conversation_summary(conn, row["id"]) for row in rows]
 
 
 def waiting_merchant_conversations(conn: sqlite3.Connection, merchant_id: str) -> list[dict[str, Any]]:
-    return merchant_conversations(conn, merchant_id, "waiting_merchant")
+    return merchant_conversations(conn, merchant_id, "waiting_merchant", summary_only=False)

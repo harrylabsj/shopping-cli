@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-from shopping_cli.api.app import RouteInfo, route_info
-
-ROUTE_PATHS = [
-    "/agents/heartbeat",
-    "/agents",
-    "/agents/{agent_id}",
-    "/merchants/{merchant_id}/agents",
-]
+from shopping_cli.api.route_registry import RouteInfo, routes_for_group
 
 
 def routes() -> list[RouteInfo]:
-    wanted = set(ROUTE_PATHS)
-    return [route for route in route_info() if route.path in wanted]
+    return routes_for_group("agents")
 
 
 def route_paths() -> list[str]:
