@@ -19,10 +19,6 @@ DEFAULT_RESULT_LIMIT = 50
 MAX_RESULT_LIMIT = 100
 
 
-def float_or_none(value: Any) -> Any:
-    return None if value is None else value
-
-
 def bool_from_query(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 

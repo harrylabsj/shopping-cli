@@ -9,6 +9,7 @@ from typing import Any
 
 from shopping_cli.cli_common import db_path_from_args, emit, yes_no
 from shopping_cli.core.conversations import conversation_summary
+from shopping_cli.core.errors import AuthError, PermissionDenied
 from shopping_cli.db.session import db_session
 from shopping_cli.llm.dispatcher import HTTPMarketplaceToolDispatcher, MarketplaceToolDispatcher
 from shopping_cli.llm.prompts import buyer_system_prompt, merchant_system_prompt
@@ -29,7 +30,7 @@ def cmd_llm_run(args: argparse.Namespace) -> None:
         elif token_scope in {"merchant", "merchant_agent"}:
             auth_token = os.environ.get("SHOPPING_AGENT_TOKEN") or os.environ.get("SHOPPING_MERCHANT_TOKEN") or ""
     if api_url and not auth_token:
-        raise SystemExit("--auth-token or SHOPPING_LLM_AUTH_TOKEN is required with --api-url")
+        raise AuthError("--auth-token or SHOPPING_LLM_AUTH_TOKEN is required with --api-url")
     dispatcher: Any
     if api_url:
         dispatcher = HTTPMarketplaceToolDispatcher(
@@ -60,7 +61,7 @@ def cmd_llm_run(args: argparse.Namespace) -> None:
         if not api_url and token_scope not in {"local_trusted", "operator"}:
             owner_key = "merchant_id" if role == "merchant" else "buyer_id"
             if str(conversation.get(owner_key) or "") != actor:
-                raise SystemExit(f"conversation {args.conversation} is not owned by {role} actor {actor}")
+                raise PermissionDenied(f"conversation {args.conversation} is not owned by {role} actor {actor}")
         context = {
             "conversation_id": conversation["id"],
             "buyer_id": conversation["buyer_id"],

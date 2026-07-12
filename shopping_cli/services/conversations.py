@@ -63,15 +63,19 @@ def append_conversation_message(
         structured_payload=structured_payload,
         status=status,
     )
+    new_flag: dict[str, Any] | None = None
     if str(status or "").strip() == "human_required":
-        add_flag(
+        new_flag = add_flag(
             conn,
             conversation_id,
             reason=str(message["structured_payload"].get("reason") or "human_required"),
             severity=str(message["structured_payload"].get("severity") or "review"),
             sku=conversation.get("sku") or "",
         )
-    return {"message": message, "conversation": conversation_summary(conn, conversation_id)}
+    result: dict[str, Any] = {"message": message, "conversation": conversation_summary(conn, conversation_id)}
+    if new_flag is not None:
+        result["new_flag"] = new_flag
+    return result
 
 
 def close_conversation(
@@ -117,3 +121,21 @@ def append_conversation_closed_audit(
     if details:
         payload.update(details)
     append_audit_event(conn, conversation_id, actor, "conversation_closed", payload)
+
+
+def list_conversation_ids(
+    conn: Any,
+    *,
+    clauses: list[str] | None = None,
+    values: list[Any] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[str]:
+    """Return conversation IDs matching the given SQL clauses, ordered by most recently updated."""
+    sql = "select id from conversations"
+    if clauses:
+        sql += " where " + " and ".join(clauses)
+    sql += " order by updated_at desc limit ? offset ?"
+    params = list(values or [])
+    params.extend([limit, offset])
+    return [str(row["id"]) for row in conn.execute(sql, params).fetchall()]

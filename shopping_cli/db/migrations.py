@@ -120,24 +120,33 @@ def migration_005_api_token_scope_columns(conn: sqlite3.Connection) -> None:
 
 
 def migration_006_search_indexes(conn: sqlite3.Connection) -> None:
-    conn.execute(
+    """Create FTS5 search index tables.
+
+    SQLite builds without the FTS5 extension skip index creation; the catalog
+    layer degrades to Python-side filtering via the
+    ``*_search_index_available`` helpers. Other OperationalError cases (for
+    example read-only media) are re-raised so they are not masked.
+    """
+    fts5_statements = [
         """
         create virtual table if not exists product_search_index
         using fts5(sku unindexed, merchant_id unindexed, text, tokenize='unicode61')
-        """
-    )
-    conn.execute(
+        """,
         """
         create virtual table if not exists merchant_search_index
         using fts5(id unindexed, text, tokenize='unicode61')
-        """
-    )
-    conn.execute(
+        """,
         """
         create virtual table if not exists policy_search_index
         using fts5(merchant_id unindexed, text, tokenize='unicode61')
-        """
-    )
+        """,
+    ]
+    for statement in fts5_statements:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if "fts5" not in str(exc).lower():
+                raise
 
 
 MIGRATIONS: tuple[Migration, ...] = (

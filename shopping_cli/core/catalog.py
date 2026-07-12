@@ -212,7 +212,12 @@ def update_merchant(
             notes=delivery["notes"],
             currency=delivery["currency"],
         )
-    sync_product_search_index(conn, merchant_id=merchant_id)
+    # Only sync product search index when search-relevant merchant fields change.
+    merchant_search_fields_changed = any(
+        value is not None for value in (name, city, service_area, tags)
+    )
+    if merchant_search_fields_changed:
+        sync_product_search_index(conn, merchant_id=merchant_id)
     sync_merchant_search_index(conn, merchant_id=merchant_id)
     return merchant_summary(conn, merchant_id)
 
@@ -711,8 +716,53 @@ def _ensure_product_search_index_populated(conn: sqlite3.Connection) -> bool:
     except (AttributeError, TypeError, sqlite3.OperationalError):
         return False
     if indexed_count == product_count:
-        return True
-    return rebuild_product_search_index(conn)
+        # Count alone is not enough: the index could contain stale rows while
+        # missing active products. Verify consistency before skipping sync.
+        try:
+            stale_count = conn.execute(
+                f"""
+                select count(*) from {PRODUCT_SEARCH_INDEX_TABLE}
+                where sku not in (select sku from products where active = 1)
+                """
+            ).fetchone()[0]
+            missing_count = conn.execute(
+                f"""
+                select count(*) from products p
+                where p.active = 1 and p.sku not in (select sku from {PRODUCT_SEARCH_INDEX_TABLE})
+                """
+            ).fetchone()[0]
+        except (AttributeError, TypeError, sqlite3.OperationalError):
+            return False
+        if stale_count == 0 and missing_count == 0:
+            return True
+    # Incremental sync avoids rebuilding the entire FTS table on every startup:
+    # insert missing active rows and delete stale/extra rows.
+    try:
+        missing_rows = conn.execute(
+            f"""
+            select p.*, m.name as merchant_name, m.city as merchant_city,
+                   m.service_area as merchant_service_area, m.tags_json as merchant_tags_json
+            from products p
+            join merchants m on m.id = p.merchant_id
+            left join {PRODUCT_SEARCH_INDEX_TABLE} psi on psi.sku = p.sku
+            where p.active = 1 and psi.sku is null
+            order by p.sku
+            """
+        ).fetchall()
+        for row in missing_rows:
+            conn.execute(
+                f"insert into {PRODUCT_SEARCH_INDEX_TABLE}(sku, merchant_id, text) values (?, ?, ?)",
+                (row["sku"], row["merchant_id"], _product_search_document(row)),
+            )
+        conn.execute(
+            f"""
+            delete from {PRODUCT_SEARCH_INDEX_TABLE}
+            where sku not in (select sku from products where active = 1)
+            """
+        )
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    return True
 
 
 def merchant_search_index_available(conn: sqlite3.Connection) -> bool:
@@ -833,8 +883,50 @@ def _ensure_merchant_search_index_populated(conn: sqlite3.Connection) -> bool:
     except (AttributeError, TypeError, sqlite3.OperationalError):
         return False
     if indexed_count == merchant_count:
-        return True
-    return rebuild_merchant_search_index(conn)
+        # Count alone is not enough: verify no stale or missing rows.
+        try:
+            stale_count = conn.execute(
+                f"""
+                select count(*) from {MERCHANT_SEARCH_INDEX_TABLE}
+                where id not in (select id from merchants)
+                """
+            ).fetchone()[0]
+            missing_count = conn.execute(
+                f"""
+                select count(*) from merchants m
+                where m.id not in (select id from {MERCHANT_SEARCH_INDEX_TABLE})
+                """
+            ).fetchone()[0]
+        except (AttributeError, TypeError, sqlite3.OperationalError):
+            return False
+        if stale_count == 0 and missing_count == 0:
+            return True
+    # Incremental sync avoids rebuilding the entire FTS table on every startup:
+    # insert missing active rows and delete stale/extra rows.
+    try:
+        missing_rows = conn.execute(
+            f"""
+            select m.*
+            from merchants m
+            left join {MERCHANT_SEARCH_INDEX_TABLE} msi on msi.id = m.id
+            where msi.id is null
+            order by m.id
+            """
+        ).fetchall()
+        for row in missing_rows:
+            conn.execute(
+                f"insert into {MERCHANT_SEARCH_INDEX_TABLE}(id, text) values (?, ?)",
+                (row["id"], _merchant_search_document(row)),
+            )
+        conn.execute(
+            f"""
+            delete from {MERCHANT_SEARCH_INDEX_TABLE}
+            where id not in (select id from merchants)
+            """
+        )
+    except (AttributeError, TypeError, sqlite3.OperationalError):
+        return False
+    return True
 
 
 def _match_score(query: str, product: sqlite3.Row, merchant: Mapping[str, Any]) -> float:
@@ -1066,8 +1158,6 @@ def search_merchants(
     if use_index:
         results: list[dict[str, Any]] = []
         for merchant in rows:
-            if city and merchant["city"].lower() != city.lower():
-                continue
             summary = _merchant_summary_from_search_row(merchant)
             summary["match_score"] = _match_merchant_score(query, merchant)
             results.append(summary)

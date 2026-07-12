@@ -2503,6 +2503,79 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(status, 400)
             self.assertIn("--price must be finite", oversized_price["error"])
 
+    def test_api_numeric_float_fields_reject_empty_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, empty_fee = self.request(
+                app,
+                "POST",
+                "/merchants",
+                {
+                    "id": "seller-empty-fee",
+                    "name": "West Lake Tea",
+                    "delivery_fee": "",
+                },
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("delivery fee must be finite", empty_fee["error"])
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            merchant_token = merchant["merchant_token"]
+
+            status, empty_radius = self.request(
+                app,
+                "PATCH",
+                "/merchants/seller-a",
+                {
+                    "delivery_radius_km": "",
+                    "merchant_token": merchant_token,
+                },
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("delivery radius must be finite", empty_radius["error"])
+
+            status, empty_price = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing",
+                    "price": "",
+                    "stock": 1,
+                    "merchant_token": merchant_token,
+                },
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("--price must be finite", empty_price["error"])
+
+            status, product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-b",
+                    "title": "Longjing",
+                    "price": 88,
+                    "stock": 1,
+                    "merchant_token": merchant_token,
+                },
+            )
+            self.assertEqual(status, 200)
+            status, empty_price_update = self.request(
+                app,
+                "PATCH",
+                "/products/tea-b",
+                {"merchant_id": "seller-a", "price": "", "merchant_token": merchant_token},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("--price must be finite", empty_price_update["error"])
+
     def test_agent_heartbeat_integer_fields_reject_fractional_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"

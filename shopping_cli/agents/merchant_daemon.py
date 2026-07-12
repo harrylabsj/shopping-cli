@@ -141,8 +141,8 @@ class _PidFileLock:
         if fcntl is not None:
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_EX)
-            except OSError:
-                pass
+            except OSError as exc:
+                raise RuntimeError(f"Failed to acquire PID file lock ({self.lock_path}): {exc}") from exc
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:

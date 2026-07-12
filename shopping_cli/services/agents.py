@@ -96,6 +96,17 @@ def get_agent_summary(
     return agent_summary(row, include_stale=include_stale, stale_ttl_seconds=stale_ttl_seconds)
 
 
+def validate_buyer_message_for_claim(conn: Any, conversation_id: str, message_id: int) -> None:
+    """Verify a message exists, belongs to the conversation, and was sent by the buyer."""
+    row = conn.execute("select conversation_id, sender from messages where id = ?", (message_id,)).fetchone()
+    if row is None:
+        raise NotFoundError(f"Unknown message: {message_id}")
+    if row["conversation_id"] != conversation_id:
+        raise ValidationError(f"Message {message_id} does not belong to conversation {conversation_id}")
+    if row["sender"] != "buyer":
+        raise ValidationError(f"Agent can only claim buyer messages, got {row['sender']}")
+
+
 def issue_agent_token_for_merchant(
     conn: Any,
     merchant_id: str,

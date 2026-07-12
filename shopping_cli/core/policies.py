@@ -95,6 +95,63 @@ def create_policy(
     return policy_summary(conn, merchant_id, code)
 
 
+def update_policy(
+    conn: sqlite3.Connection,
+    merchant_id: str,
+    code: str,
+    body: str | None = None,
+    category: str | None = None,
+    title: str | None = None,
+    tags: str | list[str] | None = None,
+    high_risk: bool | None = None,
+) -> dict[str, Any]:
+    """Update an existing policy and sync the FTS search index.
+
+    Only fields that are not ``None`` are updated.  The search index is
+    re-synced so that FTS results reflect the new text immediately.
+    """
+    merchant_id = str(merchant_id or "").strip()
+    code = str(code or "").strip()
+    if not merchant_id:
+        raise ValidationError("merchant id is required")
+    if not code:
+        raise ValidationError("policy code is required")
+    require_policy(conn, merchant_id, code)
+    updates: list[str] = []
+    values: list[Any] = []
+    if body is not None:
+        body = str(body or "").strip()
+        if not body:
+            raise ValidationError("policy body is required")
+        updates.append("body = ?")
+        values.append(body)
+    if category is not None:
+        updates.append("category = ?")
+        values.append(str(category or "").strip())
+    if title is not None:
+        title = str(title or "").strip()
+        if not title:
+            raise ValidationError("policy title is required")
+        updates.append("title = ?")
+        values.append(title)
+    if tags is not None:
+        updates.append("tags_json = ?")
+        values.append(encode_json(parse_tags(tags)))
+    if high_risk is not None:
+        updates.append("high_risk = ?")
+        values.append(1 if high_risk else 0)
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(now_iso())
+        values.extend([merchant_id, code])
+        conn.execute(
+            f"update policies set {', '.join(updates)} where merchant_id = ? and code = ?",
+            values,
+        )
+        sync_policy_search_index(conn, merchant_id)
+    return policy_summary(conn, merchant_id, code)
+
+
 def policy_summary(conn: sqlite3.Connection, merchant_id: str, code: str) -> dict[str, Any]:
     return _policy_to_summary(require_policy(conn, merchant_id, code))
 

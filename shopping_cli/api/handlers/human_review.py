@@ -57,20 +57,14 @@ def human_review_queue(
 ) -> dict[str, Any]:
     if not merchant_id:
         raise AuthError("merchant_id is required for human-review queue")
-    sql = """
-        select f.*, c.merchant_id as merchant_id, c.buyer_id as buyer_id
-        from moderation_flags f
-        join conversations c on c.id = f.conversation_id
-        where f.resolved_at = ''
-    """
-    values: list[Any] = []
-    sql += " and c.merchant_id = ?"
-    values.append(merchant_id)
-    sql += " order by f.created_at desc, f.id desc limit ? offset ?"
-    values.extend([result_limit(limit), result_offset(offset)])
     with db_session(db_path) as conn:
         token_service.require_merchant_read_token(conn, merchant_id, _payload_token(payload))
-        rows = conn.execute(sql, values).fetchall()
+        rows = human_review_service.list_unresolved_reviews(
+            conn,
+            merchant_id,
+            limit=result_limit(limit),
+            offset=result_offset(offset),
+        )
         return {"ok": True, "reviews": [review_summary(conn, row) for row in rows]}
 
 
@@ -102,9 +96,13 @@ def create_human_review(db_path: str | Path, conversation_id: str, payload: dict
             sku=conversation.get("sku") or "",
         )
         next_actor = next_actor_for_status("human_required", review["reason"])
-        conn.execute(
-            "update conversations set status = 'human_required', next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-            (next_actor, now_iso(), actor, conversation_id),
+        human_review_service.update_conversation_status(
+            conn,
+            conversation_id,
+            status="human_required",
+            next_actor=next_actor,
+            sender=actor,
+            now=now_iso(),
         )
         append_audit_event(
             conn,
@@ -113,7 +111,7 @@ def create_human_review(db_path: str | Path, conversation_id: str, payload: dict
             "conversation_routed",
             {"status": "human_required", "next_actor": next_actor, "reason": review["reason"]},
         )
-        row = conn.execute("select * from moderation_flags where id = ?", (review["id"],)).fetchone()
+        row = human_review_service.human_review_row(conn, review["id"], positive_whole_int)
         return {
             "ok": True,
             "review": review_summary(conn, row),
@@ -134,26 +132,18 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()
-        resolved = conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where id = ? and resolved_at = ''
-            """,
-            (now, action, sender, int(review_id)),
+        rowcount = human_review_service.resolve_review(
+            conn,
+            int(review_id),
+            action=action,
+            sender=sender,
+            now=now,
         )
-        if resolved.rowcount != 1:
+        if rowcount != 1:
             raise ConflictError(f"Human review already resolved: {review_id}")
-        remaining_rows = conn.execute(
-            """
-            select reason from moderation_flags
-            where conversation_id = ? and resolved_at = ''
-            order by case when reason = 'suspicious_content' then 0 else 1 end, id
-            """,
-            (conversation_id,),
-        ).fetchall()
-        remaining = len(remaining_rows)
-        remaining_reason = str(remaining_rows[0]["reason"] or "") if remaining_rows else ""
+        remaining_reasons = human_review_service.remaining_unresolved_reviews(conn, conversation_id)
+        remaining = len(remaining_reasons)
+        remaining_reason = remaining_reasons[0] if remaining_reasons else ""
         status = "human_required" if remaining else ("closed" if action == "close" else "waiting_buyer")
         status_reason = remaining_reason if status == "human_required" else str(row["reason"] or "")
         next_actor = next_actor_for_status(status, status_reason if status == "human_required" else "")
@@ -174,9 +164,13 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 status=status,
             )
         else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, sender, conversation_id),
+            human_review_service.update_conversation_status(
+                conn,
+                conversation_id,
+                status=status,
+                next_actor=next_actor,
+                sender=sender,
+                now=now,
             )
         append_audit_event(
             conn,
@@ -200,10 +194,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 {"resolution": action, "review_id": int(review_id), "source": "human_review"},
             )
         review = review_summary(conn, human_review_row(conn, review_id))
-        rows = conn.execute(
-            "select * from moderation_flags where conversation_id = ? order by id",
-            (conversation_id,),
-        ).fetchall()
+        rows = human_review_service.list_conversation_reviews(conn, conversation_id)
         return {
             "ok": True,
             "review": review,
@@ -222,15 +213,14 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()
-        resolved = conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where conversation_id = ? and resolved_at = ''
-            """,
-            (now, action, sender, conversation_id),
+        rowcount = human_review_service.resolve_all_conversation_reviews(
+            conn,
+            conversation_id,
+            action=action,
+            sender=sender,
+            now=now,
         )
-        if resolved.rowcount == 0:
+        if rowcount == 0:
             raise NotFoundError(f"No unresolved human reviews for conversation: {conversation_id}")
         next_actor = next_actor_for_status(status)
         if payload.get("text"):
@@ -244,9 +234,13 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 status=status,
             )
         else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, sender, conversation_id),
+            human_review_service.update_conversation_status(
+                conn,
+                conversation_id,
+                status=status,
+                next_actor=next_actor,
+                sender=sender,
+                now=now,
             )
         append_audit_event(
             conn,
@@ -263,10 +257,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 next_actor,
                 {"resolution": action, "source": "human_review"},
             )
-        rows = conn.execute(
-            "select * from moderation_flags where conversation_id = ? order by id",
-            (conversation_id,),
-        ).fetchall()
+        rows = human_review_service.list_conversation_reviews(conn, conversation_id)
         return {
             "ok": True,
             "reviews": [review_summary(conn, row) for row in rows],

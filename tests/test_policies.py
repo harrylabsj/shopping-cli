@@ -18,6 +18,7 @@ from shopping_cli.core.policies import (  # noqa: E402
     list_policies,
     policy_summary,
     search_policies,
+    update_policy,
 )
 from shopping_cli.db.session import db_session, open_connection  # noqa: E402
 
@@ -142,6 +143,44 @@ class PolicyCoreTest(unittest.TestCase):
         self._seed_tea_policies()
         results = search_policies(self.conn, query="", merchant_id="yunqi-tea")
         self.assertEqual(len(results), 3)
+
+    def test_update_policy_round_trip(self):
+        create_policy(
+            self.conn,
+            "yunqi-tea",
+            code="POL-UP-1",
+            category="售后政策 [POL-AS]",
+            title="原标题",
+            body="原内容。",
+        )
+        updated = update_policy(
+            self.conn,
+            "yunqi-tea",
+            "POL-UP-1",
+            title="新标题",
+            body="新内容。",
+            category="更新后分类",
+            tags="售后,更新",
+            high_risk=True,
+        )
+        self.assertEqual(updated["title"], "新标题")
+        self.assertEqual(updated["body"], "新内容。")
+        self.assertEqual(updated["category"], "更新后分类")
+        self.assertEqual(updated["tags"], ["售后", "更新"])
+        self.assertTrue(updated["high_risk"])
+        fetched = policy_summary(self.conn, "yunqi-tea", "POL-UP-1")
+        self.assertEqual(fetched["title"], "新标题")
+
+    def test_update_policy_blank_title_is_rejected(self):
+        create_policy(
+            self.conn,
+            "yunqi-tea",
+            code="POL-UP-2",
+            title="原标题",
+            body="原内容。",
+        )
+        with self.assertRaises(ValidationError):
+            update_policy(self.conn, "yunqi-tea", "POL-UP-2", title="   ")
 
 
 class PolicyCliTest(unittest.TestCase):

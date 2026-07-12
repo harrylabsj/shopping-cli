@@ -11,6 +11,7 @@ from shopping_cli.agents import merchant_agent, merchant_daemon
 from shopping_cli.agents.tools import HTTPMerchantAgentTools
 from shopping_cli.cli_common import db_path_from_args, emit, yes_no
 from shopping_cli.core.catalog import require_merchant
+from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.db.session import db_session
 from shopping_cli.services import agents as agent_service
 from shopping_cli.services import tokens as token_service
@@ -37,7 +38,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
     if api_url:
         token = args.agent_token or os.environ.get("SHOPPING_AGENT_TOKEN") or args.merchant_token or os.environ.get("SHOPPING_MERCHANT_TOKEN")
         if not token:
-            raise SystemExit("--merchant-token or --agent-token is required with --api-url")
+            raise AuthError("--merchant-token or --agent-token is required with --api-url")
         host = args.host or os.environ.get("SHOPPING_AGENT_HOST") or ""
         session_id = args.session_id or os.environ.get("SHOPPING_AGENT_SESSION_ID") or ""
         tool_kwargs = {"host": host, "session_id": session_id} if host or session_id else {}
@@ -268,7 +269,7 @@ def cmd_agent_token(args: argparse.Namespace) -> None:
                 positive_whole_seconds=_positive_whole_seconds,
             )
         except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
+            raise ValidationError(str(exc)) from exc
     result["message"] = f"Agent token issued for {result['agent_id']}: {result['agent_token']}"
     emit(result, args.format)
 
@@ -318,7 +319,7 @@ def cmd_agent_rotate_token(args: argparse.Namespace) -> None:
                 positive_whole_seconds=_positive_whole_seconds,
             )
         except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
+            raise ValidationError(str(exc)) from exc
     result["message"] = f"Agent token rotated for {result['agent_id']}: {result['agent_token']}"
     emit(result, args.format)
 

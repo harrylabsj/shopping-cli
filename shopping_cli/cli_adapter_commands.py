@@ -7,6 +7,7 @@ from typing import Any
 
 from shopping_cli.adapters import hermes, openclaw
 from shopping_cli.cli_common import db_path_from_args, emit, yes_no
+from shopping_cli.core.errors import ValidationError
 
 
 def adapter_for_host(host: str) -> Any:
@@ -14,7 +15,7 @@ def adapter_for_host(host: str) -> Any:
         return openclaw
     if host == "hermes":
         return hermes
-    raise SystemExit(f"Unknown adapter host: {host}")
+    raise ValidationError(f"Unknown adapter host: {host}")
 
 
 def cmd_adapter_inspect(args: argparse.Namespace) -> None:

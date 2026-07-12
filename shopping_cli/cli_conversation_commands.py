@@ -10,6 +10,7 @@ from shopping_cli.core.conversations import (
     conversation_list_summary,
     conversation_summary,
 )
+from shopping_cli.core.errors import ValidationError
 from shopping_cli.db.session import db_session
 from shopping_cli.services import conversations as conversation_service
 
@@ -109,9 +110,9 @@ def cmd_conversation_message(args: argparse.Namespace) -> None:
     structured_payload = {"source_id": args.source_id or args.sender}
     status = str(args.status or "").strip()
     if args.sender in {"buyer", "buyer_cli"} and status:
-        raise SystemExit("buyer messages cannot set conversation status")
+        raise ValidationError("buyer messages cannot set conversation status")
     if status == "closed":
-        raise SystemExit("conversation messages cannot close conversations; use conversation close")
+        raise ValidationError("conversation messages cannot close conversations; use conversation close")
     with db_session(db_path_from_args(args)) as conn:
         existing = conversation_summary(conn, args.conversation)
         result = conversation_service.append_conversation_message(

@@ -8,8 +8,6 @@ not been installed yet.
 from __future__ import annotations
 
 import json
-import math
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,15 +16,14 @@ from typing import Any, Callable
 
 from shopping_cli import VERSION
 from shopping_cli.api import auth as api_auth
-from shopping_cli.api import idempotency as api_idempotency
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.handlers import agents as agent_handlers
 from shopping_cli.api.handlers import audit as audit_handlers
+from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
-from shopping_cli.agents import buyer_cli
-from shopping_cli.core.channels import ingest_buyer_message
+from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.core.errors import (
     AuthError,
     ConflictError,
@@ -37,10 +34,6 @@ from shopping_cli.core.errors import (
     ShoppingCliError,
     ValidationError,
 )
-from shopping_cli.db.session import db_session
-from shopping_cli.core.tokens import token_digest
-from shopping_cli.services import buyer_bootstrap as buyer_bootstrap_service
-from shopping_cli.services import conversations as conversation_service
 from shopping_cli.services import tokens as token_service
 
 try:  # pragma: no cover - exercised when optional dependency is installed
@@ -52,13 +45,6 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     Header = None  # type: ignore[assignment]
     JSONResponse = None  # type: ignore[assignment]
     RequestValidationError = None  # type: ignore[assignment]
-
-
-MAX_SQLITE_INTEGER = 2**63 - 1
-DEFAULT_RESULT_LIMIT = 50
-DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE = api_idempotency.DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
-BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = api_idempotency.BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS
-MAX_IDEMPOTENCY_KEY_LENGTH = api_idempotency.MAX_IDEMPOTENCY_KEY_LENGTH
 
 
 Handler = Callable[..., dict[str, Any]]
@@ -96,132 +82,12 @@ def _idempotency_key_header_default() -> Any:
 IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
 
 
-def _non_negative_whole_int(value: Any, field_name: str, default: int = 0) -> int:
-    if value in (None, ""):
-        return default
-    if isinstance(value, bool):
-        raise ValidationError(f"{field_name} must be a whole number")
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            raise ValidationError(f"{field_name} must be a whole number")
-        number = int(value)
-    else:
-        try:
-            number = int(str(value).strip())
-        except ValueError as exc:
-            raise ValidationError(f"{field_name} must be a whole number") from exc
-    if number < 0:
-        raise ValidationError(f"{field_name} must be non-negative")
-    if number > MAX_SQLITE_INTEGER:
-        raise ValidationError(f"{field_name} must be <= {MAX_SQLITE_INTEGER}")
-    return number
-
-
 def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
     token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
 
 
 def _resolve_agent_token(conn: Any, merchant_id: str, token: Any = "", token_prefix: Any = "") -> str:
     return token_service.resolve_agent_token(conn, merchant_id, token, token_prefix)
-
-
-def _issue_buyer_token(conn: Any, buyer_id: str, conversation_id: str) -> str:
-    return token_service.issue_buyer_token(conn, buyer_id, conversation_id)
-
-
-def _ensure_buyer_token(conn: Any, buyer_id: str, conversation_id: str, token: str) -> str:
-    return token_service.ensure_buyer_token(conn, buyer_id, conversation_id, token)
-
-
-def _buyer_bootstrap_rate_limit_per_minute() -> int:
-    return buyer_bootstrap_service.rate_limit_per_minute(
-        os.environ.get("SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE"),
-        default=DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE,
-        maximum=MAX_SQLITE_INTEGER,
-    )
-
-
-def _enforce_buyer_bootstrap_rate_limit(conn: Any, bootstrap_token_hash: str) -> None:
-    api_idempotency.enforce_buyer_bootstrap_rate_limit(
-        conn,
-        bootstrap_token_hash,
-        _buyer_bootstrap_rate_limit_per_minute(),
-    )
-
-
-def _replay_buyer_idempotency(
-    conn: Any,
-    payload: dict[str, Any],
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> dict[str, Any] | None:
-    return api_idempotency.replay_buyer_idempotency(
-        conn,
-        payload,
-        endpoint,
-        bootstrap_token_hash,
-        idempotency_key,
-        request_hash,
-        _ensure_buyer_token,
-    )
-
-
-def _claim_buyer_idempotency(
-    conn: Any,
-    payload: dict[str, Any],
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> dict[str, Any] | None:
-    return api_idempotency.claim_buyer_idempotency(
-        conn,
-        payload,
-        endpoint,
-        bootstrap_token_hash,
-        idempotency_key,
-        request_hash,
-        _ensure_buyer_token,
-    )
-
-
-def _complete_buyer_idempotency(
-    conn: Any,
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-    response: dict[str, Any],
-) -> None:
-    api_idempotency.complete_buyer_idempotency(
-        conn,
-        endpoint,
-        bootstrap_token_hash,
-        idempotency_key,
-        request_hash,
-        response,
-        _non_negative_whole_int,
-    )
-
-
-def _clear_buyer_idempotency_claim(
-    conn: Any,
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> None:
-    api_idempotency.clear_buyer_idempotency_claim(
-        conn,
-        endpoint,
-        bootstrap_token_hash,
-        idempotency_key,
-        request_hash,
-    )
 
 
 def _health(db_path: str | Path) -> dict[str, Any]:
@@ -265,87 +131,11 @@ def _search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, A
 
 
 def _buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    bootstrap_token_hash = api_auth.require_buyer_bootstrap_token(payload, token_digest)
-    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    request_hash = api_idempotency.buyer_ask_request_hash(payload)
-    endpoint = "/buyer/ask"
-    with db_session(db_path) as conn:
-        replayed = _replay_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
-        replayed = _claim_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        try:
-            buyer_id = str(payload["buyer_id"])
-            result = buyer_cli.ask(
-                conn,
-                buyer_id=buyer_id,
-                text=str(payload["text"]),
-                city=str(payload.get("city") or ""),
-                area=str(payload.get("area") or ""),
-                source_id=str(payload.get("source_id") or "buyer-cli"),
-                host=str(payload.get("host") or ""),
-                session_id=str(payload.get("session_id") or ""),
-                reuse_open=False,
-            )
-            if result.get("conversation"):
-                if idempotency_key:
-                    token = api_idempotency.deterministic_buyer_token(
-                        payload,
-                        endpoint,
-                        idempotency_key,
-                        result["buyer_id"],
-                        result["conversation"]["id"],
-                    )
-                    result["buyer_token"] = _ensure_buyer_token(
-                        conn,
-                        result["buyer_id"],
-                        result["conversation"]["id"],
-                        token,
-                    )
-                else:
-                    result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
-            result["idempotent"] = False
-            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
-            return result
-        except KeyError as exc:
-            raise ValidationError(f"missing required field: {exc.args[0]}") from exc
-        except Exception:
-            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
-            raise
+    return buyer_handlers.buyer_ask(db_path, payload)
 
 
 def _ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("buyer_id"):
-        raise ValidationError("buyer_id override is not allowed for channel ingress")
-    api_auth.require_channel_token(str(payload.get("channel") or ""), payload)
-    with db_session(db_path) as conn:
-        return ingest_buyer_message(
-            conn,
-            channel=str(payload["channel"]),
-            external_user_id=str(payload["external_user_id"]),
-            text=str(payload["text"]),
-            city=str(payload.get("city") or ""),
-            area=str(payload.get("area") or ""),
-            conversation_id=str(payload.get("conversation_id") or ""),
-            external_message_id=str(payload.get("external_message_id") or ""),
-        )
+    return buyer_handlers.ingest_channel_message(db_path, payload)
 
 
 def _get_conversation(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -353,67 +143,7 @@ def _get_conversation(db_path: str | Path, conversation_id: str, payload: dict[s
 
 
 def _create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    bootstrap_token_hash = api_auth.require_buyer_bootstrap_token(payload, token_digest)
-    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    request_hash = api_idempotency.conversation_create_request_hash(payload)
-    endpoint = "/conversations"
-    with db_session(db_path) as conn:
-        replayed = _replay_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
-        replayed = _claim_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        try:
-            conversation = conversation_service.create_conversation(
-                conn,
-                buyer_id=str(payload["buyer_id"]),
-                merchant_id=str(payload["merchant_id"]),
-                sku=str(payload.get("sku") or ""),
-                text=str(payload.get("text") or ""),
-                intent=str(payload.get("intent") or "ask_product"),
-                source_id=str(payload.get("source_id") or ""),
-                reuse_open=False,
-            )
-            if idempotency_key:
-                token = api_idempotency.deterministic_buyer_token(
-                    payload,
-                    endpoint,
-                    idempotency_key,
-                    conversation["buyer_id"],
-                    conversation["id"],
-                )
-                buyer_token = _ensure_buyer_token(conn, conversation["buyer_id"], conversation["id"], token)
-            else:
-                buyer_token = _issue_buyer_token(conn, conversation["buyer_id"], conversation["id"])
-            result = {
-                "ok": True,
-                "conversation": conversation,
-                "buyer_token": buyer_token,
-                "idempotent": False,
-            }
-            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
-            return result
-        except KeyError as exc:
-            raise ValidationError(f"missing required field: {exc.args[0]}") from exc
-        except Exception:
-            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
-            raise
+    return buyer_handlers.create_conversation(db_path, payload)
 
 
 def _append_conversation_message(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -711,8 +441,8 @@ def handle_request(
         return 400, {"ok": False, "error": str(exc)}
     except ShoppingCliError as exc:
         return 400, {"ok": False, "error": str(exc)}
-    except Exception as exc:
-        return 500, {"ok": False, "error": f"internal server error: {exc}"}
+    except Exception:
+        return 500, {"ok": False, "error": "internal server error"}
 
 
 def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:

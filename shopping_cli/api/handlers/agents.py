@@ -18,7 +18,7 @@ from shopping_cli.api.handlers.common import (
 )
 from shopping_cli.config import agent_stale_ttl_seconds_from
 from shopping_cli.core.conversations import conversation_summary
-from shopping_cli.core.errors import AuthError, NotFoundError, ValidationError
+from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.core.harness import (
     abandon_agent_message,
     abandon_stale_agent_messages,
@@ -154,13 +154,7 @@ def require_agent_conversation(conn: Any, merchant_id: str, conversation_id: str
 
 
 def require_message_in_conversation(conn: Any, conversation_id: str, message_id: int) -> None:
-    row = conn.execute("select conversation_id, sender from messages where id = ?", (message_id,)).fetchone()
-    if row is None:
-        raise NotFoundError(f"Unknown message: {message_id}")
-    if row["conversation_id"] != conversation_id:
-        raise ValidationError(f"Message {message_id} does not belong to conversation {conversation_id}")
-    if row["sender"] != "buyer":
-        raise ValidationError(f"Agent can only claim buyer messages, got {row['sender']}")
+    agent_service.validate_buyer_message_for_claim(conn, conversation_id, message_id)
 
 
 def require_agent_process_scope(conn: Any, merchant_id: str, agent_id: str, message_id: int) -> dict[str, Any]:
@@ -257,15 +251,11 @@ def list_agents(
 
 def get_agent(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
-        row = conn.execute("select * from agents where id = ?", (agent_id,)).fetchone()
-        if row is None:
-            raise NotFoundError(f"Unknown agent: {agent_id}")
-        token_service.require_merchant_read_token(conn, row["owner_id"], _payload_token(payload))
-        return {
-            "ok": True,
-            "agent": agent_service.agent_summary(
-                row,
-                include_stale=True,
-                stale_ttl_seconds=agent_stale_ttl_seconds_from(),
-            ),
-        }
+        summary = agent_service.get_agent_summary(
+            conn,
+            agent_id,
+            include_stale=True,
+            stale_ttl_seconds=agent_stale_ttl_seconds_from(),
+        )
+        token_service.require_merchant_read_token(conn, summary["owner_id"], _payload_token(payload))
+        return {"ok": True, "agent": summary}

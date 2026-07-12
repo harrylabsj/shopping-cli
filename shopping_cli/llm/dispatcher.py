@@ -245,13 +245,9 @@ class MarketplaceToolDispatcher:
             conversation = result["conversation"]
             flags = []
             if human_required:
-                matching_flags = [
-                    flag
-                    for flag in conversation.get("flags") or []
-                    if isinstance(flag, dict) and flag.get("reason") == reason and not flag.get("resolved_at")
-                ]
-                if matching_flags:
-                    flags.append(add_review_source(matching_flags[-1], self.source_id))
+                new_flag = result.get("new_flag")
+                if new_flag is not None:
+                    flags.append(add_review_source(new_flag, self.source_id))
         return {"ok": True, "message": message, "flags": flags, "conversation": conversation}
 
 

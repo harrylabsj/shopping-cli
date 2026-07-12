@@ -135,16 +135,17 @@ def conversation_list(
             token_service.require_merchant_read_token(conn, owner_id, _payload_token(payload))
         else:
             raise AuthError("conversation list owner is required")
-        sql = "select id from conversations"
-        if clauses:
-            sql += " where " + " and ".join(clauses)
-        sql += " order by updated_at desc limit ? offset ?"
-        values.extend([result_limit(filters.get("limit")), result_offset(filters.get("offset"))])
-        rows = conn.execute(sql, values).fetchall()
+        ids = conversation_service.list_conversation_ids(
+            conn,
+            clauses=clauses,
+            values=values,
+            limit=result_limit(filters.get("limit")),
+            offset=result_offset(filters.get("offset")),
+        )
         summarize = (
             conversation_summary if str(filters.get("include") or "").lower() == "details" else conversation_list_summary
         )
-        return {"ok": True, "conversations": [summarize(conn, row["id"]) for row in rows]}
+        return {"ok": True, "conversations": [summarize(conn, cid) for cid in ids]}
 
 
 def merchant_conversations(

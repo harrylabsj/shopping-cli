@@ -13,7 +13,6 @@ from shopping_cli.services import tokens as token_service
 
 from .common import (
     bool_from_query,
-    float_or_none,
     public_merchant_summary,
     public_product_summary,
     require_field,
@@ -90,9 +89,9 @@ def update_merchant(
             hours=payload.get("hours"),
             automation_boundaries=payload.get("automation_boundaries"),
             tags=payload.get("tags") if "tags" in payload else None,
-            delivery_fee=float_or_none(payload.get("delivery_fee")),
+            delivery_fee=payload.get("delivery_fee"),
             delivery_eta_minutes=payload.get("delivery_eta_minutes"),
-            delivery_radius_km=float_or_none(payload.get("delivery_radius_km")),
+            delivery_radius_km=payload.get("delivery_radius_km"),
         )
         return {"ok": True, "merchant": merchant}
 
@@ -157,7 +156,7 @@ def update_product(
             sku=sku,
             merchant_id=merchant_id,
             title=payload.get("title"),
-            price=float_or_none(payload.get("price")),
+            price=payload.get("price"),
             stock=payload.get("stock"),
             currency=payload.get("currency"),
             category=payload.get("category"),
