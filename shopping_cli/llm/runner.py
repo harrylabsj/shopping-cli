@@ -127,8 +127,6 @@ def run_marketplace_tool_loop(
             try:
                 response = provider.complete(conversation_messages, tools=tools)
                 break
-            except SystemExit as exc:
-                return _fallback(conversation_messages, tool_results, f"{type(exc).__name__}: {exc}")
             except Exception as exc:
                 if attempt >= retries:
                     return _fallback(conversation_messages, tool_results, f"{type(exc).__name__}: {exc}")
@@ -159,7 +157,7 @@ def run_marketplace_tool_loop(
             try:
                 name, arguments = _tool_call_name_and_arguments(tool_call)
                 dispatched = dispatcher.dispatch(name, arguments)
-            except (Exception, SystemExit) as exc:
+            except Exception as exc:
                 return _fallback(conversation_messages, tool_results, f"{type(exc).__name__}: {exc}")
             tool_results.append(dispatched)
             conversation_messages.append(

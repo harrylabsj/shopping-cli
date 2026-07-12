@@ -7,51 +7,34 @@ not been installed yet.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import math
-import os
-import secrets
-import sqlite3
-from datetime import datetime, timedelta
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
-from urllib.parse import parse_qs
+from typing import Any, Callable
 
 from shopping_cli import VERSION
-from shopping_cli.agents import buyer_cli, merchant_agent
-from shopping_cli.config import (
-    agent_stale_ttl_seconds_from,
-    deployment_profile_from,
-    production_config_checks,
-    validate_production_config,
+from shopping_cli.api import auth as api_auth
+from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
+from shopping_cli.api.handlers import agents as agent_handlers
+from shopping_cli.api.handlers import audit as audit_handlers
+from shopping_cli.api.handlers import buyer as buyer_handlers
+from shopping_cli.api.handlers import catalog as catalog_handlers
+from shopping_cli.api.handlers import conversations as conversation_handlers
+from shopping_cli.api.handlers import human_review as human_review_handlers
+from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
+from shopping_cli.core.errors import (
+    AuthError,
+    ConflictError,
+    IdempotencyConflict,
+    NotFoundError,
+    PermissionDenied,
+    RateLimitError,
+    ShoppingCliError,
+    ValidationError,
 )
-from shopping_cli.core import catalog
-from shopping_cli.core.channels import ingest_buyer_message, normalize_channel
-from shopping_cli.core.conversations import (
-    add_flag,
-    append_message,
-    conversation_summary,
-    ensure_conversation,
-    merchant_conversations,
-    normalize_structured_payload,
-)
-from shopping_cli.core.harness import (
-    abandon_agent_message,
-    abandon_stale_agent_messages,
-    agent_message_process_summary,
-    append_audit_event,
-    audit_event_summary,
-    audit_event_summary_from_row,
-    claim_agent_message,
-    complete_agent_message,
-    fail_agent_message,
-    next_actor_for_status,
-)
-from shopping_cli.db.session import db_session, decode_json, encode_json, now_iso
-from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_matches, token_prefix, token_suffix
+from shopping_cli.services import tokens as token_service
 
 try:  # pragma: no cover - exercised when optional dependency is installed
     from fastapi import FastAPI, Header
@@ -64,26 +47,14 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     RequestValidationError = None  # type: ignore[assignment]
 
 
-class AuthError(Exception):
-    pass
+Handler = Callable[..., dict[str, Any]]
 
 
-class IdempotencyConflict(Exception):
-    pass
-
-
-class RateLimitError(Exception):
-    pass
-
-
-HUMAN_REVIEW_ACTIONS = {"reply", "approve_public_answer", "reject", "close"}
-HUMAN_REVIEW_SENDERS = {"merchant", "merchant_agent", "operator"}
-MAX_SQLITE_INTEGER = 2**63 - 1
-DEFAULT_RESULT_LIMIT = 50
-MAX_RESULT_LIMIT = 100
-DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE = 60
-BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = 60
-MAX_IDEMPOTENCY_KEY_LENGTH = 160
+@dataclass(frozen=True)
+class RouteEntry:
+    methods: set[str]
+    path_template: str
+    handler: Handler
 
 
 def _json_error_response(status_code: int, error: str) -> Any:
@@ -91,152 +62,6 @@ def _json_error_response(status_code: int, error: str) -> Any:
     if JSONResponse is not None:  # pragma: no cover - exercised with fastapi installed
         return JSONResponse(status_code=status_code, content=payload)
     return SimpleNamespace(status_code=status_code, body=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-
-
-class RouteInfo:
-    def __init__(self, path: str, methods: set[str]):
-        self.path = path
-        self.methods = methods
-
-
-class MarketplaceASGIApp:
-    title = "shopping-cli Marketplace API"
-
-    def __init__(self, db_path: str | Path):
-        self.state = SimpleNamespace(db_path=str(db_path), fastapi_available=False)
-        self.routes = route_info()
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http":
-            await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": b'{"ok":false,"error":"unsupported scope"}'})
-            return
-        chunks: list[bytes] = []
-        while True:
-            message = await receive()
-            chunks.append(message.get("body", b""))
-            if not message.get("more_body", False):
-                break
-        try:
-            decoded_payload = json.loads(b"".join(chunks).decode("utf-8") or "{}")
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            body = json.dumps(
-                {"ok": False, "error": "invalid JSON request body"},
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-            await send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": body})
-            return
-        if not isinstance(decoded_payload, dict):
-            body = json.dumps(
-                {"ok": False, "error": "JSON request body must be an object"},
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-            await send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": body})
-            return
-        payload = decoded_payload
-        headers = {
-            key.decode("latin1").lower(): value.decode("latin1")
-            for key, value in scope.get("headers", [])
-        }
-        authorization = headers.get("authorization", "")
-        if authorization.lower().startswith("bearer "):
-            payload["_auth_token"] = authorization.split(" ", 1)[1].strip()
-        idempotency_key = headers.get("idempotency-key", "").strip()
-        if idempotency_key:
-            payload["_idempotency_key"] = idempotency_key
-        try:
-            raw_query = scope.get("query_string", b"").decode("utf-8")
-        except UnicodeDecodeError:
-            raw_query = ""
-        query = parse_qs(raw_query, keep_blank_values=True)
-        status, response = handle_request(
-            self.state.db_path,
-            method=str(scope.get("method") or "GET").upper(),
-            path=str(scope.get("path") or "/"),
-            payload=payload,
-            query={key: values[-1] if values else "" for key, values in query.items()},
-        )
-        body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json")]})
-        await send({"type": "http.response.body", "body": body})
-
-
-def route_info() -> list[RouteInfo]:
-    return [
-        RouteInfo("/health", {"GET"}),
-        RouteInfo("/merchants", {"GET", "POST"}),
-        RouteInfo("/merchants/{merchant_id}", {"GET", "PATCH"}),
-        RouteInfo("/products", {"POST"}),
-        RouteInfo("/products/{sku}", {"GET", "PATCH"}),
-        RouteInfo("/search/products", {"GET"}),
-        RouteInfo("/search/merchants", {"GET"}),
-        RouteInfo("/channels/messages", {"POST"}),
-        RouteInfo("/buyer/ask", {"POST"}),
-        RouteInfo("/conversations", {"POST"}),
-        RouteInfo("/conversations/{conversation_id}", {"GET"}),
-        RouteInfo("/conversations/{conversation_id}/messages", {"POST"}),
-        RouteInfo("/conversations/{conversation_id}/close", {"POST"}),
-        RouteInfo("/buyers/{buyer_id}/conversations", {"GET"}),
-        RouteInfo("/agents/heartbeat", {"POST"}),
-        RouteInfo("/agents/tokens", {"GET", "POST"}),
-        RouteInfo("/agents/tokens/revoke", {"POST"}),
-        RouteInfo("/agents/tokens/rotate", {"POST"}),
-        RouteInfo("/agents/messages/claim", {"POST"}),
-        RouteInfo("/agents/messages/complete", {"POST"}),
-        RouteInfo("/agents/messages/fail", {"POST"}),
-        RouteInfo("/agents/messages/abandon", {"POST"}),
-        RouteInfo("/agents/messages/abandon-stale", {"POST"}),
-        RouteInfo("/agents", {"GET"}),
-        RouteInfo("/agents/{agent_id}", {"GET"}),
-        RouteInfo("/merchants/{merchant_id}/agents", {"GET"}),
-        RouteInfo("/audit/tool-calls", {"POST"}),
-        RouteInfo("/audit/events", {"GET"}),
-        RouteInfo("/human-review/queue", {"GET"}),
-        RouteInfo("/human-review/{review_id}", {"GET"}),
-        RouteInfo("/human-review/{review_id}/resolve", {"POST"}),
-        RouteInfo("/merchants/{merchant_id}/conversations", {"GET"}),
-        RouteInfo("/merchants/{merchant_id}/human-review", {"GET"}),
-        RouteInfo("/conversations/{conversation_id}/human-review", {"POST"}),
-        RouteInfo("/conversations/{conversation_id}/human-review/resolve", {"POST"}),
-    ]
-
-
-def _float_or_none(value: Any) -> Any:
-    return None if value is None else value
-
-
-def _bool_from_query(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _merchant_list(conn: Any, limit: int = DEFAULT_RESULT_LIMIT, offset: int = 0) -> list[dict[str, Any]]:
-    return catalog.list_merchants(conn, limit=int(limit), offset=int(offset))
-
-
-def _payload_token(payload: dict[str, Any]) -> str:
-    return str(
-        payload.get("merchant_token")
-        or payload.get("agent_token")
-        or payload.get("buyer_token")
-        or payload.get("_auth_token")
-        or ""
-    )
-
-
-def _payload_admin_token(payload: dict[str, Any]) -> str:
-    return str(payload.get("admin_token") or payload.get("_auth_token") or "")
-
-
-def _payload_channel_token(payload: dict[str, Any]) -> str:
-    return str(payload.get("channel_token") or payload.get("_auth_token") or "")
-
-
-def _payload_buyer_bootstrap_token(payload: dict[str, Any]) -> str:
-    return str(payload.get("buyer_bootstrap_token") or payload.get("_auth_token") or "")
 
 
 def _auth_header_default() -> Any:
@@ -257,1128 +82,84 @@ def _idempotency_key_header_default() -> Any:
 IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
 
 
-def _payload_with_auth(
-    payload: dict[str, Any],
-    authorization: Any = "",
-    idempotency_key: Any = "",
-) -> dict[str, Any]:
-    merged = dict(payload or {})
-    if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
-        merged["_auth_token"] = authorization.split(" ", 1)[1].strip()
-    if isinstance(idempotency_key, str) and idempotency_key.strip():
-        merged["_idempotency_key"] = idempotency_key.strip()
-    return merged
-
-
-def _human_review_sender(payload: dict[str, Any]) -> str:
-    sender = str(payload.get("sender") or "merchant").strip() or "merchant"
-    if sender not in HUMAN_REVIEW_SENDERS:
-        raise SystemExit(f"Unknown human-review sender: {sender}")
-    return sender
-
-
-def _configured_admin_token() -> str:
-    return str(os.environ.get("SHOPPING_ADMIN_TOKEN") or "").strip()
-
-
-def _configured_buyer_bootstrap_token() -> str:
-    return str(os.environ.get("SHOPPING_BUYER_BOOTSTRAP_TOKEN") or "").strip()
-
-
-def _require_admin_token(payload: dict[str, Any]) -> None:
-    expected = _configured_admin_token()
-    if not expected:
-        raise AuthError("admin bootstrap token is not configured")
-    token = _payload_admin_token(payload)
-    if not token:
-        raise AuthError("admin bootstrap token required")
-    if not token_matches(token, expected):
-        raise AuthError("invalid admin bootstrap token")
-
-
-def _require_buyer_bootstrap_token(payload: dict[str, Any]) -> str:
-    expected = _configured_buyer_bootstrap_token()
-    if not expected:
-        raise AuthError("buyer bootstrap token is not configured")
-    token = _payload_buyer_bootstrap_token(payload)
-    if not token:
-        raise AuthError("buyer bootstrap token required")
-    if not token_matches(token, expected):
-        raise AuthError("invalid buyer bootstrap token")
-    return token_digest(token)
-
-
-def _channel_token_map() -> dict[str, str]:
-    tokens: dict[str, str] = {}
-    global_token = str(os.environ.get("SHOPPING_CHANNEL_TOKEN") or "").strip()
-    if global_token:
-        tokens["*"] = global_token
-    raw = str(os.environ.get("SHOPPING_CHANNEL_TOKENS") or "").strip()
-    if not raw:
-        return tokens
-    try:
-        decoded = json.loads(raw)
-    except json.JSONDecodeError:
-        decoded = None
-    if isinstance(decoded, dict):
-        for channel, token in decoded.items():
-            normalized = normalize_channel(str(channel))
-            if normalized and str(token or "").strip():
-                tokens[normalized] = str(token).strip()
-        return tokens
-    for part in raw.replace("\n", ",").split(","):
-        text = part.strip()
-        if not text:
-            continue
-        separator = ":" if ":" in text else "=" if "=" in text else ""
-        if not separator:
-            continue
-        channel, token = text.split(separator, 1)
-        normalized = normalize_channel(channel)
-        if normalized and token.strip():
-            tokens[normalized] = token.strip()
-    return tokens
-
-
-def _require_channel_token(channel: str, payload: dict[str, Any]) -> None:
-    normalized = normalize_channel(channel)
-    tokens = _channel_token_map()
-    expected = tokens.get(normalized) or tokens.get("*") or ""
-    if not expected:
-        raise AuthError(f"channel token is not configured for {normalized or '-'}")
-    token = _payload_channel_token(payload)
-    if not token:
-        raise AuthError("channel token required")
-    if not token_matches(token, expected):
-        raise AuthError("invalid channel token")
-
-
-def _expires_at_from_ttl(ttl_seconds: Any) -> str:
-    seconds = _positive_whole_seconds(ttl_seconds, "ttl_seconds")
-    if seconds is None:
-        return ""
-    try:
-        expires_at = datetime.now() + timedelta(seconds=seconds)
-    except OverflowError as exc:
-        raise ValueError("ttl_seconds is too large") from exc
-    return expires_at.replace(microsecond=0).isoformat()
-
-
-def _positive_whole_seconds(value: Any, field_name: str) -> int | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be a whole number")
-    if isinstance(value, int):
-        seconds = value
-    elif isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            raise ValueError(f"{field_name} must be a whole number")
-        seconds = int(value)
-    else:
-        try:
-            seconds = int(str(value).strip())
-        except ValueError as exc:
-            raise ValueError(f"{field_name} must be a whole number") from exc
-    if seconds <= 0:
-        raise ValueError(f"{field_name} must be greater than 0")
-    return seconds
-
-
-def _non_negative_whole_int(value: Any, field_name: str, default: int = 0) -> int:
-    if value in (None, ""):
-        return default
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be a whole number")
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, float):
-        if not math.isfinite(value) or not value.is_integer():
-            raise ValueError(f"{field_name} must be a whole number")
-        number = int(value)
-    else:
-        try:
-            number = int(str(value).strip())
-        except ValueError as exc:
-            raise ValueError(f"{field_name} must be a whole number") from exc
-    if number < 0:
-        raise ValueError(f"{field_name} must be non-negative")
-    if number > MAX_SQLITE_INTEGER:
-        raise ValueError(f"{field_name} must be <= {MAX_SQLITE_INTEGER}")
-    return number
-
-
-def _positive_whole_int(value: Any, field_name: str) -> int:
-    number = _non_negative_whole_int(value, field_name)
-    if number <= 0:
-        raise ValueError(f"{field_name} must be greater than 0")
-    return number
-
-
-def _result_limit(value: Any, default: int = DEFAULT_RESULT_LIMIT) -> int:
-    if value in (None, ""):
-        return default
-    return min(_positive_whole_int(value, "limit"), MAX_RESULT_LIMIT)
-
-
-def _result_offset(value: Any) -> int:
-    return _non_negative_whole_int(value, "offset", default=0)
-
-
-def _public_merchant_summary(merchant: dict[str, Any]) -> dict[str, Any]:
-    summary = dict(merchant)
-    summary.pop("contact", None)
-    summary.pop("automation_boundaries", None)
-    return summary
-
-
-def _public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
-    summary = dict(product)
-    merchant = summary.get("merchant")
-    if isinstance(merchant, dict):
-        summary["merchant"] = _public_merchant_summary(merchant)
-    return summary
-
-
-def _token_is_expired(expires_at: str) -> bool:
-    if not expires_at:
-        return False
-    try:
-        expires = datetime.fromisoformat(str(expires_at))
-    except (TypeError, ValueError):
-        return True
-    try:
-        current = datetime.now(tz=expires.tzinfo) if expires.tzinfo is not None else datetime.now()
-        return expires <= current
-    except TypeError:
-        return True
-
-
-def _agent_token_summary(row: Any) -> dict[str, Any]:
-    token_key = str(row["token"])
-    prefix = str(row["token_prefix"] or token_key[:24])
-    suffix = str(row["token_suffix"] or token_key[-6:])
-    revoked = bool(row["revoked_at"])
-    expired = _token_is_expired(row["expires_at"])
-    return {
-        "token_prefix": prefix,
-        "token_suffix": suffix,
-        "token_role": row["role"],
-        "merchant_id": row["merchant_id"],
-        "agent_id": row["agent_id"],
-        "created_at": row["created_at"],
-        "expires_at": row["expires_at"],
-        "revoked_at": row["revoked_at"],
-        "revoked": revoked,
-        "expired": expired,
-        "active": not revoked and not expired,
-    }
-
-
-def _agent_token_row(conn: Any, token: str) -> Any:
-    stored = str(token or "")
-    digest = stored if is_sha256_digest(stored) else token_digest(stored)
-    return conn.execute(
-        """
-        select token, token_hash, token_prefix, token_suffix, role, merchant_id, agent_id, created_at, expires_at, revoked_at
-        from api_tokens
-        where token = ? or token_hash = ?
-        """,
-        (digest, digest),
-    ).fetchone()
+def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
+    token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
 
 
 def _resolve_agent_token(conn: Any, merchant_id: str, token: Any = "", token_prefix: Any = "") -> str:
-    resolved = str(token or "")
-    if resolved:
-        row = _agent_token_row(conn, resolved)
-        if row is None or row["role"] != "agent" or row["merchant_id"] != merchant_id:
-            raise AuthError("invalid agent token")
-        return str(row["token"])
-    prefix = str(token_prefix or "")
-    if not prefix:
-        raise ValueError("token or token_prefix is required")
-    rows = conn.execute(
-        """
-        select token from api_tokens
-        where merchant_id = ? and role = 'agent' and (token_prefix like ? or token like ?)
-        order by created_at desc, token
-        limit 2
-        """,
-        (merchant_id, f"{prefix}%", f"{prefix}%"),
-    ).fetchall()
-    if not rows:
-        raise AuthError("invalid agent token")
-    if len(rows) > 1:
-        raise ValueError("token_prefix is ambiguous")
-    return str(rows[0]["token"])
-
-
-def _append_agent_token_audit(conn: Any, merchant_id: str, event: str, details: dict[str, Any]) -> None:
-    append_audit_event(conn, "", merchant_id, event, details)
-
-
-def _audit_event_limit(value: Any) -> int:
-    if value in (None, ""):
-        return 50
-    limit = _positive_whole_int(value, "limit")
-    return min(limit, 200)
-
-
-def _merchant_audit_events(
-    conn: Any,
-    merchant_id: str,
-    event: str = "",
-    limit: Any = 50,
-    offset: Any = 0,
-) -> list[dict[str, Any]]:
-    sql = "select id, conversation_id, actor, event, details_json, created_at from audit_events where actor = ?"
-    values: list[Any] = [merchant_id]
-    if event:
-        sql += " and event = ?"
-        values.append(event)
-    sql += " order by id desc limit ? offset ?"
-    values.extend([_audit_event_limit(limit), _result_offset(offset)])
-    rows = conn.execute(sql, values).fetchall()
-    return [audit_event_summary_from_row(row) for row in rows]
-
-
-def _issue_merchant_token(conn: Any, merchant_id: str) -> str:
-    token = f"shopping_merchant_{secrets.token_urlsafe(24)}"
-    digest = token_digest(token)
-    conn.execute(
-        """
-        insert into api_tokens(token, token_hash, token_prefix, token_suffix, role, merchant_id, buyer_id, agent_id, created_at)
-        values (?, ?, ?, ?, 'merchant', ?, '', '', ?)
-        """,
-        (digest, digest, token_prefix(token), token_suffix(token), merchant_id, now_iso()),
-    )
-    return token
-
-
-def _issue_agent_token(conn: Any, merchant_id: str, agent_id: str, ttl_seconds: Any = None) -> tuple[str, str]:
-    token = f"shopping_agent_{secrets.token_urlsafe(24)}"
-    digest = token_digest(token)
-    expires_at = _expires_at_from_ttl(ttl_seconds)
-    conn.execute(
-        """
-        insert into api_tokens(token, token_hash, token_prefix, token_suffix, role, merchant_id, buyer_id, agent_id, expires_at, created_at)
-        values (?, ?, ?, ?, 'agent', ?, '', ?, ?, ?)
-        """,
-        (digest, digest, token_prefix(token), token_suffix(token), merchant_id, agent_id, expires_at, now_iso()),
-    )
-    return token, expires_at
-
-
-def _issue_buyer_token(conn: Any, buyer_id: str, conversation_id: str) -> str:
-    token = f"shopping_buyer_{secrets.token_urlsafe(24)}"
-    _store_buyer_token(conn, token, buyer_id, conversation_id)
-    return token
-
-
-def _ensure_buyer_token(conn: Any, buyer_id: str, conversation_id: str, token: str) -> str:
-    _store_buyer_token(conn, token, buyer_id, conversation_id, ignore_conflict=True)
-    return token
-
-
-def _store_buyer_token(
-    conn: Any,
-    token: str,
-    buyer_id: str,
-    conversation_id: str,
-    ignore_conflict: bool = False,
-) -> None:
-    digest = token_digest(token)
-    insert = "insert or ignore" if ignore_conflict else "insert"
-    conn.execute(
-        f"""
-        {insert} into api_tokens(
-            token, token_hash, token_prefix, token_suffix, role,
-            merchant_id, buyer_id, agent_id, conversation_id, created_at
-        )
-        values (?, ?, ?, ?, 'buyer', '', ?, '', ?, ?)
-        """,
-        (digest, digest, token_prefix(token), token_suffix(token), buyer_id, conversation_id, now_iso()),
-    )
-
-
-def _buyer_bootstrap_rate_limit_per_minute() -> int:
-    raw = str(os.environ.get("SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE") or "").strip()
-    if not raw:
-        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
-    try:
-        limit = int(raw)
-    except (OverflowError, TypeError, ValueError):
-        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
-    if limit < 0:
-        return DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE
-    return min(limit, MAX_SQLITE_INTEGER)
-
-
-def _rate_limit_window_start(current: datetime) -> str:
-    epoch_seconds = int(current.timestamp())
-    window_epoch = epoch_seconds - (epoch_seconds % BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS)
-    return datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
-
-
-def _enforce_buyer_bootstrap_rate_limit(conn: Any, bootstrap_token_hash: str) -> None:
-    limit = _buyer_bootstrap_rate_limit_per_minute()
-    if limit <= 0:
-        return
-    current = datetime.now().replace(microsecond=0)
-    cursor = conn.execute(
-        """
-        insert into buyer_bootstrap_rate_limits(token_hash, window_start, request_count, updated_at)
-        values (?, ?, 1, ?)
-        on conflict(token_hash, window_start) do update set
-            request_count = buyer_bootstrap_rate_limits.request_count + 1,
-            updated_at = excluded.updated_at
-        where buyer_bootstrap_rate_limits.request_count < ?
-        """,
-        (bootstrap_token_hash, _rate_limit_window_start(current), current.isoformat(), limit),
-    )
-    if cursor.rowcount != 1:
-        raise RateLimitError(f"buyer bootstrap rate limit exceeded ({limit}/minute)")
-
-
-def _idempotency_key_from_payload(payload: dict[str, Any]) -> str:
-    key = str(payload.get("idempotency_key") or payload.get("_idempotency_key") or "").strip()
-    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
-        raise ValueError(f"idempotency_key must be <= {MAX_IDEMPOTENCY_KEY_LENGTH} characters")
-    return key
-
-
-def _request_hash(values: dict[str, Any]) -> str:
-    canonical = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return token_digest(canonical)
-
-
-def _buyer_ask_request_hash(payload: dict[str, Any]) -> str:
-    return _request_hash(
-        {
-            "buyer_id": str(payload["buyer_id"]).strip(),
-            "text": str(payload["text"]),
-            "city": str(payload.get("city") or ""),
-            "area": str(payload.get("area") or ""),
-            "source_id": str(payload.get("source_id") or "buyer-cli"),
-            "host": str(payload.get("host") or ""),
-            "session_id": str(payload.get("session_id") or ""),
-        }
-    )
-
-
-def _conversation_create_request_hash(payload: dict[str, Any]) -> str:
-    return _request_hash(
-        {
-            "buyer_id": str(payload["buyer_id"]).strip(),
-            "merchant_id": str(payload["merchant_id"]).strip(),
-            "sku": str(payload.get("sku") or ""),
-            "text": str(payload.get("text") or ""),
-            "intent": str(payload.get("intent") or "ask_product"),
-            "source_id": str(payload.get("source_id") or ""),
-        }
-    )
-
-
-def _deterministic_buyer_token(
-    payload: dict[str, Any],
-    endpoint: str,
-    idempotency_key: str,
-    buyer_id: str,
-    conversation_id: str,
-) -> str:
-    secret = _payload_buyer_bootstrap_token(payload)
-    material = f"{endpoint}\n{idempotency_key}\n{buyer_id}\n{conversation_id}"
-    digest = hmac.new(secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"shopping_buyer_{digest}"
-
-
-def _idempotency_row(
-    conn: Any,
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-) -> Any:
-    return conn.execute(
-        """
-        select endpoint, token_hash, idempotency_key, request_hash, status, response_json,
-               buyer_id, conversation_id, message_id
-        from buyer_request_idempotency
-        where endpoint = ? and token_hash = ? and idempotency_key = ?
-        """,
-        (endpoint, bootstrap_token_hash, idempotency_key),
-    ).fetchone()
-
-
-def _response_from_idempotency_row(conn: Any, payload: dict[str, Any], row: Any) -> dict[str, Any]:
-    response = decode_json(row["response_json"], {})
-    if not isinstance(response, dict):
-        response = {"ok": True}
-    result = dict(response)
-    buyer_id = str(row["buyer_id"] or "")
-    conversation_id = str(row["conversation_id"] or "")
-    if buyer_id and conversation_id:
-        token = _deterministic_buyer_token(
-            payload,
-            str(row["endpoint"]),
-            str(row["idempotency_key"]),
-            buyer_id,
-            conversation_id,
-        )
-        result["buyer_token"] = _ensure_buyer_token(conn, buyer_id, conversation_id, token)
-    result["idempotent"] = True
-    return result
-
-
-def _replay_buyer_idempotency(
-    conn: Any,
-    payload: dict[str, Any],
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> dict[str, Any] | None:
-    if not idempotency_key:
-        return None
-    row = _idempotency_row(conn, endpoint, bootstrap_token_hash, idempotency_key)
-    if row is None:
-        return None
-    if str(row["request_hash"]) != request_hash:
-        raise IdempotencyConflict("idempotency key was reused with a different request")
-    if row["status"] != "completed":
-        raise IdempotencyConflict("idempotent request is still processing")
-    return _response_from_idempotency_row(conn, payload, row)
-
-
-def _claim_buyer_idempotency(
-    conn: Any,
-    payload: dict[str, Any],
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> dict[str, Any] | None:
-    if not idempotency_key:
-        return None
-    current = now_iso()
-    try:
-        conn.execute(
-            """
-            insert into buyer_request_idempotency(
-                endpoint, token_hash, idempotency_key, request_hash, status,
-                response_json, created_at, updated_at
-            )
-            values (?, ?, ?, ?, 'processing', '{}', ?, ?)
-            """,
-            (endpoint, bootstrap_token_hash, idempotency_key, request_hash, current, current),
-        )
-    except sqlite3.IntegrityError:
-        return _replay_buyer_idempotency(conn, payload, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
-    return None
-
-
-def _complete_buyer_idempotency(
-    conn: Any,
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-    response: dict[str, Any],
-) -> None:
-    if not idempotency_key:
-        return
-    stored_response = dict(response)
-    stored_response.pop("buyer_token", None)
-    conversation = stored_response.get("conversation") if isinstance(stored_response.get("conversation"), dict) else {}
-    message = stored_response.get("message") if isinstance(stored_response.get("message"), dict) else {}
-    conn.execute(
-        """
-        update buyer_request_idempotency
-        set status = 'completed',
-            response_json = ?,
-            buyer_id = ?,
-            conversation_id = ?,
-            message_id = ?,
-            updated_at = ?
-        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ?
-        """,
-        (
-            encode_json(stored_response),
-            str(stored_response.get("buyer_id") or (conversation or {}).get("buyer_id") or ""),
-            str((conversation or {}).get("id") or ""),
-            _non_negative_whole_int((message or {}).get("id"), "message_id"),
-            now_iso(),
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        ),
-    )
-
-
-def _clear_buyer_idempotency_claim(
-    conn: Any,
-    endpoint: str,
-    bootstrap_token_hash: str,
-    idempotency_key: str,
-    request_hash: str,
-) -> None:
-    if not idempotency_key:
-        return
-    conn.execute(
-        """
-        delete from buyer_request_idempotency
-        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ? and status = 'processing'
-        """,
-        (endpoint, bootstrap_token_hash, idempotency_key, request_hash),
-    )
-
-
-def _require_api_token(conn: Any, payload: dict[str, Any], missing_error: str = "authorization token required") -> Any:
-    token = _payload_token(payload)
-    if not token:
-        raise AuthError(missing_error)
-    digest = token_digest(token)
-    row = conn.execute(
-        """
-        select role, merchant_id, buyer_id, agent_id, conversation_id, revoked_at, expires_at
-        from api_tokens
-        where token_hash = ?
-        """,
-        (digest,),
-    ).fetchone()
-    if row is None:
-        raise AuthError("invalid authorization token")
-    if row["revoked_at"]:
-        raise AuthError("revoked authorization token")
-    if _token_is_expired(row["expires_at"]):
-        raise AuthError("expired authorization token")
-    return row
-
-
-def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
-    row = _require_api_token(conn, payload, "merchant token required")
-    if row is None or row["role"] != "merchant" or row["merchant_id"] != merchant_id:
-        raise AuthError("invalid merchant token")
-
-
-def _require_agent_or_merchant_token(conn: Any, merchant_id: str, agent_id: str, payload: dict[str, Any]) -> None:
-    if agent_id != _default_merchant_agent_id(merchant_id):
-        raise AuthError(f"Agent {agent_id} cannot act for merchant {merchant_id}")
-    row = _require_api_token(conn, payload, "agent or merchant token required")
-    if row is None or row["merchant_id"] != merchant_id:
-        raise AuthError("invalid agent or merchant token")
-    if row["role"] == "merchant":
-        return
-    if row["role"] == "agent" and row["agent_id"] == agent_id:
-        return
-    raise AuthError("invalid agent or merchant token")
-
-
-def _require_conversation_read_token(conn: Any, conversation: dict[str, Any], payload: dict[str, Any]) -> None:
-    row = _require_api_token(conn, payload, "conversation read token required")
-    if (
-        row["role"] == "buyer"
-        and row["buyer_id"] == conversation["buyer_id"]
-        and row["conversation_id"] == conversation["id"]
-    ):
-        return
-    if row["role"] == "merchant" and row["merchant_id"] == conversation["merchant_id"]:
-        return
-    if row["role"] == "agent" and row["merchant_id"] == conversation["merchant_id"]:
-        return
-    raise AuthError("invalid conversation read token")
-
-
-def _require_buyer_conversation_token(conn: Any, conversation: dict[str, Any], payload: dict[str, Any]) -> None:
-    row = _require_api_token(conn, payload, "buyer conversation token required")
-    if (
-        row["role"] == "buyer"
-        and row["buyer_id"] == conversation["buyer_id"]
-        and row["conversation_id"] == conversation["id"]
-    ):
-        return
-    raise AuthError("invalid buyer conversation token")
-
-
-def _require_buyer_read_token(conn: Any, buyer_id: str, payload: dict[str, Any]) -> Any:
-    row = _require_api_token(conn, payload, "buyer conversation read token required")
-    if row["role"] == "buyer" and row["buyer_id"] == buyer_id:
-        return row
-    raise AuthError("invalid buyer conversation read token")
-
-
-def _require_merchant_read_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
-    row = _require_api_token(conn, payload, "merchant conversation read token required")
-    if row["role"] == "merchant" and row["merchant_id"] == merchant_id:
-        return
-    if row["role"] == "agent" and row["merchant_id"] == merchant_id:
-        return
-    raise AuthError("invalid merchant conversation read token")
+    return token_service.resolve_agent_token(conn, merchant_id, token, token_prefix)
 
 
 def _health(db_path: str | Path) -> dict[str, Any]:
-    profile = deployment_profile_from()
-    checks: dict[str, Any] = production_config_checks()
-    checks["database"] = "ok"
-    ok = True
-    try:
-        validate_production_config()
-    except ValueError:
-        ok = False
-    try:
-        with db_session(db_path):
-            pass
-    except Exception:
-        checks["database"] = "error"
-        ok = False
-    return {
-        "ok": ok,
-        "service": "shopping-cli-marketplace",
-        "version": VERSION,
-        "storage": "sqlite",
-        "deployment_profile": profile,
-        "checks": checks,
-    }
+    return catalog_handlers.health(db_path)
 
 
 def _create_merchant(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    _require_admin_token(payload)
-    with db_session(db_path) as conn:
-        merchant = catalog.create_merchant(
-            conn,
-            merchant_id=str(payload["id"]),
-            name=str(payload["name"]),
-            city=str(payload.get("city") or ""),
-            service_area=str(payload.get("service_area") or ""),
-            contact=str(payload.get("contact") or ""),
-            hours=str(payload.get("hours") or ""),
-            automation_boundaries=str(payload.get("automation_boundaries") or ""),
-            tags=payload.get("tags") or [],
-            delivery_fee=payload.get("delivery_fee", 0),
-            delivery_eta_minutes=payload.get("delivery_eta_minutes", 0),
-            delivery_radius_km=payload.get("delivery_radius_km", 0),
-        )
-        token = _issue_merchant_token(conn, merchant["id"])
-        return {"ok": True, "merchant": merchant, "merchant_token": token}
+    return catalog_handlers.create_merchant(db_path, payload, api_auth.require_admin_token)
 
 
 def _update_merchant(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        _require_merchant_token(conn, merchant_id, payload)
-        merchant = catalog.update_merchant(
-            conn,
-            merchant_id=merchant_id,
-            name=payload.get("name"),
-            city=payload.get("city"),
-            service_area=payload.get("service_area"),
-            contact=payload.get("contact"),
-            hours=payload.get("hours"),
-            automation_boundaries=payload.get("automation_boundaries"),
-            tags=payload.get("tags") if "tags" in payload else None,
-            delivery_fee=_float_or_none(payload.get("delivery_fee")),
-            delivery_eta_minutes=payload.get("delivery_eta_minutes"),
-            delivery_radius_km=_float_or_none(payload.get("delivery_radius_km")),
-        )
-        return {"ok": True, "merchant": merchant}
+    return catalog_handlers.update_merchant(db_path, merchant_id, payload, _require_merchant_token)
 
 
 def _get_merchant(db_path: str | Path, merchant_id: str) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        return {"ok": True, "merchant": _public_merchant_summary(catalog.merchant_summary(conn, merchant_id))}
+    return catalog_handlers.get_merchant(db_path, merchant_id)
 
 
 def _list_merchants(db_path: str | Path, query: dict[str, Any] | None = None) -> dict[str, Any]:
-    query = query or {}
-    with db_session(db_path) as conn:
-        return {
-            "ok": True,
-            "results": [
-                _public_merchant_summary(merchant)
-                for merchant in _merchant_list(
-                    conn,
-                    limit=_result_limit(query.get("limit")),
-                    offset=_result_offset(query.get("offset")),
-                )
-            ],
-        }
+    return catalog_handlers.list_merchants(db_path, query)
 
 
 def _create_product(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(payload["merchant_id"])
-        _require_merchant_token(conn, merchant_id, payload)
-        product = catalog.create_product(
-            conn,
-            merchant_id=merchant_id,
-            sku=str(payload["sku"]),
-            title=str(payload["title"]),
-            price=payload["price"],
-            stock=payload["stock"],
-            currency=str(payload.get("currency") or "CNY"),
-            category=str(payload.get("category") or ""),
-            tags=payload.get("tags") or [],
-            description=str(payload.get("description") or ""),
-            delivery_attributes=payload.get("delivery_attributes") or [],
-        )
-        return {"ok": True, "product": product}
+    return catalog_handlers.create_product(db_path, payload, _require_merchant_token)
 
 
 def _update_product(db_path: str | Path, sku: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        existing = catalog.product_summary(conn, sku)
-        merchant_id = str(payload.get("merchant_id") or existing["merchant_id"])
-        _require_merchant_token(conn, merchant_id, payload)
-        product = catalog.update_product(
-            conn,
-            sku=sku,
-            merchant_id=merchant_id,
-            title=payload.get("title"),
-            price=_float_or_none(payload.get("price")),
-            stock=payload.get("stock"),
-            currency=payload.get("currency"),
-            category=payload.get("category"),
-            tags=payload.get("tags") if "tags" in payload else None,
-            description=payload.get("description"),
-            delivery_attributes=payload.get("delivery_attributes") if "delivery_attributes" in payload else None,
-        )
-        return {"ok": True, "product": product}
+    return catalog_handlers.update_product(db_path, sku, payload, _require_merchant_token)
 
 
 def _get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        return {"ok": True, "product": _public_product_summary(catalog.product_summary(conn, sku))}
+    return catalog_handlers.get_product(db_path, sku)
 
 
 def _search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    max_price = query.get("max_price")
-    with db_session(db_path) as conn:
-        return {
-            "ok": True,
-            "results": [
-                _public_product_summary(product)
-                for product in catalog.search_products(
-                    conn,
-                    query=str(query.get("query") or ""),
-                    city=str(query.get("city") or ""),
-                    area=str(query.get("area") or ""),
-                    max_price=max_price if str(max_price or "") else None,
-                    include_out_of_stock=_bool_from_query(query.get("include_out_of_stock")),
-                    limit=_result_limit(query.get("limit"), default=10),
-                    offset=_result_offset(query.get("offset")),
-                )
-            ],
-        }
+    return catalog_handlers.search_products(db_path, query)
 
 
 def _search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        return {
-            "ok": True,
-            "results": [
-                _public_merchant_summary(merchant)
-                for merchant in catalog.search_merchants(
-                    conn,
-                    query=str(query.get("query") or ""),
-                    city=str(query.get("city") or ""),
-                    limit=_result_limit(query.get("limit"), default=10),
-                    offset=_result_offset(query.get("offset")),
-                )
-            ],
-        }
+    return catalog_handlers.search_merchants(db_path, query)
 
 
 def _buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    bootstrap_token_hash = _require_buyer_bootstrap_token(payload)
-    idempotency_key = _idempotency_key_from_payload(payload)
-    request_hash = _buyer_ask_request_hash(payload)
-    endpoint = "/buyer/ask"
-    with db_session(db_path) as conn:
-        replayed = _replay_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
-        replayed = _claim_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        try:
-            buyer_id = str(payload["buyer_id"])
-            result = buyer_cli.ask(
-                conn,
-                buyer_id=buyer_id,
-                text=str(payload["text"]),
-                city=str(payload.get("city") or ""),
-                area=str(payload.get("area") or ""),
-                source_id=str(payload.get("source_id") or "buyer-cli"),
-                host=str(payload.get("host") or ""),
-                session_id=str(payload.get("session_id") or ""),
-                reuse_open=False,
-            )
-            if result.get("conversation"):
-                if idempotency_key:
-                    token = _deterministic_buyer_token(
-                        payload,
-                        endpoint,
-                        idempotency_key,
-                        result["buyer_id"],
-                        result["conversation"]["id"],
-                    )
-                    result["buyer_token"] = _ensure_buyer_token(
-                        conn,
-                        result["buyer_id"],
-                        result["conversation"]["id"],
-                        token,
-                    )
-                else:
-                    result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
-            result["idempotent"] = False
-            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
-            return result
-        except (Exception, SystemExit):
-            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
-            raise
+    return buyer_handlers.buyer_ask(db_path, payload)
 
 
 def _ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("buyer_id"):
-        raise SystemExit("buyer_id override is not allowed for channel ingress")
-    _require_channel_token(str(payload.get("channel") or ""), payload)
-    with db_session(db_path) as conn:
-        return ingest_buyer_message(
-            conn,
-            channel=str(payload["channel"]),
-            external_user_id=str(payload["external_user_id"]),
-            text=str(payload["text"]),
-            city=str(payload.get("city") or ""),
-            area=str(payload.get("area") or ""),
-            conversation_id=str(payload.get("conversation_id") or ""),
-            external_message_id=str(payload.get("external_message_id") or ""),
-        )
+    return buyer_handlers.ingest_channel_message(db_path, payload)
 
 
 def _get_conversation(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        conversation = conversation_summary(conn, conversation_id)
-        _require_conversation_read_token(conn, conversation, payload)
-        return {"ok": True, "conversation": conversation}
+    return conversation_handlers.get_conversation(db_path, conversation_id, payload)
 
 
 def _create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    bootstrap_token_hash = _require_buyer_bootstrap_token(payload)
-    idempotency_key = _idempotency_key_from_payload(payload)
-    request_hash = _conversation_create_request_hash(payload)
-    endpoint = "/conversations"
-    with db_session(db_path) as conn:
-        replayed = _replay_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
-        replayed = _claim_buyer_idempotency(
-            conn,
-            payload,
-            endpoint,
-            bootstrap_token_hash,
-            idempotency_key,
-            request_hash,
-        )
-        if replayed is not None:
-            return replayed
-        try:
-            buyer_id = str(payload["buyer_id"])
-            conversation = ensure_conversation(
-                conn,
-                buyer_id=buyer_id,
-                merchant_id=str(payload["merchant_id"]),
-                sku=str(payload.get("sku") or ""),
-                reuse_open=False,
-            )
-            if payload.get("text"):
-                append_message(
-                    conn,
-                    conversation["id"],
-                    "buyer",
-                    str(payload.get("intent") or "ask_product"),
-                    str(payload["text"]),
-                    structured_payload={"source_id": payload.get("source_id") or ""},
-                )
-                conversation = conversation_summary(conn, conversation["id"])
-            if idempotency_key:
-                token = _deterministic_buyer_token(
-                    payload,
-                    endpoint,
-                    idempotency_key,
-                    conversation["buyer_id"],
-                    conversation["id"],
-                )
-                buyer_token = _ensure_buyer_token(conn, conversation["buyer_id"], conversation["id"], token)
-            else:
-                buyer_token = _issue_buyer_token(conn, conversation["buyer_id"], conversation["id"])
-            result = {
-                "ok": True,
-                "conversation": conversation,
-                "buyer_token": buyer_token,
-                "idempotent": False,
-            }
-            _complete_buyer_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
-            return result
-        except (Exception, SystemExit):
-            _clear_buyer_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
-            raise
+    return buyer_handlers.create_conversation(db_path, payload)
 
 
 def _append_conversation_message(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        conversation = conversation_summary(conn, conversation_id)
-        sender = str(payload["sender"])
-        structured_payload = normalize_structured_payload(payload.get("structured_payload"))
-        if payload.get("source_id"):
-            structured_payload["source_id"] = payload.get("source_id")
-        status = payload.get("status")
-        if sender in {"buyer", "buyer_cli"}:
-            _require_buyer_conversation_token(conn, conversation, payload)
-            if status not in (None, ""):
-                raise SystemExit("buyer messages cannot set conversation status")
-        elif sender == "merchant":
-            _require_merchant_token(conn, conversation["merchant_id"], payload)
-        elif sender == "merchant_agent":
-            agent_id = str(structured_payload.get("source_id") or _default_merchant_agent_id(conversation["merchant_id"]))
-            _require_agent_or_merchant_token(conn, conversation["merchant_id"], agent_id, payload)
-        elif sender == "operator":
-            _require_merchant_token(conn, conversation["merchant_id"], payload)
-        else:
-            raise SystemExit(f"Unknown conversation sender: {sender}")
-        if str(status or "").strip() == "closed":
-            raise SystemExit("conversation messages cannot close conversations; use the close endpoint")
-        message = append_message(
-            conn,
-            conversation_id,
-            sender=sender,
-            intent=str(payload["intent"]),
-            text=str(payload["text"]),
-            structured_payload=structured_payload,
-            status=status,
-        )
-        if str(status or "").strip() == "human_required":
-            add_flag(
-                conn,
-                conversation_id,
-                reason=str(message["structured_payload"].get("reason") or "human_required"),
-                severity=str(message["structured_payload"].get("severity") or "review"),
-                sku=conversation.get("sku") or "",
-            )
-        return {"ok": True, "message": message, "conversation": conversation_summary(conn, conversation_id)}
+    return conversation_handlers.append_conversation_message(db_path, conversation_id, payload)
 
 
 def _close_conversation(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        conversation = conversation_summary(conn, conversation_id)
-        sender = str(payload.get("sender") or "operator")
-        if sender in {"buyer", "buyer_cli"}:
-            _require_buyer_conversation_token(conn, conversation, payload)
-        elif sender == "merchant":
-            _require_merchant_token(conn, conversation["merchant_id"], payload)
-        elif sender == "merchant_agent":
-            agent_id = str(payload.get("source_id") or _default_merchant_agent_id(conversation["merchant_id"]))
-            _require_agent_or_merchant_token(conn, conversation["merchant_id"], agent_id, payload)
-        elif sender == "operator":
-            _require_merchant_token(conn, conversation["merchant_id"], payload)
-        else:
-            raise SystemExit(f"Unknown conversation sender: {sender}")
-        if conversation["status"] == "closed":
-            raise SystemExit(f"Conversation {conversation_id} is closed")
-        next_actor = next_actor_for_status("closed")
-        if payload.get("text"):
-            append_message(
-                conn,
-                conversation_id,
-                sender=sender,
-                intent=str(payload.get("intent") or "support"),
-                text=str(payload["text"]),
-                structured_payload={"source_id": payload.get("source_id") or ""},
-                status="closed",
-            )
-        else:
-            conn.execute(
-                "update conversations set status = 'closed', next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (next_actor, now_iso(), sender, conversation_id),
-            )
-        _append_conversation_closed_audit(conn, conversation_id, sender, next_actor)
-        return {"ok": True, "conversation": conversation_summary(conn, conversation_id)}
-
-
-def _append_conversation_closed_audit(
-    conn: Any,
-    conversation_id: str,
-    actor: str,
-    next_actor: str,
-    details: dict[str, Any] | None = None,
-) -> None:
-    payload: dict[str, Any] = {"next_actor": next_actor}
-    if details:
-        payload.update(details)
-    append_audit_event(conn, conversation_id, actor, "conversation_closed", payload)
+    return conversation_handlers.close_conversation(db_path, conversation_id, payload)
 
 
 def _agent_heartbeat(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(payload["merchant_id"])
-        agent_id = _default_merchant_agent_id(merchant_id)
-        _require_agent_or_merchant_token(conn, merchant_id, agent_id, payload)
-        agent = merchant_agent.heartbeat(
-            conn,
-            merchant_id=merchant_id,
-            status=str(payload.get("status") or "online"),
-            capabilities=payload.get("capabilities"),
-            pid=_non_negative_whole_int(payload.get("pid"), "pid"),
-            version=str(payload.get("version") or ""),
-            last_error=str(payload.get("last_error") or ""),
-            checked_count=_non_negative_whole_int(payload.get("checked_count"), "checked_count"),
-            replied_count=_non_negative_whole_int(payload.get("replied_count"), "replied_count"),
-        )
-        return {"ok": True, "agent": agent}
-
-
-def _default_merchant_agent_id(merchant_id: str) -> str:
-    return f"shopping-cli-merchant-agent:{merchant_id}"
+    return agent_handlers.agent_heartbeat(db_path, payload)
 
 
 def _create_agent_token(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(payload["merchant_id"])
-        _require_merchant_token(conn, merchant_id, payload)
-        agent_id = str(payload.get("agent_id") or _default_merchant_agent_id(merchant_id))
-        if agent_id != _default_merchant_agent_id(merchant_id):
-            raise AuthError(f"Agent {agent_id} cannot act for merchant {merchant_id}")
-        token, expires_at = _issue_agent_token(conn, merchant_id, agent_id, payload.get("ttl_seconds"))
-        issued = _agent_token_row(conn, token)
-        _append_agent_token_audit(
-            conn,
-            merchant_id,
-            "agent_token_issued",
-            {"agent_id": agent_id, "token": _agent_token_summary(issued)},
-        )
-        return {"ok": True, "merchant_id": merchant_id, "agent_id": agent_id, "agent_token": token, "expires_at": expires_at}
+    return agent_handlers.create_agent_token(db_path, payload)
 
 
 def _list_agent_tokens(
@@ -1388,210 +169,35 @@ def _list_agent_tokens(
     limit: Any = DEFAULT_RESULT_LIMIT,
     offset: Any = 0,
 ) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(merchant_id or payload.get("merchant_id") or "")
-        if not merchant_id:
-            raise ValueError("merchant_id is required")
-        _require_merchant_token(conn, merchant_id, payload)
-        rows = conn.execute(
-            """
-            select token, token_hash, token_prefix, token_suffix, role, merchant_id, agent_id, created_at, expires_at, revoked_at
-            from api_tokens
-            where merchant_id = ? and role = 'agent'
-            order by created_at desc, token desc
-            limit ? offset ?
-            """,
-            (merchant_id, _result_limit(limit), _result_offset(offset)),
-        ).fetchall()
-        return {"ok": True, "merchant_id": merchant_id, "tokens": [_agent_token_summary(row) for row in rows]}
+    return agent_handlers.list_agent_tokens(db_path, payload, merchant_id=merchant_id, limit=limit, offset=offset)
 
 
 def _revoke_agent_token(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(payload["merchant_id"])
-        _require_merchant_token(conn, merchant_id, payload)
-        token = _resolve_agent_token(conn, merchant_id, payload.get("token"), payload.get("token_prefix"))
-        row = _agent_token_row(conn, token)
-        if row is None or row["role"] != "agent" or row["merchant_id"] != merchant_id:
-            raise AuthError("invalid agent token")
-        revoked_at = row["revoked_at"] or now_iso()
-        if not row["revoked_at"]:
-            conn.execute("update api_tokens set revoked_at = ? where token = ?", (revoked_at, token))
-        revoked = _agent_token_row(conn, token)
-        _append_agent_token_audit(
-            conn,
-            merchant_id,
-            "agent_token_revoked",
-            {"agent_id": row["agent_id"], "revoked_at": revoked_at, "token": _agent_token_summary(revoked)},
-        )
-        return {
-            "ok": True,
-            "revoked": True,
-            "merchant_id": merchant_id,
-            "agent_id": row["agent_id"],
-            "token_role": row["role"],
-            "revoked_at": revoked_at,
-        }
+    return agent_handlers.revoke_agent_token(db_path, payload)
 
 
 def _rotate_agent_token(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(payload["merchant_id"])
-        _require_merchant_token(conn, merchant_id, payload)
-        old_token = _resolve_agent_token(conn, merchant_id, payload.get("token"), payload.get("token_prefix"))
-        row = _agent_token_row(conn, old_token)
-        if row is None or row["role"] != "agent" or row["merchant_id"] != merchant_id:
-            raise AuthError("invalid agent token")
-        revoked_at = row["revoked_at"] or now_iso()
-        if not row["revoked_at"]:
-            conn.execute("update api_tokens set revoked_at = ? where token = ?", (revoked_at, old_token))
-        new_token, expires_at = _issue_agent_token(conn, merchant_id, row["agent_id"], payload.get("ttl_seconds"))
-        previous = _agent_token_row(conn, old_token)
-        replacement = _agent_token_row(conn, new_token)
-        _append_agent_token_audit(
-            conn,
-            merchant_id,
-            "agent_token_rotated",
-            {
-                "agent_id": row["agent_id"],
-                "revoked_at": revoked_at,
-                "previous_token": _agent_token_summary(previous),
-                "new_token": _agent_token_summary(replacement),
-            },
-        )
-        return {
-            "ok": True,
-            "rotated": True,
-            "merchant_id": merchant_id,
-            "agent_id": row["agent_id"],
-            "agent_token": new_token,
-            "expires_at": expires_at,
-            "revoked_at": revoked_at,
-            "previous_token": _agent_token_summary(previous),
-        }
-
-
-def _require_agent_payload(conn: Any, payload: dict[str, Any]) -> tuple[str, str]:
-    merchant_id = str(payload["merchant_id"])
-    agent_id = str(payload.get("agent_id") or _default_merchant_agent_id(merchant_id))
-    _require_agent_or_merchant_token(conn, merchant_id, agent_id, payload)
-    return merchant_id, agent_id
-
-
-def _require_agent_conversation(conn: Any, merchant_id: str, conversation_id: str) -> dict[str, Any]:
-    conversation = conversation_summary(conn, conversation_id)
-    if conversation["merchant_id"] != merchant_id:
-        raise AuthError(f"Merchant {merchant_id} cannot access conversation {conversation_id}")
-    return conversation
-
-
-def _require_message_in_conversation(conn: Any, conversation_id: str, message_id: int) -> None:
-    row = conn.execute("select conversation_id, sender from messages where id = ?", (message_id,)).fetchone()
-    if row is None:
-        raise SystemExit(f"Unknown message: {message_id}")
-    if row["conversation_id"] != conversation_id:
-        raise SystemExit(f"Message {message_id} does not belong to conversation {conversation_id}")
-    if row["sender"] != "buyer":
-        raise SystemExit(f"Agent can only claim buyer messages, got {row['sender']}")
-
-
-def _require_agent_process_scope(conn: Any, merchant_id: str, agent_id: str, message_id: int) -> dict[str, Any]:
-    process = agent_message_process_summary(conn, agent_id, message_id)
-    _require_agent_conversation(conn, merchant_id, process["conversation_id"])
-    return process
+    return agent_handlers.rotate_agent_token(db_path, payload)
 
 
 def _claim_agent_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id, agent_id = _require_agent_payload(conn, payload)
-        conversation_id = str(payload["conversation_id"])
-        _require_agent_conversation(conn, merchant_id, conversation_id)
-        message_id = _positive_whole_int(payload["message_id"], "message_id")
-        _require_message_in_conversation(conn, conversation_id, message_id)
-        claim = claim_agent_message(
-            conn,
-            agent_id,
-            conversation_id,
-            message_id,
-            str(payload["idempotency_key"]),
-        )
-        return {"ok": True, "claim": claim}
+    return agent_handlers.claim_message(db_path, payload)
 
 
 def _complete_agent_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id, agent_id = _require_agent_payload(conn, payload)
-        message_id = _positive_whole_int(payload["message_id"], "message_id")
-        _require_agent_process_scope(conn, merchant_id, agent_id, message_id)
-        process = complete_agent_message(conn, agent_id, message_id)
-        return {"ok": True, "process": process}
+    return agent_handlers.complete_message(db_path, payload)
 
 
 def _fail_agent_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id, agent_id = _require_agent_payload(conn, payload)
-        message_id = _positive_whole_int(payload["message_id"], "message_id")
-        _require_agent_process_scope(conn, merchant_id, agent_id, message_id)
-        process = fail_agent_message(conn, agent_id, message_id, str(payload.get("error") or "agent failure"))
-        return {"ok": True, "process": process}
+    return agent_handlers.fail_message(db_path, payload)
 
 
 def _abandon_agent_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id, agent_id = _require_agent_payload(conn, payload)
-        message_id = _positive_whole_int(payload["message_id"], "message_id")
-        _require_agent_process_scope(conn, merchant_id, agent_id, message_id)
-        process = abandon_agent_message(conn, agent_id, message_id, str(payload.get("error") or "agent abandoned claim"))
-        return {"ok": True, "process": process}
+    return agent_handlers.abandon_message(db_path, payload)
 
 
 def _abandon_stale_agent_messages(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        _merchant_id, agent_id = _require_agent_payload(conn, payload)
-        abandoned = abandon_stale_agent_messages(
-            conn,
-            agent_id,
-            stale_after_seconds=(
-                _positive_whole_seconds(payload.get("stale_after_seconds", 300), "stale_after_seconds") or 300
-            ),
-        )
-        return {"ok": True, "abandoned": abandoned}
-
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
-
-
-def _agent_summary(row: Any) -> dict[str, Any]:
-    stale_ttl = timedelta(seconds=agent_stale_ttl_seconds_from())
-    last_seen_at = row["last_seen_at"]
-    try:
-        stale = datetime.now() - datetime.fromisoformat(last_seen_at) > stale_ttl
-    except (TypeError, ValueError):
-        stale = True
-    return {
-        "id": row["id"],
-        "type": row["type"],
-        "owner_id": row["owner_id"],
-        "status": row["status"],
-        "capabilities": decode_json(row["capabilities_json"], []),
-        "last_seen_at": last_seen_at,
-        "stale": stale,
-        "stale_ttl_seconds": int(stale_ttl.total_seconds()),
-        "pid": _safe_non_negative_int(row["pid"]),
-        "version": row["version"],
-        "last_error": row["last_error"],
-        "checked_count": _safe_non_negative_int(row["checked_count"]),
-        "replied_count": _safe_non_negative_int(row["replied_count"]),
-    }
+    return agent_handlers.abandon_stale_messages(db_path, payload)
 
 
 def _list_agents(
@@ -1601,29 +207,11 @@ def _list_agents(
     limit: Any = DEFAULT_RESULT_LIMIT,
     offset: Any = 0,
 ) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        scoped_owner_id = str(owner_id or "")
-        if scoped_owner_id:
-            _require_merchant_read_token(conn, scoped_owner_id, payload)
-        else:
-            token_row = _require_api_token(conn, payload, "agent read token required")
-            if token_row["role"] not in {"merchant", "agent"} or not token_row["merchant_id"]:
-                raise AuthError("invalid agent read token")
-            scoped_owner_id = str(token_row["merchant_id"])
-        rows = conn.execute(
-            "select * from agents where owner_id = ? order by id limit ? offset ?",
-            (scoped_owner_id, _result_limit(limit), _result_offset(offset)),
-        ).fetchall()
-        return {"ok": True, "agents": [_agent_summary(row) for row in rows]}
+    return agent_handlers.list_agents(db_path, payload, owner_id=owner_id, limit=limit, offset=offset)
 
 
 def _get_agent(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        row = conn.execute("select * from agents where id = ?", (agent_id,)).fetchone()
-        if row is None:
-            raise SystemExit(f"Unknown agent: {agent_id}")
-        _require_merchant_read_token(conn, row["owner_id"], payload)
-        return {"ok": True, "agent": _agent_summary(row)}
+    return agent_handlers.get_agent(db_path, agent_id, payload)
 
 
 def _conversation_list(
@@ -1633,32 +221,7 @@ def _conversation_list(
     owner_kind: str,
     owner_id: str,
 ) -> dict[str, Any]:
-    clauses: list[str] = []
-    values: list[Any] = []
-    for column in ("status", "merchant_id", "buyer_id", "sku"):
-        if filters.get(column):
-            clauses.append(f"{column} = ?")
-            values.append(str(filters[column]))
-    if filters.get("updated_since"):
-        clauses.append("updated_at >= ?")
-        values.append(str(filters["updated_since"]))
-    with db_session(db_path) as conn:
-        if owner_kind == "buyer":
-            token_row = _require_buyer_read_token(conn, owner_id, payload)
-            if token_row["conversation_id"]:
-                clauses.append("id = ?")
-                values.append(str(token_row["conversation_id"]))
-        elif owner_kind == "merchant":
-            _require_merchant_read_token(conn, owner_id, payload)
-        else:
-            raise AuthError("conversation list owner is required")
-        sql = "select id from conversations"
-        if clauses:
-            sql += " where " + " and ".join(clauses)
-        sql += " order by updated_at desc limit ? offset ?"
-        values.extend([_result_limit(filters.get("limit")), _result_offset(filters.get("offset"))])
-        rows = conn.execute(sql, values).fetchall()
-        return {"ok": True, "conversations": [conversation_summary(conn, row["id"]) for row in rows]}
+    return conversation_handlers.conversation_list(db_path, filters, payload, owner_kind, owner_id)
 
 
 def _merchant_conversations(
@@ -1668,44 +231,17 @@ def _merchant_conversations(
     status: str = "",
     limit: Any = DEFAULT_RESULT_LIMIT,
     offset: Any = 0,
+    include: Any = "",
 ) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        _require_merchant_read_token(conn, merchant_id, payload)
-        return {
-            "ok": True,
-            "merchant_id": merchant_id,
-            "conversations": merchant_conversations(
-                conn,
-                merchant_id,
-                status,
-                limit=_result_limit(limit),
-                offset=_result_offset(offset),
-            ),
-        }
-
-
-def _review_summary(conn: Any, flag_row: Any) -> dict[str, Any]:
-    row_keys = set(flag_row.keys()) if hasattr(flag_row, "keys") else set()
-    if {"merchant_id", "buyer_id"}.issubset(row_keys):
-        merchant_id = flag_row["merchant_id"]
-        buyer_id = flag_row["buyer_id"]
-    else:
-        conversation = conversation_summary(conn, flag_row["conversation_id"])
-        merchant_id = conversation["merchant_id"]
-        buyer_id = conversation["buyer_id"]
-    return {
-        "id": flag_row["id"],
-        "conversation_id": flag_row["conversation_id"],
-        "merchant_id": merchant_id,
-        "buyer_id": buyer_id,
-        "sku": flag_row["sku"],
-        "reason": flag_row["reason"],
-        "severity": flag_row["severity"],
-        "created_at": flag_row["created_at"],
-        "resolved_at": flag_row["resolved_at"] or None,
-        "resolution": flag_row["resolution"],
-        "resolved_by": flag_row["resolved_by"],
-    }
+    return conversation_handlers.merchant_conversations(
+        db_path,
+        merchant_id,
+        payload,
+        status=status,
+        limit=limit,
+        offset=offset,
+        include=include,
+    )
 
 
 def _human_review_queue(
@@ -1715,66 +251,17 @@ def _human_review_queue(
     limit: Any = DEFAULT_RESULT_LIMIT,
     offset: Any = 0,
 ) -> dict[str, Any]:
-    if not merchant_id:
-        raise AuthError("merchant_id is required for human-review queue")
-    sql = """
-        select f.*, c.merchant_id as merchant_id, c.buyer_id as buyer_id
-        from moderation_flags f
-        join conversations c on c.id = f.conversation_id
-        where f.resolved_at = ''
-    """
-    values: list[Any] = []
-    sql += " and c.merchant_id = ?"
-    values.append(merchant_id)
-    sql += " order by f.created_at desc, f.id desc limit ? offset ?"
-    values.extend([_result_limit(limit), _result_offset(offset)])
-    with db_session(db_path) as conn:
-        _require_merchant_read_token(conn, merchant_id, payload)
-        rows = conn.execute(sql, values).fetchall()
-        return {"ok": True, "reviews": [_review_summary(conn, row) for row in rows]}
+    return human_review_handlers.human_review_queue(
+        db_path,
+        payload,
+        merchant_id=merchant_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def _record_tool_call_audit(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    conversation_id = str(payload.get("conversation_id") or "")
-    with db_session(db_path) as conn:
-        if conversation_id:
-            conversation = conversation_summary(conn, conversation_id)
-            row = _require_api_token(conn, payload, "merchant or agent audit token required")
-            if row["role"] == "merchant" and row["merchant_id"] == conversation["merchant_id"]:
-                actor = row["merchant_id"]
-                token_scope = "merchant"
-            elif row["role"] == "agent" and row["merchant_id"] == conversation["merchant_id"]:
-                actor = row["agent_id"] or _default_merchant_agent_id(conversation["merchant_id"])
-                token_scope = "merchant_agent"
-            else:
-                raise AuthError("merchant or agent audit token required")
-        else:
-            row = _require_api_token(conn, payload, "merchant or agent audit token required")
-            if row["role"] == "merchant":
-                actor = row["merchant_id"]
-                token_scope = "merchant"
-            elif row["role"] == "agent":
-                actor = row["agent_id"] or _default_merchant_agent_id(row["merchant_id"])
-                token_scope = "merchant_agent"
-            else:
-                raise AuthError("merchant or agent audit token required")
-        event = append_audit_event(
-            conn,
-            conversation_id,
-            actor,
-            "llm_tool_call",
-            {
-                "tool": str(payload.get("tool") or ""),
-                "status": str(payload.get("status") or ""),
-                "host": str(payload.get("host") or ""),
-                "session_id": str(payload.get("session_id") or ""),
-                "actor": actor,
-                "source_id": actor,
-                "token_scope": token_scope,
-                "error": str(payload.get("error") or ""),
-            },
-        )
-        return {"ok": True, "event": event}
+    return audit_handlers.record_tool_call_audit(db_path, payload)
 
 
 def _audit_events(
@@ -1785,224 +272,140 @@ def _audit_events(
     limit: Any = 50,
     offset: Any = 0,
 ) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        merchant_id = str(merchant_id or payload.get("merchant_id") or "")
-        if not merchant_id:
-            raise AuthError("merchant_id is required for audit events")
-        _require_merchant_token(conn, merchant_id, payload)
-        return {
-            "ok": True,
-            "merchant_id": merchant_id,
-            "events": _merchant_audit_events(conn, merchant_id, event=event, limit=limit, offset=offset),
-        }
-
-
-def _human_review_row(conn: Any, review_id: str | int) -> Any:
-    normalized_review_id = _positive_whole_int(review_id, "review_id")
-    row = conn.execute("select * from moderation_flags where id = ?", (normalized_review_id,)).fetchone()
-    if row is None:
-        raise SystemExit(f"Unknown human review: {review_id}")
-    return row
+    return audit_handlers.audit_events(
+        db_path,
+        payload,
+        merchant_id=merchant_id,
+        event=event,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def _get_human_review(db_path: str | Path, review_id: str | int, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        row = _human_review_row(conn, review_id)
-        review = _review_summary(conn, row)
-        _require_merchant_read_token(conn, review["merchant_id"], payload)
-        return {"ok": True, "review": review, "conversation": conversation_summary(conn, review["conversation_id"])}
+    return human_review_handlers.get_human_review(db_path, review_id, payload)
 
 
 def _create_human_review(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    with db_session(db_path) as conn:
-        conversation = conversation_summary(conn, conversation_id)
-        actor = str(payload.get("source_id") or _default_merchant_agent_id(conversation["merchant_id"]))
-        if actor.startswith("shopping-cli-merchant-agent:"):
-            _require_agent_or_merchant_token(conn, conversation["merchant_id"], actor, payload)
-        else:
-            _require_merchant_token(conn, conversation["merchant_id"], payload)
-        review = add_flag(
-            conn,
-            conversation_id,
-            reason=str(payload.get("reason") or "human_required"),
-            severity=str(payload.get("severity") or "review"),
-            sku=conversation.get("sku") or "",
-        )
-        next_actor = next_actor_for_status("human_required", review["reason"])
-        conn.execute(
-            "update conversations set status = 'human_required', next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-            (next_actor, now_iso(), actor, conversation_id),
-        )
-        append_audit_event(
-            conn,
-            conversation_id,
-            actor,
-            "conversation_routed",
-            {"status": "human_required", "next_actor": next_actor, "reason": review["reason"]},
-        )
-        row = conn.execute("select * from moderation_flags where id = ?", (review["id"],)).fetchone()
-        return {
-            "ok": True,
-            "review": _review_summary(conn, row),
-            "conversation": conversation_summary(conn, conversation_id),
-        }
+    return human_review_handlers.create_human_review(db_path, conversation_id, payload)
 
 
 def _resolve_human_review_item(db_path: str | Path, review_id: str | int, payload: dict[str, Any]) -> dict[str, Any]:
-    action = str(payload.get("action") or "reply")
-    if action not in HUMAN_REVIEW_ACTIONS:
-        raise SystemExit(f"Unknown human-review action: {action}")
-    sender = _human_review_sender(payload)
-    with db_session(db_path) as conn:
-        row = _human_review_row(conn, review_id)
-        if row["resolved_at"]:
-            raise SystemExit(f"Human review already resolved: {review_id}")
-        conversation_id = row["conversation_id"]
-        conversation = conversation_summary(conn, conversation_id)
-        _require_merchant_token(conn, conversation["merchant_id"], payload)
-        if conversation["status"] == "closed":
-            raise SystemExit(f"Conversation {conversation_id} is closed")
-        now = now_iso()
-        resolved = conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where id = ? and resolved_at = ''
-            """,
-            (now, action, sender, int(review_id)),
-        )
-        if resolved.rowcount != 1:
-            raise SystemExit(f"Human review already resolved: {review_id}")
-        remaining_rows = conn.execute(
-            """
-            select reason from moderation_flags
-            where conversation_id = ? and resolved_at = ''
-            order by case when reason = 'suspicious_content' then 0 else 1 end, id
-            """,
-            (conversation_id,),
-        ).fetchall()
-        remaining = len(remaining_rows)
-        remaining_reason = str(remaining_rows[0]["reason"] or "") if remaining_rows else ""
-        status = "human_required" if remaining else ("closed" if action == "close" else "waiting_buyer")
-        status_reason = remaining_reason if status == "human_required" else str(row["reason"] or "")
-        next_actor = next_actor_for_status(status, status_reason if status == "human_required" else "")
-        if payload.get("text"):
-            append_message(
-                conn,
-                conversation_id,
-                sender=sender,
-                intent=str(payload.get("intent") or "support"),
-                text=str(payload["text"]),
-                structured_payload={
-                    "resolution": action,
-                    "source_id": payload.get("source_id") or sender,
-                    "review_id": int(review_id),
-                    "reason": status_reason,
-                    "resolved_reason": row["reason"],
-                },
-                status=status,
-            )
-        else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, sender, conversation_id),
-            )
-        append_audit_event(
-            conn,
-            conversation_id,
-            payload.get("source_id") or sender,
-            "human_review_resolved",
-            {
-                "review_id": int(review_id),
-                "resolution": action,
-                "status": status,
-                "next_actor": next_actor,
-                "remaining_unresolved_reviews": int(remaining or 0),
-            },
-        )
-        if status == "closed":
-            _append_conversation_closed_audit(
-                conn,
-                conversation_id,
-                payload.get("source_id") or sender,
-                next_actor,
-                {"resolution": action, "review_id": int(review_id), "source": "human_review"},
-            )
-        review = _review_summary(conn, _human_review_row(conn, review_id))
-        rows = conn.execute(
-            "select * from moderation_flags where conversation_id = ? order by id",
-            (conversation_id,),
-        ).fetchall()
-        return {
-            "ok": True,
-            "review": review,
-            "reviews": [_review_summary(conn, row) for row in rows],
-            "conversation": conversation_summary(conn, conversation_id),
-        }
+    return human_review_handlers.resolve_human_review_item(db_path, review_id, payload)
 
 
 def _resolve_human_review(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    action = str(payload.get("action") or "reply")
-    if action not in HUMAN_REVIEW_ACTIONS:
-        raise SystemExit(f"Unknown human-review action: {action}")
-    sender = _human_review_sender(payload)
-    status = "closed" if action == "close" else "waiting_buyer"
-    with db_session(db_path) as conn:
-        conversation = conversation_summary(conn, conversation_id)
-        _require_merchant_token(conn, conversation["merchant_id"], payload)
-        if conversation["status"] == "closed":
-            raise SystemExit(f"Conversation {conversation_id} is closed")
-        now = now_iso()
-        resolved = conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where conversation_id = ? and resolved_at = ''
-            """,
-            (now, action, sender, conversation_id),
-        )
-        if resolved.rowcount == 0:
-            raise SystemExit(f"No unresolved human reviews for conversation: {conversation_id}")
-        next_actor = next_actor_for_status(status)
-        if payload.get("text"):
-            append_message(
-                conn,
-                conversation_id,
-                sender=sender,
-                intent=str(payload.get("intent") or "support"),
-                text=str(payload["text"]),
-                structured_payload={"resolution": action, "source_id": payload.get("source_id") or ""},
-                status=status,
-            )
+    return human_review_handlers.resolve_human_review(db_path, conversation_id, payload)
+
+
+def _match_path(template: str, path: str) -> dict[str, str] | None:
+    parts = template.split("/")
+    regex_parts = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            param_name = part[1:-1]
+            regex_parts.append(f"(?P<{param_name}>[^/]+)")
         else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, sender, conversation_id),
-            )
-        append_audit_event(
-            conn,
-            conversation_id,
-            payload.get("source_id") or sender,
-            "human_review_resolved",
-            {"resolution": action, "status": status, "next_actor": next_actor},
-        )
-        if status == "closed":
-            _append_conversation_closed_audit(
-                conn,
-                conversation_id,
-                payload.get("source_id") or sender,
-                next_actor,
-                {"resolution": action, "source": "human_review"},
-            )
-        rows = conn.execute(
-            "select * from moderation_flags where conversation_id = ? order by id",
-            (conversation_id,),
-        ).fetchall()
-        return {
-            "ok": True,
-            "reviews": [_review_summary(conn, row) for row in rows],
-            "conversation": conversation_summary(conn, conversation_id),
-        }
+            regex_parts.append(re.escape(part))
+    match = re.match("^" + "/".join(regex_parts) + "$", path)
+    return match.groupdict() if match else None
+
+
+def _buyer_conversation_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], buyer_id: str) -> dict[str, Any]:
+    filters = dict(query)
+    filters["buyer_id"] = buyer_id
+    return _conversation_list(db_path, filters, payload, owner_kind="buyer", owner_id=buyer_id)
+
+
+def _merchant_conversation_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str) -> dict[str, Any]:
+    filters = dict(query)
+    filters["merchant_id"] = merchant_id
+    return _conversation_list(db_path, filters, payload, owner_kind="merchant", owner_id=merchant_id)
+
+
+def _merchant_human_review_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str) -> dict[str, Any]:
+    return _merchant_conversations(
+        db_path,
+        merchant_id,
+        payload,
+        status="human_required",
+        limit=query.get("limit"),
+        offset=query.get("offset"),
+        include=query.get("include"),
+    )
+
+
+_ROUTE_TABLE: tuple[RouteEntry, ...] = (
+    RouteEntry({"GET"}, "/health", lambda db_path, payload, query, **kw: _health(db_path)),
+    RouteEntry({"GET"}, "/merchants", lambda db_path, payload, query, **kw: _list_merchants(db_path, query)),
+    RouteEntry({"POST"}, "/merchants", lambda db_path, payload, query, **kw: _create_merchant(db_path, payload)),
+    RouteEntry({"GET"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _get_merchant(db_path, merchant_id)),
+    RouteEntry({"PATCH"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _update_merchant(db_path, merchant_id, payload)),
+    RouteEntry({"GET"}, "/merchants/{merchant_id}/conversations", _merchant_conversation_list),
+    RouteEntry({"GET"}, "/merchants/{merchant_id}/human-review", _merchant_human_review_list),
+    RouteEntry({"GET"}, "/merchants/{merchant_id}/agents", lambda db_path, payload, query, merchant_id: _list_agents(
+        db_path,
+        payload,
+        owner_id=merchant_id,
+        limit=query.get("limit"),
+        offset=query.get("offset"),
+    )),
+    RouteEntry({"POST"}, "/products", lambda db_path, payload, query, **kw: _create_product(db_path, payload)),
+    RouteEntry({"GET"}, "/products/{sku}", lambda db_path, payload, query, sku: _get_product(db_path, sku)),
+    RouteEntry({"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)),
+    RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query)),
+    RouteEntry({"GET"}, "/search/merchants", lambda db_path, payload, query, **kw: _search_merchants(db_path, query)),
+    RouteEntry({"POST"}, "/channels/messages", lambda db_path, payload, query, **kw: _ingest_channel_message(db_path, payload)),
+    RouteEntry({"POST"}, "/buyer/ask", lambda db_path, payload, query, **kw: _buyer_ask(db_path, payload)),
+    RouteEntry({"POST"}, "/conversations", lambda db_path, payload, query, **kw: _create_conversation(db_path, payload)),
+    RouteEntry({"GET"}, "/conversations/{conversation_id}", lambda db_path, payload, query, conversation_id: _get_conversation(db_path, conversation_id, payload)),
+    RouteEntry({"POST"}, "/conversations/{conversation_id}/messages", lambda db_path, payload, query, conversation_id: _append_conversation_message(db_path, conversation_id, payload)),
+    RouteEntry({"POST"}, "/conversations/{conversation_id}/close", lambda db_path, payload, query, conversation_id: _close_conversation(db_path, conversation_id, payload)),
+    RouteEntry({"POST"}, "/conversations/{conversation_id}/human-review", lambda db_path, payload, query, conversation_id: _create_human_review(db_path, conversation_id, payload)),
+    RouteEntry({"POST"}, "/conversations/{conversation_id}/human-review/resolve", lambda db_path, payload, query, conversation_id: _resolve_human_review(db_path, conversation_id, payload)),
+    RouteEntry({"GET"}, "/buyers/{buyer_id}/conversations", _buyer_conversation_list),
+    RouteEntry({"POST"}, "/agents/heartbeat", lambda db_path, payload, query, **kw: _agent_heartbeat(db_path, payload)),
+    RouteEntry({"GET"}, "/agents/tokens", lambda db_path, payload, query, **kw: _list_agent_tokens(
+        db_path,
+        payload,
+        merchant_id=str(query.get("merchant_id") or ""),
+        limit=query.get("limit"),
+        offset=query.get("offset"),
+    )),
+    RouteEntry({"POST"}, "/agents/tokens", lambda db_path, payload, query, **kw: _create_agent_token(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/tokens/revoke", lambda db_path, payload, query, **kw: _revoke_agent_token(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/tokens/rotate", lambda db_path, payload, query, **kw: _rotate_agent_token(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/messages/claim", lambda db_path, payload, query, **kw: _claim_agent_message(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/messages/complete", lambda db_path, payload, query, **kw: _complete_agent_message(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/messages/fail", lambda db_path, payload, query, **kw: _fail_agent_message(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/messages/abandon", lambda db_path, payload, query, **kw: _abandon_agent_message(db_path, payload)),
+    RouteEntry({"POST"}, "/agents/messages/abandon-stale", lambda db_path, payload, query, **kw: _abandon_stale_agent_messages(db_path, payload)),
+    RouteEntry({"GET"}, "/agents", lambda db_path, payload, query, **kw: _list_agents(
+        db_path,
+        payload,
+        limit=query.get("limit"),
+        offset=query.get("offset"),
+    )),
+    RouteEntry({"GET"}, "/agents/{agent_id}", lambda db_path, payload, query, agent_id: _get_agent(db_path, agent_id, payload)),
+    RouteEntry({"POST"}, "/audit/tool-calls", lambda db_path, payload, query, **kw: _record_tool_call_audit(db_path, payload)),
+    RouteEntry({"GET"}, "/audit/events", lambda db_path, payload, query, **kw: _audit_events(
+        db_path,
+        payload,
+        merchant_id=str(query.get("merchant_id") or ""),
+        event=str(query.get("event") or ""),
+        limit=query.get("limit") or 50,
+        offset=query.get("offset"),
+    )),
+    RouteEntry({"GET"}, "/human-review/queue", lambda db_path, payload, query, **kw: _human_review_queue(
+        db_path,
+        payload,
+        merchant_id=str(query.get("merchant_id") or ""),
+        limit=query.get("limit"),
+        offset=query.get("offset"),
+    )),
+    RouteEntry({"GET"}, "/human-review/{review_id}", lambda db_path, payload, query, review_id: _get_human_review(db_path, review_id, payload)),
+    RouteEntry({"POST"}, "/human-review/{review_id}/resolve", lambda db_path, payload, query, review_id: _resolve_human_review_item(db_path, review_id, payload)),
+)
 
 
 def handle_request(
@@ -2014,131 +417,32 @@ def handle_request(
 ) -> tuple[int, dict[str, Any]]:
     payload = payload or {}
     query = query or {}
-    parts = [part for part in path.strip("/").split("/") if part]
     try:
-        if method == "GET" and path == "/health":
-            return 200, _health(db_path)
-        if path == "/merchants" and method == "GET":
-            return 200, _list_merchants(db_path, query)
-        if path == "/merchants" and method == "POST":
-            return 200, _create_merchant(db_path, payload)
-        if len(parts) == 2 and parts[0] == "merchants" and method == "GET":
-            return 200, _get_merchant(db_path, parts[1])
-        if len(parts) == 2 and parts[0] == "merchants" and method == "PATCH":
-            return 200, _update_merchant(db_path, parts[1], payload)
-        if path == "/products" and method == "POST":
-            return 200, _create_product(db_path, payload)
-        if len(parts) == 2 and parts[0] == "products" and method == "GET":
-            return 200, _get_product(db_path, parts[1])
-        if len(parts) == 2 and parts[0] == "products" and method == "PATCH":
-            return 200, _update_product(db_path, parts[1], payload)
-        if path == "/search/products" and method == "GET":
-            return 200, _search_products(db_path, query)
-        if path == "/search/merchants" and method == "GET":
-            return 200, _search_merchants(db_path, query)
-        if path == "/channels/messages" and method == "POST":
-            return 200, _ingest_channel_message(db_path, payload)
-        if path == "/buyer/ask" and method == "POST":
-            return 200, _buyer_ask(db_path, payload)
-        if path == "/conversations" and method == "POST":
-            return 200, _create_conversation(db_path, payload)
-        if len(parts) == 3 and parts[0] == "buyers" and parts[2] == "conversations" and method == "GET":
-            filters = dict(query)
-            filters["buyer_id"] = parts[1]
-            return 200, _conversation_list(db_path, filters, payload, owner_kind="buyer", owner_id=parts[1])
-        if len(parts) == 2 and parts[0] == "conversations" and method == "GET":
-            return 200, _get_conversation(db_path, parts[1], payload)
-        if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "messages" and method == "POST":
-            return 200, _append_conversation_message(db_path, parts[1], payload)
-        if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "close" and method == "POST":
-            return 200, _close_conversation(db_path, parts[1], payload)
-        if path == "/agents/heartbeat" and method == "POST":
-            return 200, _agent_heartbeat(db_path, payload)
-        if path == "/agents/tokens" and method == "GET":
-            return 200, _list_agent_tokens(
-                db_path,
-                payload,
-                merchant_id=str(query.get("merchant_id") or ""),
-                limit=query.get("limit"),
-                offset=query.get("offset"),
-            )
-        if path == "/agents/tokens" and method == "POST":
-            return 200, _create_agent_token(db_path, payload)
-        if path == "/agents/tokens/revoke" and method == "POST":
-            return 200, _revoke_agent_token(db_path, payload)
-        if path == "/agents/tokens/rotate" and method == "POST":
-            return 200, _rotate_agent_token(db_path, payload)
-        if path == "/agents/messages/claim" and method == "POST":
-            return 200, _claim_agent_message(db_path, payload)
-        if path == "/agents/messages/complete" and method == "POST":
-            return 200, _complete_agent_message(db_path, payload)
-        if path == "/agents/messages/fail" and method == "POST":
-            return 200, _fail_agent_message(db_path, payload)
-        if path == "/agents/messages/abandon" and method == "POST":
-            return 200, _abandon_agent_message(db_path, payload)
-        if path == "/agents/messages/abandon-stale" and method == "POST":
-            return 200, _abandon_stale_agent_messages(db_path, payload)
-        if path == "/agents" and method == "GET":
-            return 200, _list_agents(db_path, payload, limit=query.get("limit"), offset=query.get("offset"))
-        if len(parts) == 2 and parts[0] == "agents" and method == "GET":
-            return 200, _get_agent(db_path, parts[1], payload)
-        if len(parts) == 3 and parts[0] == "merchants" and parts[2] == "agents" and method == "GET":
-            return 200, _list_agents(
-                db_path,
-                payload,
-                owner_id=parts[1],
-                limit=query.get("limit"),
-                offset=query.get("offset"),
-            )
-        if path == "/audit/tool-calls" and method == "POST":
-            return 200, _record_tool_call_audit(db_path, payload)
-        if path == "/audit/events" and method == "GET":
-            return 200, _audit_events(
-                db_path,
-                payload,
-                merchant_id=str(query.get("merchant_id") or ""),
-                event=str(query.get("event") or ""),
-                limit=query.get("limit") or 50,
-                offset=query.get("offset"),
-            )
-        if path == "/human-review/queue" and method == "GET":
-            return 200, _human_review_queue(
-                db_path,
-                payload,
-                merchant_id=str(query.get("merchant_id") or ""),
-                limit=query.get("limit"),
-                offset=query.get("offset"),
-            )
-        if len(parts) == 2 and parts[0] == "human-review" and method == "GET":
-            return 200, _get_human_review(db_path, parts[1], payload)
-        if len(parts) == 3 and parts[0] == "human-review" and parts[2] == "resolve" and method == "POST":
-            return 200, _resolve_human_review_item(db_path, parts[1], payload)
-        if len(parts) == 3 and parts[0] == "merchants" and parts[2] == "conversations" and method == "GET":
-            filters = dict(query)
-            filters["merchant_id"] = parts[1]
-            return 200, _conversation_list(db_path, filters, payload, owner_kind="merchant", owner_id=parts[1])
-        if len(parts) == 3 and parts[0] == "merchants" and parts[2] == "human-review" and method == "GET":
-            return 200, _merchant_conversations(
-                db_path,
-                parts[1],
-                payload,
-                status="human_required",
-                limit=query.get("limit"),
-                offset=query.get("offset"),
-            )
-        if len(parts) == 3 and parts[0] == "conversations" and parts[2] == "human-review" and method == "POST":
-            return 200, _create_human_review(db_path, parts[1], payload)
-        if len(parts) == 4 and parts[0] == "conversations" and parts[2] == "human-review" and parts[3] == "resolve" and method == "POST":
-            return 200, _resolve_human_review(db_path, parts[1], payload)
+        for route in _ROUTE_TABLE:
+            if method.upper() not in route.methods:
+                continue
+            path_params = _match_path(route.path_template, path)
+            if path_params is not None:
+                return 200, route.handler(db_path, payload, query, **path_params)
+        raise NotFoundError(f"No route for {method} {path}")
     except AuthError as exc:
+        return 403, {"ok": False, "error": str(exc)}
+    except PermissionDenied as exc:
         return 403, {"ok": False, "error": str(exc)}
     except IdempotencyConflict as exc:
         return 409, {"ok": False, "error": str(exc)}
+    except ConflictError as exc:
+        return 409, {"ok": False, "error": str(exc)}
+    except NotFoundError as exc:
+        return 404, {"ok": False, "error": str(exc)}
     except RateLimitError as exc:
         return 429, {"ok": False, "error": str(exc)}
-    except (KeyError, ValueError, SystemExit) as exc:
+    except ValidationError as exc:
         return 400, {"ok": False, "error": str(exc)}
-    return 404, {"ok": False, "error": f"No route for {method} {path}"}
+    except ShoppingCliError as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except Exception:
+        return 500, {"ok": False, "error": "internal server error"}
 
 
 def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
@@ -2159,24 +463,32 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     def auth_error_handler(_request: Any, exc: AuthError) -> Any:
         return _json_error_response(403, str(exc))
 
+    @app.exception_handler(PermissionDenied)
+    def permission_denied_handler(_request: Any, exc: PermissionDenied) -> Any:
+        return _json_error_response(403, str(exc))
+
     @app.exception_handler(IdempotencyConflict)
     def idempotency_conflict_handler(_request: Any, exc: IdempotencyConflict) -> Any:
         return _json_error_response(409, str(exc))
+
+    @app.exception_handler(ConflictError)
+    def conflict_error_handler(_request: Any, exc: ConflictError) -> Any:
+        return _json_error_response(409, str(exc))
+
+    @app.exception_handler(NotFoundError)
+    def not_found_error_handler(_request: Any, exc: NotFoundError) -> Any:
+        return _json_error_response(404, str(exc))
 
     @app.exception_handler(RateLimitError)
     def rate_limit_error_handler(_request: Any, exc: RateLimitError) -> Any:
         return _json_error_response(429, str(exc))
 
-    @app.exception_handler(KeyError)
-    def key_error_handler(_request: Any, exc: KeyError) -> Any:
+    @app.exception_handler(ValidationError)
+    def validation_error_handler(_request: Any, exc: ValidationError) -> Any:
         return _json_error_response(400, str(exc))
 
-    @app.exception_handler(ValueError)
-    def value_error_handler(_request: Any, exc: ValueError) -> Any:
-        return _json_error_response(400, str(exc))
-
-    @app.exception_handler(SystemExit)
-    def system_exit_handler(_request: Any, exc: SystemExit) -> Any:
+    @app.exception_handler(ShoppingCliError)
+    def shopping_cli_error_handler(_request: Any, exc: ShoppingCliError) -> Any:
         return _json_error_response(400, str(exc))
 
     if RequestValidationError is not None:  # pragma: no cover - exercised with fastapi installed
@@ -2194,7 +506,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
 
     @app.post("/merchants")
     def create_merchant(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _create_merchant(db_path, _payload_with_auth(payload, authorization))
+        return _create_merchant(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/merchants/{merchant_id}")
     def get_merchant(merchant_id: str) -> dict[str, Any]:
@@ -2206,11 +518,11 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _update_merchant(db_path, merchant_id, _payload_with_auth(payload, authorization))
+        return _update_merchant(db_path, merchant_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/products")
     def create_product(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _create_product(db_path, _payload_with_auth(payload, authorization))
+        return _create_product(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/products/{sku}")
     def get_product(sku: str) -> dict[str, Any]:
@@ -2222,7 +534,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _update_product(db_path, sku, _payload_with_auth(payload, authorization))
+        return _update_product(db_path, sku, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/search/products")
     def search_products(
@@ -2253,7 +565,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
 
     @app.post("/channels/messages")
     def ingest_channel_message(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _ingest_channel_message(db_path, _payload_with_auth(payload, authorization))
+        return _ingest_channel_message(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/buyer/ask")
     def buyer_ask(
@@ -2261,7 +573,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
-        return _buyer_ask(db_path, _payload_with_auth(payload, authorization, idempotency_key))
+        return _buyer_ask(db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key))
 
     @app.post("/conversations")
     def create_conversation(
@@ -2269,7 +581,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
-        return _create_conversation(db_path, _payload_with_auth(payload, authorization, idempotency_key))
+        return _create_conversation(db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key))
 
     @app.get("/buyers/{buyer_id}/conversations")
     def get_buyer_conversations(
@@ -2281,6 +593,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
         limit: str = "",
         offset: str = "",
+        include: str = "",
     ) -> dict[str, Any]:
         return _conversation_list(
             db_path,
@@ -2292,15 +605,16 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
                 "updated_since": updated_since,
                 "limit": limit,
                 "offset": offset,
+                "include": include,
             },
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             owner_kind="buyer",
             owner_id=buyer_id,
         )
 
     @app.get("/conversations/{conversation_id}")
     def get_conversation(conversation_id: str, authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _get_conversation(db_path, conversation_id, _payload_with_auth({}, authorization))
+        return _get_conversation(db_path, conversation_id, api_auth.payload_with_auth({}, authorization))
 
     @app.post("/conversations/{conversation_id}/messages")
     def add_message(
@@ -2308,7 +622,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _append_conversation_message(db_path, conversation_id, _payload_with_auth(payload, authorization))
+        return _append_conversation_message(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/conversations/{conversation_id}/close")
     def close_conversation(
@@ -2316,15 +630,15 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _close_conversation(db_path, conversation_id, _payload_with_auth(payload, authorization))
+        return _close_conversation(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/heartbeat")
     def agent_heartbeat(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _agent_heartbeat(db_path, _payload_with_auth(payload, authorization))
+        return _agent_heartbeat(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/tokens")
     def create_agent_token(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _create_agent_token(db_path, _payload_with_auth(payload, authorization))
+        return _create_agent_token(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/agents/tokens")
     def list_agent_tokens(
@@ -2335,7 +649,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _list_agent_tokens(
             db_path,
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             merchant_id=merchant_id,
             limit=limit,
             offset=offset,
@@ -2343,46 +657,46 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
 
     @app.post("/agents/tokens/revoke")
     def revoke_agent_token(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _revoke_agent_token(db_path, _payload_with_auth(payload, authorization))
+        return _revoke_agent_token(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/tokens/rotate")
     def rotate_agent_token(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _rotate_agent_token(db_path, _payload_with_auth(payload, authorization))
+        return _rotate_agent_token(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/messages/claim")
     def claim_agent_message_route(
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _claim_agent_message(db_path, _payload_with_auth(payload, authorization))
+        return _claim_agent_message(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/messages/complete")
     def complete_agent_message_route(
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _complete_agent_message(db_path, _payload_with_auth(payload, authorization))
+        return _complete_agent_message(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/messages/fail")
     def fail_agent_message_route(
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _fail_agent_message(db_path, _payload_with_auth(payload, authorization))
+        return _fail_agent_message(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/messages/abandon")
     def abandon_agent_message_route(
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _abandon_agent_message(db_path, _payload_with_auth(payload, authorization))
+        return _abandon_agent_message(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/agents/messages/abandon-stale")
     def abandon_stale_agent_messages_route(
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _abandon_stale_agent_messages(db_path, _payload_with_auth(payload, authorization))
+        return _abandon_stale_agent_messages(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/agents")
     def list_agents(
@@ -2390,11 +704,11 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         limit: str = "",
         offset: str = "",
     ) -> dict[str, Any]:
-        return _list_agents(db_path, _payload_with_auth({}, authorization), limit=limit, offset=offset)
+        return _list_agents(db_path, api_auth.payload_with_auth({}, authorization), limit=limit, offset=offset)
 
     @app.get("/agents/{agent_id}")
     def get_agent(agent_id: str, authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _get_agent(db_path, agent_id, _payload_with_auth({}, authorization))
+        return _get_agent(db_path, agent_id, api_auth.payload_with_auth({}, authorization))
 
     @app.get("/merchants/{merchant_id}/agents")
     def get_merchant_agents(
@@ -2405,7 +719,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _list_agents(
             db_path,
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             owner_id=merchant_id,
             limit=limit,
             offset=offset,
@@ -2413,7 +727,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
 
     @app.post("/audit/tool-calls")
     def record_tool_call_audit(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _record_tool_call_audit(db_path, _payload_with_auth(payload, authorization))
+        return _record_tool_call_audit(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/audit/events")
     def get_audit_events(
@@ -2425,7 +739,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _audit_events(
             db_path,
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             merchant_id=merchant_id,
             event=event,
             limit=limit,
@@ -2441,7 +755,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _human_review_queue(
             db_path,
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             merchant_id=merchant_id,
             limit=limit,
             offset=offset,
@@ -2449,7 +763,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
 
     @app.get("/human-review/{review_id}")
     def get_human_review(review_id: str, authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _get_human_review(db_path, review_id, _payload_with_auth({}, authorization))
+        return _get_human_review(db_path, review_id, api_auth.payload_with_auth({}, authorization))
 
     @app.post("/human-review/{review_id}/resolve")
     def resolve_human_review_item(
@@ -2457,7 +771,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _resolve_human_review_item(db_path, review_id, _payload_with_auth(payload, authorization))
+        return _resolve_human_review_item(db_path, review_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/merchants/{merchant_id}/conversations")
     def get_merchant_conversations(
@@ -2469,6 +783,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
         limit: str = "",
         offset: str = "",
+        include: str = "",
     ) -> dict[str, Any]:
         return _conversation_list(
             db_path,
@@ -2480,8 +795,9 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
                 "updated_since": updated_since,
                 "limit": limit,
                 "offset": offset,
+                "include": include,
             },
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             owner_kind="merchant",
             owner_id=merchant_id,
         )
@@ -2492,14 +808,16 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         limit: str = "",
         offset: str = "",
         authorization: str = AUTHORIZATION_HEADER,
+        include: str = "",
     ) -> dict[str, Any]:
         return _merchant_conversations(
             db_path,
             merchant_id,
-            _payload_with_auth({}, authorization),
+            api_auth.payload_with_auth({}, authorization),
             status="human_required",
             limit=limit,
             offset=offset,
+            include=include,
         )
 
     @app.post("/conversations/{conversation_id}/human-review")
@@ -2508,7 +826,7 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _create_human_review(db_path, conversation_id, _payload_with_auth(payload, authorization))
+        return _create_human_review(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/conversations/{conversation_id}/human-review/resolve")
     def resolve_human_review(
@@ -2516,6 +834,6 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _resolve_human_review(db_path, conversation_id, _payload_with_auth(payload, authorization))
+        return _resolve_human_review(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
 
     return app

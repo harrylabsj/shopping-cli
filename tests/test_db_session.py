@@ -3,11 +3,14 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 from shopping_cli import VERSION
-from shopping_cli.db import session as session_module
+from shopping_cli.core.tokens import token_digest, token_prefix, token_suffix
+from shopping_cli.db import migrations as migrations_module
+from shopping_cli.db.migrations import CURRENT_SCHEMA_VERSION
 from shopping_cli.db.session import SQLITE_BUSY_TIMEOUT_MS, db_session, open_connection
 
 
@@ -50,53 +53,142 @@ class DbSessionTest(unittest.TestCase):
                 row = conn.execute("select value from meta where key = 'thread_writer'").fetchone()
             self.assertEqual(row["value"], "ok")
 
-    def test_versioned_migrations_do_not_scan_on_every_connection(self):
+    def test_explicit_migrations_use_user_version_not_package_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             with db_session(db_file):
                 pass
 
-            with (
-                patch.object(
-                    session_module,
-                    "migrate_api_tokens_to_hashes",
-                    wraps=session_module.migrate_api_tokens_to_hashes,
-                ) as migrate,
-                patch.object(
-                    session_module,
-                    "backfill_conversation_next_actor",
-                    wraps=session_module.backfill_conversation_next_actor,
-                ) as backfill,
-            ):
+            calls = []
+            fake_migration = migrations_module.Migration(
+                CURRENT_SCHEMA_VERSION,
+                "already_applied",
+                lambda _conn: calls.append("ran"),
+            )
+            with patch.object(migrations_module, "MIGRATIONS", (fake_migration,)):
                 with db_session(db_file):
                     pass
 
-            self.assertEqual(migrate.call_count, 0)
-            self.assertEqual(backfill.call_count, 0)
+            self.assertEqual(calls, [])
 
-            with sqlite3.connect(db_file) as conn:
-                conn.execute("update meta set value = ? where key = 'schema_version'", ("old-version",))
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute("update meta set value = ? where key = 'package_version'", ("old-version",))
+                conn.commit()
 
-            with (
-                patch.object(
-                    session_module,
-                    "migrate_api_tokens_to_hashes",
-                    wraps=session_module.migrate_api_tokens_to_hashes,
-                ) as migrate,
-                patch.object(
-                    session_module,
-                    "backfill_conversation_next_actor",
-                    wraps=session_module.backfill_conversation_next_actor,
-                ) as backfill,
-            ):
+            with patch.object(migrations_module, "MIGRATIONS", (fake_migration,)):
                 with db_session(db_file):
                     pass
 
-            self.assertEqual(migrate.call_count, 1)
-            self.assertEqual(backfill.call_count, 1)
+            self.assertEqual(calls, [])
+
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute(f"pragma user_version = 0")
+                conn.commit()
+
+            with patch.object(migrations_module, "MIGRATIONS", (fake_migration,)):
+                with db_session(db_file):
+                    pass
+
+            self.assertEqual(calls, ["ran"])
             with db_session(db_file) as conn:
                 row = conn.execute("select value from meta where key = 'schema_version'").fetchone()
-            self.assertEqual(row["value"], VERSION)
+                package = conn.execute("select value from meta where key = 'package_version'").fetchone()
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+            self.assertEqual(row["value"], str(CURRENT_SCHEMA_VERSION))
+            self.assertEqual(package["value"], VERSION)
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
+
+    def test_explicit_migrations_upgrade_representative_legacy_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "legacy.sqlite"
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute("create table meta (key text primary key, value text not null)")
+                conn.execute(
+                    """
+                    create table conversations (
+                        id text primary key,
+                        buyer_id text not null,
+                        merchant_id text not null,
+                        sku text not null default '',
+                        status text not null,
+                        created_at text not null,
+                        updated_at text not null,
+                        last_sender text not null default ''
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    insert into conversations(id, buyer_id, merchant_id, sku, status, created_at, updated_at, last_sender)
+                    values('CONV-0001', 'alice', 'seller-a', '', 'waiting_merchant', '2026-01-01T00:00:00', '2026-01-01T00:00:00', 'buyer')
+                    """
+                )
+                conn.execute(
+                    """
+                    create table agents (
+                        id text primary key,
+                        type text not null,
+                        owner_id text not null,
+                        status text not null,
+                        capabilities_json text not null default '[]',
+                        last_seen_at text not null
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    create table moderation_flags (
+                        id integer primary key autoincrement,
+                        conversation_id text not null default '',
+                        sku text not null default '',
+                        reason text not null,
+                        severity text not null default 'review',
+                        created_at text not null
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    create table api_tokens (
+                        token text primary key,
+                        role text not null,
+                        merchant_id text not null default '',
+                        buyer_id text not null default '',
+                        created_at text not null
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    insert into api_tokens(token, role, merchant_id, buyer_id, created_at)
+                    values('plain-token', 'merchant', 'seller-a', '', '2026-01-01T00:00:00')
+                    """
+                )
+                conn.commit()
+
+            with db_session(db_file) as conn:
+                conversation_columns = {row["name"] for row in conn.execute("pragma table_info(conversations)").fetchall()}
+                agent_columns = {row["name"] for row in conn.execute("pragma table_info(agents)").fetchall()}
+                flag_columns = {row["name"] for row in conn.execute("pragma table_info(moderation_flags)").fetchall()}
+                token_columns = {row["name"] for row in conn.execute("pragma table_info(api_tokens)").fetchall()}
+                conversation = conn.execute("select next_actor from conversations where id = 'CONV-0001'").fetchone()
+                token = conn.execute("select token, token_hash, token_prefix, token_suffix from api_tokens").fetchone()
+                schema_version = conn.execute("select value from meta where key = 'schema_version'").fetchone()
+                package_version = conn.execute("select value from meta where key = 'package_version'").fetchone()
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+
+            self.assertIn("next_actor", conversation_columns)
+            self.assertEqual(conversation["next_actor"], "merchant_agent")
+            self.assertTrue({"pid", "version", "last_error", "checked_count", "replied_count"} <= agent_columns)
+            self.assertTrue({"resolved_at", "resolution", "resolved_by"} <= flag_columns)
+            self.assertTrue({"token_hash", "token_prefix", "token_suffix", "agent_id", "conversation_id", "revoked_at", "expires_at"} <= token_columns)
+            self.assertEqual(token["token"], token_digest("plain-token"))
+            self.assertEqual(token["token_hash"], token_digest("plain-token"))
+            self.assertEqual(token["token_prefix"], token_prefix("plain-token"))
+            self.assertEqual(token["token_suffix"], token_suffix("plain-token"))
+            self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
+            self.assertEqual(package_version["value"], VERSION)
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

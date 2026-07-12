@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from shopping_cli import VERSION
 from shopping_cli.core.catalog import product_summary, require_merchant
 from shopping_cli.core.conversations import add_flag, append_message, waiting_merchant_conversations
+from shopping_cli.core.errors import ValidationError
 from shopping_cli.core.harness import abandon_agent_message, abandon_stale_agent_messages, claim_agent_message, complete_agent_message, fail_agent_message
 from shopping_cli.db.session import encode_json, now_iso
 
@@ -69,7 +70,7 @@ def _safe_positive_float(value: Any, default: float, maximum: float | None = Non
 def _normalize_agent_status(value: Any) -> str:
     status = str(value or "").strip() or "online"
     if status not in AGENT_STATUSES:
-        raise SystemExit(f"Unknown agent status: {status}")
+        raise ValidationError(f"Unknown agent status: {status}")
     return status
 
 
@@ -77,11 +78,11 @@ def _normalize_capabilities(value: Any) -> list[str]:
     if value is None:
         return list(DEFAULT_CAPABILITIES)
     if not isinstance(value, list):
-        raise SystemExit("agent capabilities must be a list of strings")
+        raise ValidationError("agent capabilities must be a list of strings")
     normalized: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            raise SystemExit("agent capabilities must be a list of strings")
+            raise ValidationError("agent capabilities must be a list of strings")
         text = item.strip()
         if text:
             normalized.append(text)
@@ -436,7 +437,7 @@ class HTTPMerchantAgentTools:
     def waiting_merchant_conversations(self, merchant_id: str) -> list[dict[str, Any]]:
         self._check_merchant(merchant_id)
         path = f"/merchants/{urllib.parse.quote(merchant_id, safe='')}/conversations"
-        result = self._request("GET", path, query={"status": "waiting_merchant"})
+        result = self._request("GET", path, query={"status": "waiting_merchant", "include": "details"})
         return self._response_list(result, "conversations")
 
     def product_summary(self, sku: str) -> dict[str, Any]:

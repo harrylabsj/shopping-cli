@@ -14,13 +14,21 @@ services:
     ports:
       - "${SHOPPING_API_BIND:-127.0.0.1}:${SHOPPING_API_PORT:-8765}:8765"
     environment:
+      SHOPPING_DEPLOYMENT_PROFILE: "${SHOPPING_DEPLOYMENT_PROFILE:-production}"
+      SHOPPING_API_HOST: "${SHOPPING_API_HOST:-0.0.0.0}"
+      SHOPPING_API_PORT: "${SHOPPING_API_PORT:-8765}"
+      SHOPPING_DB: "${SHOPPING_DB:-/data/shopping-cli.sqlite}"
+      SHOPPING_PUBLIC_BASE_URL: "${SHOPPING_PUBLIC_BASE_URL:-}"
+      SHOPPING_AGENT_STALE_TTL_SECONDS: "${SHOPPING_AGENT_STALE_TTL_SECONDS:-60}"
       SHOPPING_ADMIN_TOKEN: "${SHOPPING_ADMIN_TOKEN:?set SHOPPING_ADMIN_TOKEN before starting shopping-api}"
+      SHOPPING_BUYER_BOOTSTRAP_TOKEN: "${SHOPPING_BUYER_BOOTSTRAP_TOKEN:?set SHOPPING_BUYER_BOOTSTRAP_TOKEN before starting shopping-api}"
       SHOPPING_CHANNEL_TOKENS: "${SHOPPING_CHANNEL_TOKENS:-}"
     volumes:
       - shopping_cli_api_data:/data
     restart: unless-stopped
 
   shopping-agent:
+    profiles: ["agent"]
     build: .
     image: shopping-cli-api:2.0.0
     command:
@@ -29,11 +37,11 @@ services:
       - agent
       - run
       - --merchant
-      - "${SHOPPING_AGENT_MERCHANT:?set SHOPPING_AGENT_MERCHANT before starting shopping-agent}"
+      - "${SHOPPING_AGENT_MERCHANT:-}"
       - --api-url
       - http://shopping-api:8765
       - --agent-token
-      - "${SHOPPING_AGENT_TOKEN:?set SHOPPING_AGENT_TOKEN before starting shopping-agent}"
+      - "${SHOPPING_AGENT_TOKEN:-}"
       - --interval
       - "${SHOPPING_AGENT_INTERVAL:-3}"
     environment:

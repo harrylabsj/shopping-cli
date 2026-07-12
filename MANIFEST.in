@@ -4,6 +4,7 @@ include pyproject.toml
 recursive-include shopping_cli *.py
 prune tests
 prune docs/superpowers
+exclude docs/code-review-*.md
 exclude shopping-registry.json
 exclude shopping-demo.json
 exclude seller.json

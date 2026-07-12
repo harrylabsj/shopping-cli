@@ -14,6 +14,22 @@ from shopping_cli.db.session import db_session, decode_json
 
 
 class OrchestrationHarnessTest(unittest.TestCase):
+    def test_append_audit_event_adds_structured_schema_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                event = harness.append_audit_event(
+                    conn,
+                    "CONV-0001",
+                    "seller-a",
+                    "custom_event",
+                    {"reason": "manual"},
+                )
+
+            self.assertEqual(event["details"]["reason"], "manual")
+            self.assertEqual(event["details"]["event_type"], "custom_event")
+            self.assertEqual(event["details"]["schema_version"], harness.AUDIT_EVENT_SCHEMA_VERSION)
+
     def test_next_conversation_id_reads_only_the_max_numeric_suffix(self):
         class Cursor:
             def fetchone(self):

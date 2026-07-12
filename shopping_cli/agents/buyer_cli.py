@@ -7,6 +7,7 @@ from typing import Any
 
 from shopping_cli.core.catalog import product_summary, search_products
 from shopping_cli.core.conversations import append_message, conversation_summary, ensure_conversation
+from shopping_cli.core.errors import NotFoundError, ValidationError
 from shopping_cli.core.risk import infer_intent
 
 MVP_WARNINGS = [
@@ -72,7 +73,7 @@ def ask(
 ) -> dict[str, Any]:
     buyer_id = str(buyer_id or "").strip()
     if not buyer_id:
-        raise SystemExit("buyer id is required")
+        raise ValidationError("buyer id is required")
     candidates = search_products(conn, query=text, city=city, area=area, limit=limit)
     if not candidates:
         return {
@@ -119,7 +120,7 @@ def summarize(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any]:
     if option is None and conversation.get("sku"):
         try:
             option = product_summary(conn, conversation["sku"])
-        except SystemExit:
+        except NotFoundError:
             option = None
     missing_facts: list[str] = []
     warnings = list(MVP_WARNINGS)
@@ -150,7 +151,7 @@ def summarize(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any]:
 
 def record_intent(conn: sqlite3.Connection, conversation_id: str, intent: str, text: str) -> dict[str, Any]:
     if intent not in {"purchase_intent", "quote_request"}:
-        raise SystemExit("--intent must be purchase_intent or quote_request")
+        raise ValidationError("--intent must be purchase_intent or quote_request")
     message = append_message(conn, conversation_id, "buyer", intent, text, structured_payload={"source_id": "buyer-cli"})
     conversation = conversation_summary(conn, conversation_id)
     return {

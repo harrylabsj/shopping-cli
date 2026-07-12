@@ -12,10 +12,18 @@ import urllib.request
 
 from shopping_cli.agents import buyer_cli
 from shopping_cli.core.catalog import search_products
-from shopping_cli.core.conversations import add_flag, append_message, conversation_summary
+from shopping_cli.core.conversations import add_flag, conversation_summary
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
 from shopping_cli.db.session import db_session, now_iso
-from shopping_cli.llm.tools import marketplace_tool_schema_objects
+from shopping_cli.llm.contracts import (
+    BUYER_SCOPES,
+    MERCHANT_SCOPES,
+    PRIVILEGED_CONVERSATION_SCOPES,
+    SOURCE_OWNER_PREFIXES,
+    ToolContractError,
+    prepare_tool_call,
+)
+from shopping_cli.services import conversations as conversation_service
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -38,20 +46,6 @@ def _safe_positive_float(value: Any, default: float, maximum: float | None = Non
     if maximum is not None:
         return min(number, maximum)
     return number
-
-
-BUYER_SCOPES = {"buyer", "buyer_cli"}
-MERCHANT_SCOPES = {"merchant", "merchant_agent"}
-PRIVILEGED_CONVERSATION_SCOPES = {"local_trusted", "operator"}
-SOURCE_OWNER_PREFIXES = ("shopping-cli-merchant-agent:", "shopping-cli-buyer-agent:", "merchant:", "buyer:")
-
-TOOL_SCOPE_ALLOWLIST = {
-    "catalog_search": {"local_trusted", "buyer", "buyer_cli", "merchant", "merchant_agent", "operator"},
-    "conversation_send": {"local_trusted", "buyer", "buyer_cli"},
-    "conversation_summarize": {"local_trusted", "buyer", "buyer_cli", "merchant", "merchant_agent", "operator"},
-    "human_review_flag": {"local_trusted", "merchant", "merchant_agent", "operator"},
-    "merchant_reply": {"local_trusted", "merchant", "merchant_agent"},
-}
 
 
 class ToolAccessDenied(Exception):
@@ -78,25 +72,22 @@ class MarketplaceToolDispatcher:
         self.session_id = session_id
         self.actor = actor
         self.token_scope = token_scope
-        self.allowed_tools = {tool.name for tool in marketplace_tool_schema_objects()}
 
     def dispatch(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        arguments = arguments or {}
-        if tool_name not in self.allowed_tools:
-            self._audit_tool_call(tool_name, arguments, "denied", f"Unknown or disallowed marketplace tool: {tool_name}")
-            raise SystemExit(f"Unknown or disallowed marketplace tool: {tool_name}")
-        allowed_scopes = TOOL_SCOPE_ALLOWLIST.get(tool_name, set())
-        if self.token_scope not in allowed_scopes:
-            error = f"tool {tool_name} is not allowed for token scope {self.token_scope}"
-            self._audit_tool_call(tool_name, arguments, "denied", error)
-            raise SystemExit(error)
-        handler = getattr(self, f"_dispatch_{tool_name}")
+        raw_arguments = dict(arguments or {})
+        try:
+            prepared = prepare_tool_call(tool_name, self.token_scope, raw_arguments)
+            arguments = prepared.arguments
+        except ToolContractError as exc:
+            self._audit_tool_call(tool_name, raw_arguments, "denied", str(exc))
+            raise
+        handler = getattr(self, prepared.contract.handler_name)
         try:
             result = handler(arguments)
         except ToolAccessDenied as exc:
             error = str(exc)
             self._audit_tool_call(tool_name, arguments, "denied", error)
-            raise SystemExit(error) from exc
+            raise
         except Exception as exc:
             self._audit_tool_call(tool_name, arguments, "error", str(exc))
             raise
@@ -175,20 +166,20 @@ class MarketplaceToolDispatcher:
 
     def _dispatch_conversation_send(self, arguments: dict[str, Any]) -> dict[str, Any]:
         sender = str(arguments["sender"])
-        if sender not in {"buyer", "buyer_cli"}:
-            raise SystemExit("conversation_send only supports buyer or buyer_cli senders")
         conversation_id = str(arguments["conversation_id"])
         with db_session(self.db_path) as conn:
-            self._conversation_for_tool(conn, conversation_id, "conversation_send")
-            message = append_message(
+            existing = self._conversation_for_tool(conn, conversation_id, "conversation_send")
+            result = conversation_service.append_conversation_message(
                 conn,
+                existing,
                 conversation_id,
-                sender,
-                str(arguments["intent"]),
-                str(arguments["text"]),
+                sender=sender,
+                intent=str(arguments["intent"]),
+                text=str(arguments["text"]),
                 structured_payload={"source_id": self.source_id, "tool": "conversation_send"},
             )
-            conversation = conversation_summary(conn, conversation_id)
+            message = result["message"]
+            conversation = result["conversation"]
         return {
             "ok": True,
             "message": message,
@@ -234,13 +225,14 @@ class MarketplaceToolDispatcher:
             reason = "human_required"
         status = "human_required" if human_required else "waiting_buyer"
         with db_session(self.db_path) as conn:
-            conversation = self._conversation_for_tool(conn, conversation_id, "merchant_reply")
-            message = append_message(
+            existing = self._conversation_for_tool(conn, conversation_id, "merchant_reply")
+            result = conversation_service.append_conversation_message(
                 conn,
+                existing,
                 conversation_id,
-                "merchant_agent",
-                str(arguments["intent"]),
-                str(arguments["text"]),
+                sender="merchant_agent",
+                intent=str(arguments["intent"]),
+                text=str(arguments["text"]),
                 structured_payload={
                     "source_id": self.source_id,
                     "tool": "merchant_reply",
@@ -249,11 +241,13 @@ class MarketplaceToolDispatcher:
                 },
                 status=status,
             )
+            message = result["message"]
+            conversation = result["conversation"]
             flags = []
             if human_required:
-                flag = add_flag(conn, conversation_id, reason, sku=conversation.get("sku") or "")
-                flags.append(add_review_source(flag, self.source_id))
-            conversation = conversation_summary(conn, conversation_id)
+                new_flag = result.get("new_flag")
+                if new_flag is not None:
+                    flags.append(add_review_source(new_flag, self.source_id))
         return {"ok": True, "message": message, "flags": flags, "conversation": conversation}
 
 
@@ -283,23 +277,19 @@ class HTTPMarketplaceToolDispatcher:
         self.token_scope = token_scope
         self.timeout = _safe_positive_float(timeout, 10.0, maximum=MAX_HTTP_TOOL_TIMEOUT_SECONDS)
         self.transport = transport
-        self.allowed_tools = {tool.name for tool in marketplace_tool_schema_objects()}
 
     def dispatch(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        arguments = arguments or {}
-        if tool_name not in self.allowed_tools:
-            error = f"Unknown or disallowed marketplace tool: {tool_name}"
-            self._audit_tool_call(tool_name, arguments, "denied", error)
-            raise SystemExit(error)
-        allowed_scopes = TOOL_SCOPE_ALLOWLIST.get(tool_name, set())
-        if self.token_scope not in allowed_scopes:
-            error = f"tool {tool_name} is not allowed for token scope {self.token_scope}"
-            self._audit_tool_call(tool_name, arguments, "denied", error)
-            raise SystemExit(error)
-        handler = getattr(self, f"_dispatch_{tool_name}")
+        raw_arguments = dict(arguments or {})
+        try:
+            prepared = prepare_tool_call(tool_name, self.token_scope, raw_arguments)
+            arguments = prepared.arguments
+        except ToolContractError as exc:
+            self._audit_tool_call(tool_name, raw_arguments, "denied", str(exc))
+            raise
+        handler = getattr(self, prepared.contract.handler_name)
         try:
             result = handler(arguments)
-        except SystemExit as exc:
+        except (ToolAccessDenied, ToolContractError, HTTPMarketplaceError) as exc:
             self._audit_tool_call(tool_name, arguments, "denied", str(exc))
             raise
         except Exception as exc:
@@ -325,7 +315,7 @@ class HTTPMarketplaceToolDispatcher:
                     "error": error,
                 },
             )
-        except (Exception, SystemExit):
+        except Exception:
             return
 
     def _headers(self) -> dict[str, str]:
@@ -357,11 +347,11 @@ class HTTPMarketplaceToolDispatcher:
                 raw_body = response.read()
         except urllib.error.HTTPError as exc:  # pragma: no cover - network path
             raw_body = exc.read()
-            raise SystemExit(self._error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")) from exc
+            raise HTTPMarketplaceError(self._error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")) from exc
         except TimeoutError as exc:
-            raise SystemExit(f"Marketplace API request timed out: {exc}") from exc
+            raise HTTPMarketplaceError(f"Marketplace API request timed out: {exc}") from exc
         except urllib.error.URLError as exc:
-            raise SystemExit(f"Marketplace API request failed: {exc.reason}") from exc
+            raise HTTPMarketplaceError(f"Marketplace API request failed: {exc.reason}") from exc
         return self._validate_response(self._decode_body(raw_body))
 
     @staticmethod
@@ -389,7 +379,7 @@ class HTTPMarketplaceToolDispatcher:
         if not isinstance(result, dict):
             raise HTTPMarketplaceError("Marketplace API returned a non-object response")
         if result.get("ok") is False:
-            raise SystemExit(str(result.get("error") or "Marketplace API request failed"))
+            raise HTTPMarketplaceError(str(result.get("error") or "Marketplace API request failed"))
         return result
 
     @staticmethod
@@ -429,8 +419,6 @@ class HTTPMarketplaceToolDispatcher:
 
     def _dispatch_conversation_send(self, arguments: dict[str, Any]) -> dict[str, Any]:
         sender = str(arguments["sender"])
-        if sender not in {"buyer", "buyer_cli"}:
-            raise SystemExit("conversation_send only supports buyer or buyer_cli senders")
         conversation_id = str(arguments["conversation_id"])
         result = self._request(
             "POST",
