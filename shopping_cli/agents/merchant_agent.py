@@ -6,11 +6,11 @@ import math
 import os
 import re
 import sqlite3
-from typing import Any
+from typing import Any, cast
 
 from shopping_cli import VERSION
 from shopping_cli.agents.buyer_cli import MVP_WARNINGS
-from shopping_cli.agents.tools import DEFAULT_CAPABILITIES, MerchantAgentTools, SQLiteMerchantAgentTools, record_heartbeat
+from shopping_cli.agents.tools import MerchantAgentTools, SQLiteMerchantAgentTools, record_heartbeat
 from shopping_cli.core.errors import NotFoundError
 from shopping_cli.core.harness import MAX_STALE_TTL_SECONDS, message_idempotency_key
 from shopping_cli.core.risk import human_review_reason
@@ -105,7 +105,8 @@ def has_agent_reply_after(conversation: dict[str, Any], buyer_message_id: int) -
 
 
 def _automation_boundaries(product: dict[str, Any]) -> str:
-    merchant = product.get("merchant") if isinstance(product.get("merchant"), dict) else {}
+    merchant_value = product.get("merchant")
+    merchant = cast(dict[str, Any], merchant_value) if isinstance(merchant_value, dict) else {}
     return str(merchant.get("automation_boundaries") or product.get("automation_boundaries") or "").strip()
 
 

@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from shopping_cli.agents import merchant_agent, merchant_daemon
-from shopping_cli.cli import emit
+from shopping_cli.cli_common import emit
 from shopping_cli.config import DEFAULT_DB_PATH
 from shopping_cli.db.session import db_session
 

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import math
 import sqlite3
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any, Protocol
 
 from shopping_cli import VERSION
@@ -16,11 +13,11 @@ from shopping_cli.core.conversations import add_flag, append_message, waiting_me
 from shopping_cli.core.errors import ValidationError
 from shopping_cli.core.harness import abandon_agent_message, abandon_stale_agent_messages, claim_agent_message, complete_agent_message, fail_agent_message
 from shopping_cli.db.session import encode_json, now_iso
+from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
 
 DEFAULT_CAPABILITIES = ["catalog", "inventory", "delivery", "consultation"]
 AGENT_STATUSES = {"online", "away", "human_required"}
 MAX_SQLITE_INTEGER = 2**63 - 1
-MAX_HTTP_TOOL_TIMEOUT_SECONDS = 60.0
 
 
 def _non_negative_whole_int(value: Any, field_name: str, default: int = 0) -> int:
@@ -266,8 +263,7 @@ class SQLiteMerchantAgentTools:
         return abandon_stale_agent_messages(self.conn, agent_id, stale_after_seconds=stale_after_seconds)
 
 
-class HTTPMarketplaceError(RuntimeError):
-    pass
+HTTPMarketplaceError = MarketplaceHTTPError
 
 
 class HTTPMerchantAgentTools:
@@ -280,18 +276,23 @@ class HTTPMerchantAgentTools:
         opener: Any | None = None,
         host: str = "",
         session_id: str = "",
+        allow_insecure_http: bool = False,
     ):
-        self.base_url = str(base_url or "").rstrip("/")
-        if not self.base_url:
-            raise ValueError("base_url is required")
         self.merchant_id = str(merchant_id or "").strip()
         if not self.merchant_id:
             raise ValueError("merchant_id is required")
         self.merchant_token = str(merchant_token or "").strip()
         if not self.merchant_token:
             raise ValueError("merchant_token is required")
-        self.timeout = _safe_positive_float(timeout, 10.0, maximum=MAX_HTTP_TOOL_TIMEOUT_SECONDS)
-        self.opener = opener or urllib.request.urlopen
+        self.http = MarketplaceHTTPClient(
+            base_url,
+            self.merchant_token,
+            timeout=timeout,
+            opener=opener,
+            allow_insecure_http=allow_insecure_http,
+        )
+        self.base_url = self.http.base_url
+        self.timeout = self.http.timeout
         self.host = str(host or "")
         self.session_id = str(session_id or "")
         self._message_created_review_flags: dict[tuple[str, str], dict[str, Any]] = {}
@@ -350,65 +351,15 @@ class HTTPMerchantAgentTools:
         payload: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        if query:
-            clean_query = {key: value for key, value in query.items() if value not in (None, "")}
-            if clean_query:
-                url = f"{url}?{urllib.parse.urlencode(clean_query)}"
-        body = None
-        headers = {"Accept": "application/json", "Authorization": f"Bearer {self.merchant_token}"}
-        if payload is not None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
-        try:
-            with self.opener(request, timeout=self.timeout) as response:
-                raw_body = response.read()
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network path
-            raw_body = exc.read()
-            raise HTTPMarketplaceError(self._error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")) from exc
-        except TimeoutError as exc:
-            raise HTTPMarketplaceError(f"Marketplace API request timed out: {exc}") from exc
-        except urllib.error.URLError as exc:
-            raise HTTPMarketplaceError(f"Marketplace API request failed: {exc.reason}") from exc
-        result = self._decode_body(raw_body)
-        if result.get("ok") is False:
-            raise HTTPMarketplaceError(str(result.get("error") or "Marketplace API request failed"))
-        return result
+        return self.http.request(method, path, payload, query)
 
     @staticmethod
     def _response_object(result: dict[str, Any], key: str) -> dict[str, Any]:
-        value = result.get(key)
-        if not isinstance(value, dict):
-            raise HTTPMarketplaceError(f"Marketplace API response missing object: {key}")
-        return dict(value)
+        return MarketplaceHTTPClient.response_object(result, key)
 
     @staticmethod
     def _response_list(result: dict[str, Any], key: str) -> list[Any]:
-        value = result.get(key)
-        if not isinstance(value, list):
-            raise HTTPMarketplaceError(f"Marketplace API response missing list: {key}")
-        return list(value)
-
-    @staticmethod
-    def _decode_body(raw_body: bytes) -> dict[str, Any]:
-        if not raw_body:
-            return {}
-        try:
-            decoded = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPMarketplaceError("Marketplace API returned invalid JSON") from exc
-        if not isinstance(decoded, dict):
-            raise HTTPMarketplaceError("Marketplace API returned a non-object response")
-        return decoded
-
-    @classmethod
-    def _error_message(cls, raw_body: bytes, fallback: str) -> str:
-        try:
-            decoded = cls._decode_body(raw_body)
-        except HTTPMarketplaceError:
-            return fallback
-        return str(decoded.get("error") or fallback)
+        return MarketplaceHTTPClient.response_list(result, key)
 
     def heartbeat(
         self,
@@ -437,7 +388,7 @@ class HTTPMerchantAgentTools:
     def waiting_merchant_conversations(self, merchant_id: str) -> list[dict[str, Any]]:
         self._check_merchant(merchant_id)
         path = f"/merchants/{urllib.parse.quote(merchant_id, safe='')}/conversations"
-        result = self._request("GET", path, query={"status": "waiting_merchant", "include": "details"})
+        result = self._request("GET", path, query={"status": "waiting_merchant", "include": "details", "limit": 100})
         return self._response_list(result, "conversations")
 
     def product_summary(self, sku: str) -> dict[str, Any]:

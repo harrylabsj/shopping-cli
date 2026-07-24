@@ -4,7 +4,8 @@
 
 It exposes tools for merchant setup, product publishing, product search, buyer consultations, merchant-agent polling, summaries, and recording `quote_request` or `purchase_intent` as conversation messages.
 
-Configure `projectRoot` only if the skill is installed somewhere other than `~/.openclaw/workspace/skills/shopping` or `~/.hermes/skills/commerce/shopping`.
+Configure `projectRoot` only if the skill is installed somewhere other than the canonical locations
+`~/.openclaw/skills/shopping-cli` or `~/.hermes/skills/commerce/shopping`.
 
 Environment fallbacks:
 

@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
 from typing import Any, Callable
-import urllib.error
 import urllib.parse
-import urllib.request
 
 from shopping_cli.agents import buyer_cli
 from shopping_cli.core.catalog import search_products
 from shopping_cli.core.conversations import add_flag, conversation_summary
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
-from shopping_cli.db.session import db_session, now_iso
+from shopping_cli.db.session import db_session
 from shopping_cli.llm.contracts import (
     BUYER_SCOPES,
     MERCHANT_SCOPES,
@@ -23,37 +19,17 @@ from shopping_cli.llm.contracts import (
     ToolContractError,
     prepare_tool_call,
 )
+from shopping_cli.http_client import HTTPTransport, MarketplaceHTTPClient, MarketplaceHTTPError
 from shopping_cli.services import conversations as conversation_service
+from shopping_cli.services import human_review as human_review_service
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
-HTTPTransport = Callable[
-    [str, str, dict[str, Any] | None, dict[str, Any] | None, dict[str, str]],
-    dict[str, Any],
-]
-MAX_HTTP_TOOL_TIMEOUT_SECONDS = 60.0
-
-
-def _safe_positive_float(value: Any, default: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if not math.isfinite(number) or number <= 0:
-        return default
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
 class ToolAccessDenied(Exception):
     """Raised when a scoped tool call targets a conversation owned by another actor."""
 
 
-class HTTPMarketplaceError(RuntimeError):
-    """Raised when the Marketplace API returns an invalid or failed response."""
+HTTPMarketplaceError = MarketplaceHTTPError
 
 
 class MarketplaceToolDispatcher:
@@ -74,9 +50,9 @@ class MarketplaceToolDispatcher:
         self.token_scope = token_scope
 
     def dispatch(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        raw_arguments = dict(arguments or {})
+        raw_arguments = arguments if isinstance(arguments, dict) else {}
         try:
-            prepared = prepare_tool_call(tool_name, self.token_scope, raw_arguments)
+            prepared = prepare_tool_call(tool_name, self.token_scope, arguments)
             arguments = prepared.arguments
         except ToolContractError as exc:
             self._audit_tool_call(tool_name, raw_arguments, "denied", str(exc))
@@ -202,9 +178,12 @@ class MarketplaceToolDispatcher:
             conversation = self._conversation_for_tool(conn, conversation_id, "human_review_flag")
             flag = add_flag(conn, conversation_id, reason=reason, severity=severity, sku=conversation.get("sku") or "")
             next_actor = next_actor_for_status("human_required", flag["reason"])
-            conn.execute(
-                "update conversations set status = 'human_required', next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (next_actor, now_iso(), self.source_id, conversation_id),
+            human_review_service.update_conversation_status(
+                conn,
+                conversation_id,
+                status="human_required",
+                next_actor=next_actor,
+                sender=self.source_id,
             )
             append_audit_event(
                 conn,
@@ -264,24 +243,21 @@ class HTTPMarketplaceToolDispatcher:
         timeout: float = 10.0,
         transport: HTTPTransport | None = None,
     ):
-        self.base_url = str(base_url or "").rstrip("/")
-        if not self.base_url:
-            raise ValueError("base_url is required")
-        self.auth_token = str(auth_token or "").strip()
-        if not self.auth_token:
-            raise ValueError("auth_token is required")
+        self.http = MarketplaceHTTPClient(base_url, auth_token, timeout=timeout, transport=transport)
+        self.base_url = self.http.base_url
+        self.auth_token = self.http.auth_token
         self.source_id = source_id
         self.host = host
         self.session_id = session_id
         self.actor = actor
         self.token_scope = token_scope
-        self.timeout = _safe_positive_float(timeout, 10.0, maximum=MAX_HTTP_TOOL_TIMEOUT_SECONDS)
+        self.timeout = self.http.timeout
         self.transport = transport
 
     def dispatch(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        raw_arguments = dict(arguments or {})
+        raw_arguments = arguments if isinstance(arguments, dict) else {}
         try:
-            prepared = prepare_tool_call(tool_name, self.token_scope, raw_arguments)
+            prepared = prepare_tool_call(tool_name, self.token_scope, arguments)
             arguments = prepared.arguments
         except ToolContractError as exc:
             self._audit_tool_call(tool_name, raw_arguments, "denied", str(exc))
@@ -318,9 +294,6 @@ class HTTPMarketplaceToolDispatcher:
         except Exception:
             return
 
-    def _headers(self) -> dict[str, str]:
-        return {"Accept": "application/json", "Authorization": f"Bearer {self.auth_token}"}
-
     def _request(
         self,
         method: str,
@@ -328,73 +301,15 @@ class HTTPMarketplaceToolDispatcher:
         payload: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        headers = self._headers()
-        if self.transport is not None:
-            result = self.transport(method.upper(), path, payload, query, headers)
-            return self._validate_response(result)
-
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        clean_query = {key: value for key, value in (query or {}).items() if value not in (None, "")}
-        if clean_query:
-            url = f"{url}?{urllib.parse.urlencode(clean_query)}"
-        body = None
-        if payload is not None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw_body = response.read()
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network path
-            raw_body = exc.read()
-            raise HTTPMarketplaceError(self._error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")) from exc
-        except TimeoutError as exc:
-            raise HTTPMarketplaceError(f"Marketplace API request timed out: {exc}") from exc
-        except urllib.error.URLError as exc:
-            raise HTTPMarketplaceError(f"Marketplace API request failed: {exc.reason}") from exc
-        return self._validate_response(self._decode_body(raw_body))
-
-    @staticmethod
-    def _decode_body(raw_body: bytes) -> dict[str, Any]:
-        if not raw_body:
-            return {}
-        try:
-            decoded = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPMarketplaceError("Marketplace API returned invalid JSON") from exc
-        if not isinstance(decoded, dict):
-            raise HTTPMarketplaceError("Marketplace API returned a non-object response")
-        return decoded
-
-    @classmethod
-    def _error_message(cls, raw_body: bytes, fallback: str) -> str:
-        try:
-            decoded = cls._decode_body(raw_body)
-        except HTTPMarketplaceError:
-            return fallback
-        return str(decoded.get("error") or fallback)
-
-    @staticmethod
-    def _validate_response(result: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(result, dict):
-            raise HTTPMarketplaceError("Marketplace API returned a non-object response")
-        if result.get("ok") is False:
-            raise HTTPMarketplaceError(str(result.get("error") or "Marketplace API request failed"))
-        return result
+        return self.http.request(method, path, payload, query)
 
     @staticmethod
     def _response_object(result: dict[str, Any], key: str) -> dict[str, Any]:
-        value = result.get(key)
-        if not isinstance(value, dict):
-            raise HTTPMarketplaceError(f"Marketplace API response missing object: {key}")
-        return dict(value)
+        return MarketplaceHTTPClient.response_object(result, key)
 
     @staticmethod
     def _response_list(result: dict[str, Any], key: str) -> list[Any]:
-        value = result.get(key)
-        if not isinstance(value, list):
-            raise HTTPMarketplaceError(f"Marketplace API response missing list: {key}")
-        return list(value)
+        return MarketplaceHTTPClient.response_list(result, key)
 
     @staticmethod
     def _conversation_path(conversation_id: str) -> str:
@@ -402,6 +317,19 @@ class HTTPMarketplaceToolDispatcher:
 
     def conversation_summary(self, conversation_id: str) -> dict[str, Any]:
         return self._response_object(self._request("GET", self._conversation_path(conversation_id)), "conversation")
+
+    def merchant_private_config(self, merchant_id: str) -> dict[str, Any]:
+        merchant_path = urllib.parse.quote(str(merchant_id), safe="")
+        result = self._request("GET", f"/merchants/{merchant_path}/private-config")
+        boundaries = result.get("automation_boundaries")
+        version = result.get("version")
+        if not isinstance(boundaries, str) or not isinstance(version, str):
+            raise HTTPMarketplaceError("Marketplace API response missing merchant private configuration")
+        return {
+            "merchant_id": str(result.get("merchant_id") or merchant_id),
+            "automation_boundaries": boundaries,
+            "version": version,
+        }
 
     def _dispatch_catalog_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self._request(

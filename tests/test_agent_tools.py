@@ -296,7 +296,10 @@ class AgentToolsBoundaryTest(unittest.TestCase):
         self.assertEqual(opener.requests[0]["request"].get_header("Authorization"), "Bearer tok_seller_a")
         parsed = urlparse(opener.requests[1]["request"].full_url)
         self.assertEqual(parsed.path, "/merchants/seller-a/conversations")
-        self.assertEqual(parse_qs(parsed.query), {"status": ["waiting_merchant"], "include": ["details"]})
+        self.assertEqual(
+            parse_qs(parsed.query),
+            {"status": ["waiting_merchant"], "include": ["details"], "limit": ["100"]},
+        )
         self.assertEqual(opener.requests[2]["request"].full_url, "http://127.0.0.1:8765/agents/messages/claim")
         self.assertEqual(opener.requests[2]["body"]["idempotency_key"], "claim-key")
         self.assertEqual(opener.requests[2]["body"]["merchant_token"], "tok_seller_a")

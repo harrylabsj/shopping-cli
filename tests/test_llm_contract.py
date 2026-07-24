@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from shopping_cli.core.catalog import create_merchant, create_product
 from shopping_cli.core.conversations import append_message, conversation_summary, ensure_conversation
+from shopping_cli.core.errors import ConflictError
 from shopping_cli.db.session import db_session
 from shopping_cli.llm.dispatcher import (
     HTTPMarketplaceError,
@@ -25,6 +26,69 @@ from shopping_cli.llm.prompts import buyer_system_prompt, merchant_system_prompt
 from shopping_cli.llm.providers import OpenAICompatibleProvider, provider_from_env
 from shopping_cli.llm.runner import run_marketplace_tool_loop
 from shopping_cli.llm.tools import marketplace_tool_schemas
+from shopping_cli.services import conversations as conversation_service
+
+
+STRICT_NEGATIVE_TOOL_CALLS = [
+    # catalog_search
+    ("catalog_search", {}),  # missing required query
+    ("catalog_search", {"query": 123}),  # wrong type
+    ("catalog_search", {"query": "tea", "max_price": True}),  # bool is not a number
+    ("catalog_search", {"query": "tea", "flavor": "floral"}),  # extra field
+    ("catalog_search", {"query": {"nested": {"deep": [{"x": 1}]}}}),  # deep object
+    ("catalog_search", "not-a-dict"),  # non-dict arguments
+    ("catalog_search", ["longjing"]),  # non-dict arguments
+    # conversation_send
+    (
+        "conversation_send",
+        {"conversation_id": "CONV-0001", "sender": "buyer", "intent": "ask_stock"},
+    ),  # missing required text
+    (
+        "conversation_send",
+        {"conversation_id": "CONV-0001", "sender": "merchant", "intent": "ask_stock", "text": "hi"},
+    ),  # sender outside enum
+    (
+        "conversation_send",
+        {"conversation_id": "CONV-0001", "sender": "buyer", "intent": "ask_stock", "text": {}},
+    ),  # wrong type
+    (
+        "conversation_send",
+        {
+            "conversation_id": "CONV-0001",
+            "sender": "buyer",
+            "intent": "ask_stock",
+            "text": "hi",
+            "price": 10,
+        },
+    ),  # extra field
+    # conversation_summarize
+    ("conversation_summarize", {}),  # missing required conversation_id
+    ("conversation_summarize", None),  # non-dict arguments
+    ("conversation_summarize", {"conversation_id": 42}),  # wrong type
+    ("conversation_summarize", {"conversation_id": "CONV-0001", "verbose": True}),  # extra field
+    # human_review_flag
+    ("human_review_flag", {"reason": "risk"}),  # missing required conversation_id
+    (
+        "human_review_flag",
+        {"conversation_id": "CONV-0001", "reason": "risk", "severity": "urgent"},
+    ),  # severity outside enum
+    ("human_review_flag", {"conversation_id": "CONV-0001", "reason": ["risk"]}),  # wrong type
+    (
+        "human_review_flag",
+        {"conversation_id": "CONV-0001", "reason": "risk", "note": "extra"},
+    ),  # extra field
+    # merchant_reply
+    ("merchant_reply", {"conversation_id": "CONV-0001", "intent": "answer"}),  # missing required text
+    ("merchant_reply", 42),  # non-dict arguments
+    (
+        "merchant_reply",
+        {"conversation_id": "CONV-0001", "intent": "answer", "text": "ok", "human_required": "false"},
+    ),  # string is not a boolean
+    (
+        "merchant_reply",
+        {"conversation_id": "CONV-0001", "intent": "answer", "text": "ok", "discount": 0.5},
+    ),  # extra field
+]
 
 
 class LlmContractTest(unittest.TestCase):
@@ -89,11 +153,84 @@ class LlmContractTest(unittest.TestCase):
         with self.assertRaises(ToolContractError):
             normalize_tool_arguments("conversation_send", {"sender": "merchant"})
 
-        normalized = normalize_tool_arguments("conversation_send", {"sender": "buyer_cli", "text": "hello"})
+        valid_arguments = {
+            "conversation_id": "CONV-0001",
+            "sender": "buyer_cli",
+            "intent": "ask_product",
+            "text": "hello",
+        }
+        normalized = normalize_tool_arguments("conversation_send", valid_arguments)
         self.assertEqual(normalized["sender"], "buyer_cli")
-        prepared = prepare_tool_call("conversation_send", "buyer_cli", {"sender": "buyer_cli", "text": "hello"})
+        prepared = prepare_tool_call("conversation_send", "buyer_cli", valid_arguments)
         self.assertEqual(prepared.contract.name, "conversation_send")
         self.assertEqual(prepared.arguments["sender"], "buyer_cli")
+
+    def test_tool_contracts_strictly_reject_missing_wrong_enum_extra_and_coerced_values(self):
+        invalid_calls = [
+            ("catalog_search", {}),
+            ("catalog_search", {"query": {"nested": "value"}}),
+            ("catalog_search", {"query": "tea", "extra": True}),
+            (
+                "human_review_flag",
+                {"conversation_id": "CONV-0001", "reason": "risk", "severity": "urgent"},
+            ),
+            (
+                "merchant_reply",
+                {
+                    "conversation_id": "CONV-0001",
+                    "intent": 123,
+                    "text": {},
+                    "human_required": "false",
+                },
+            ),
+        ]
+        for tool_name, arguments in invalid_calls:
+            with self.subTest(tool=tool_name, arguments=arguments):
+                with self.assertRaises(ToolContractError):
+                    prepare_tool_call(tool_name, "local_trusted", arguments)
+
+    def test_local_and_http_dispatchers_share_strict_negative_matrix(self):
+        self.assertEqual(
+            {tool_name for tool_name, _arguments in STRICT_NEGATIVE_TOOL_CALLS},
+            {contract.name for contract in marketplace_tool_contracts()},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_consultation(db_file)
+            local_dispatcher = MarketplaceToolDispatcher(
+                db_file,
+                source_id="matrix-local",
+                token_scope="local_trusted",
+            )
+
+            http_calls = []
+
+            def fake_transport(method, path, payload, query, headers):
+                http_calls.append(
+                    {"method": method, "path": path, "payload": payload, "query": query, "headers": headers}
+                )
+                return {"ok": True, "event": {"event": "llm_tool_call", "details": payload}}
+
+            http_dispatcher = HTTPMarketplaceToolDispatcher(
+                "http://127.0.0.1:8765",
+                auth_token="buyer-token",
+                source_id="matrix-http",
+                token_scope="local_trusted",
+                transport=fake_transport,
+            )
+
+            for tool_name, arguments in STRICT_NEGATIVE_TOOL_CALLS:
+                with self.subTest(dispatcher="local", tool=tool_name, arguments=arguments):
+                    with self.assertRaises(ToolContractError):
+                        local_dispatcher.dispatch(tool_name, arguments)
+                with self.subTest(dispatcher="http", tool=tool_name, arguments=arguments):
+                    calls_before = len(http_calls)
+                    with self.assertRaises(ToolContractError):
+                        http_dispatcher.dispatch(tool_name, arguments)
+                    business_calls = [
+                        call for call in http_calls[calls_before:] if call["path"] != "/audit/tool-calls"
+                    ]
+                    self.assertEqual(business_calls, [])
 
     def test_openai_compatible_provider_builds_payload_with_tools(self):
         calls = []
@@ -729,15 +866,38 @@ class LlmContractTest(unittest.TestCase):
             review = dispatch_marketplace_tool(
                 db_file,
                 "human_review_flag",
-                {"conversation_id": "CONV-0001", "reason": " suspicious_content ", "severity": " urgent "},
+                {"conversation_id": "CONV-0001", "reason": " suspicious_content ", "severity": "block"},
                 token_scope="merchant_agent",
                 source_id="llm-merchant",
                 actor="seller-a",
             )
 
             self.assertEqual(review["result"]["review"]["reason"], "suspicious_content")
-            self.assertEqual(review["result"]["review"]["severity"], "urgent")
+            self.assertEqual(review["result"]["review"]["severity"], "block")
             self.assertEqual(review["result"]["conversation"]["next_actor"], "operator")
+
+    def test_human_review_flag_does_not_reopen_closed_conversation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_consultation(db_file)
+            with db_session(db_file) as conn:
+                conversation = conversation_summary(conn, "CONV-0001")
+                conversation_service.close_conversation(conn, conversation, "CONV-0001", sender="buyer")
+
+            with self.assertRaises(ConflictError):
+                dispatch_marketplace_tool(
+                    db_file,
+                    "human_review_flag",
+                    {"conversation_id": "CONV-0001", "reason": "bargaining"},
+                    token_scope="merchant_agent",
+                    source_id="llm-merchant",
+                    actor="seller-a",
+                )
+
+            with db_session(db_file) as conn:
+                conversation = conversation_summary(conn, "CONV-0001")
+            self.assertEqual(conversation["status"], "closed")
+            self.assertEqual(conversation["flags"], [])
 
     def test_merchant_reply_routes_human_review_using_normalized_reason(self):
         with tempfile.TemporaryDirectory() as tmp:

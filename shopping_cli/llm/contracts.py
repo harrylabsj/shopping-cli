@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -166,8 +167,55 @@ def require_tool_contract(tool_name: str, token_scope: str) -> ToolContract:
     return contract
 
 
-def normalize_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
-    normalized = dict(arguments or {})
+def _schema_type_matches(value: Any, expected: str) -> bool:
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    return False
+
+
+def _validate_schema(value: Any, schema: dict[str, Any], path: str) -> None:
+    expected = str(schema.get("type") or "")
+    if expected and not _schema_type_matches(value, expected):
+        raise ToolContractError(f"{path} must be {expected}")
+    if "enum" in schema and value not in schema["enum"]:
+        allowed = ", ".join(str(item) for item in schema["enum"])
+        raise ToolContractError(f"{path} must be one of: {allowed}")
+    if expected == "object":
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        for name in required:
+            if name not in value:
+                raise ToolContractError(f"{path}.{name} is required")
+        if schema.get("additionalProperties") is False:
+            extras = sorted(set(value) - set(properties))
+            if extras:
+                raise ToolContractError(f"{path} contains unsupported field: {extras[0]}")
+        for name, child in properties.items():
+            if name in value:
+                _validate_schema(value[name], child, f"{path}.{name}")
+    elif expected == "array" and "items" in schema:
+        for index, item in enumerate(value):
+            _validate_schema(item, schema["items"], f"{path}[{index}]")
+
+
+def normalize_tool_arguments(tool_name: str, arguments: Any) -> dict[str, Any]:
+    contract = TOOL_CONTRACT_BY_NAME.get(tool_name)
+    if contract is None:
+        raise ToolContractError(f"Unknown or disallowed marketplace tool: {tool_name}")
+    if arguments is None:
+        arguments = {}
+    _validate_schema(arguments, contract.schema.parameters, "arguments")
+    normalized = dict(arguments)
     if tool_name == "conversation_send":
         sender = str(normalized["sender"])
         if sender not in CONVERSATION_SENDERS:
@@ -176,6 +224,6 @@ def normalize_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -
     return normalized
 
 
-def prepare_tool_call(tool_name: str, token_scope: str, arguments: dict[str, Any] | None) -> PreparedToolCall:
+def prepare_tool_call(tool_name: str, token_scope: str, arguments: Any) -> PreparedToolCall:
     contract = require_tool_contract(tool_name, token_scope)
     return PreparedToolCall(contract=contract, arguments=normalize_tool_arguments(tool_name, arguments))
