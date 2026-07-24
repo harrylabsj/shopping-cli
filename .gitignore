@@ -4,6 +4,14 @@ __pycache__/
 build/
 *.egg-info/
 *.sqlite
+.env
+.env.*
+!.env.example
+!marketplace.example.env
+*.pem
+*.key
+*secret*
+*credentials*
 mai-demo.json
 mai-registry.json
 seller.json

@@ -19,6 +19,8 @@
     "scripts/shopping_agent.py",
     "scripts/shopping_api.py",
     "scripts/shopping_registry.py",
+    "scripts/quality.sh",
+    "scripts/verify_release.sh",
     "scripts/verify.sh",
     "buyer-demo.json",
     "clawhub.json",
@@ -38,7 +40,9 @@
     "install:agents": "bash scripts/install.sh --both",
     "test": "python3 -m unittest discover -s tests && node --test tests/shopping_plugin.test.mjs && bash scripts/verify.sh",
     "test:plugin": "node --test tests/shopping_plugin.test.mjs",
-    "verify": "bash scripts/verify.sh"
+    "verify": "bash scripts/verify.sh",
+    "quality": "bash scripts/quality.sh",
+    "verify:release": "bash scripts/verify_release.sh"
   },
   "keywords": [
     "openclaw",
