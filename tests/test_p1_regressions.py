@@ -21,7 +21,7 @@ from shopping_cli.api.app import handle_request
 from shopping_cli.api.auth import require_admin_token
 from shopping_cli.api.handlers import human_review as human_review_handler
 from shopping_cli.core.catalog import create_merchant, create_product, merchant_summary, search_merchants, search_products
-from shopping_cli.core.conversations import add_flag, append_message, conversation_summary, ensure_conversation
+from shopping_cli.core.conversations import add_flag, append_message, conversation_summary, ensure_conversation, require_conversation
 from shopping_cli.core.errors import AuthError, ConflictError
 from shopping_cli.core.policies import create_policy, search_policies
 from shopping_cli.core.tokens import token_digest
@@ -369,6 +369,112 @@ class P1RegressionTest(unittest.TestCase):
             ]
             self.assertEqual(len(resolved_audits), 1)
             self.assertEqual(final["status"], "waiting_buyer")
+
+    # ---- P1-02: atomic conversation state machine ----
+
+    def test_add_flag_transitions_status_atomically_without_separate_update(self):
+        """add_flag itself transitions the conversation to human_required;
+        no separate update_conversation_status call is needed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_merchant(db_file)
+            with db_session(db_file) as conn:
+                conv = ensure_conversation(conn, "alice", "seller-a")
+                append_message(conn, conv["id"], "buyer", "ask_product", "hello")
+                # add_flag must transition status by itself
+                flag = add_flag(conn, conv["id"], "suspicious")
+                current = conversation_summary(conn, conv["id"])
+                self.assertEqual(current["status"], "human_required")
+                self.assertEqual(flag["reason"], "suspicious")
+
+    def test_update_conversation_status_rejects_wrong_expected_status(self):
+        """Passing an expected_status that doesn't match the current status
+        must raise ConflictError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_merchant(db_file)
+            with db_session(db_file) as conn:
+                conv = ensure_conversation(conn, "alice", "seller-a")
+                # Current status is 'open', but we claim to expect 'human_required'
+                with self.assertRaises(ConflictError):
+                    human_review_service.update_conversation_status(
+                        conn,
+                        conv["id"],
+                        status="waiting_buyer",
+                        next_actor="buyer",
+                        sender="merchant",
+                        expected_status="human_required",
+                    )
+
+    def test_resolve_from_non_human_required_is_rejected(self):
+        """Resolving reviews when the conversation is NOT in human_required
+        must fail — either because there are no unresolved reviews or the
+        status precondition fails."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_merchant(db_file)
+            with db_session(db_file) as conn:
+                conv = ensure_conversation(conn, "alice", "seller-a")
+                # No flag was added, so conversation is 'open'.
+                # resolve_all_conversation_reviews should find 0 unresolved.
+                resolved = human_review_service.resolve_all_conversation_reviews(
+                    conn, conv["id"], action="reply", sender="merchant"
+                )
+                self.assertEqual(resolved, 0)
+
+    def test_concurrent_add_flag_and_close(self):
+        """When one thread adds a flag and another closes the conversation,
+        only one should win."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_merchant(db_file)
+            with db_session(db_file) as conn:
+                conv = ensure_conversation(conn, "alice", "seller-a")
+                append_message(conn, conv["id"], "buyer", "ask_product", "hello")
+            cid = conv["id"]
+            barrier = threading.Barrier(2)
+            errors: list[Exception] = []
+
+            def add_flag_worker():
+                conn = open_connection(db_file)
+                try:
+                    barrier.wait(timeout=5)
+                    add_flag(conn, cid, "suspicious_content")
+                    conn.commit()
+                except (ConflictError, sqlite3.OperationalError) as exc:
+                    conn.rollback()
+                    errors.append(exc)
+                finally:
+                    conn.close()
+
+            def close_worker():
+                conn = open_connection(db_file)
+                try:
+                    barrier.wait(timeout=5)
+                    conv_row = require_conversation(conn, cid)
+                    conversation_service.close_conversation(
+                        conn, {"status": conv_row["status"]}, cid,
+                        sender="merchant",
+                    )
+                    conn.commit()
+                except (ConflictError, sqlite3.OperationalError) as exc:
+                    conn.rollback()
+                    errors.append(exc)
+                finally:
+                    conn.close()
+
+            threads = [threading.Thread(target=add_flag_worker), threading.Thread(target=close_worker)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+            # Both should succeed in isolation, but concurrently one may lose.
+            # At least one must succeed; the final state must be consistent.
+            self.assertLessEqual(len(errors), 1)
+            with db_session(db_file) as conn:
+                final = conversation_summary(conn, cid)
+                self.assertIn(final["status"], {"human_required", "closed"})
 
     def test_concurrent_agent_token_rotate_has_one_winner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -746,6 +852,180 @@ class P1RegressionTest(unittest.TestCase):
                 self.assertEqual(search_products(conn, query="今天想买龙井礼盒")[0]["sku"], "tea-a")
                 self.assertEqual(search_merchants(conn, query="龙井")[0]["id"], "seller-a")
                 self.assertEqual(search_policies(conn, query="人工确认")[0]["code"], "returns")
+
+    # ---- P1-10: Chinese FTS index/query tokenization ----
+
+    def test_single_cjk_character_query_matches_via_fts_index(self):
+        """Single CJK char queries ('龙', '茶') must match products whose title
+        contains that character, even when the character is embedded in a longer
+        CJK token."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-a", "西湖龙井茶庄", city="杭州")
+                create_product(conn, "seller-a", "tea-a", "西湖龙井礼盒", 88, 5)
+
+                # Single CJK characters — these were silently missed before the fix.
+                results_long = search_products(conn, query="龙")
+                results_char = search_products(conn, query="茶")
+                self.assertEqual(len(results_long), 1)
+                self.assertEqual(results_long[0]["sku"], "tea-a")
+                # '茶' appears in merchant name "西湖龙井茶庄", so product search
+                # indexed through the merchant join should also match.
+                self.assertGreaterEqual(len(results_char), 1)
+
+    def test_cjk_substring_query_matches_across_word_boundaries(self):
+        """A CJK query whose characters span the boundary between two
+        indexed tokens should still match via bigram-index tokens."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-b", "杭州西湖茶馆", city="杭州")
+                create_product(conn, "seller-b", "tea-b", "明前龙井礼盒装", 88, 5)
+
+                # "龙井" is a bigram token in the index for "明前龙井礼盒装"
+                self.assertEqual(search_products(conn, query="龙井礼盒")[0]["sku"], "tea-b")
+                # 3+ char substrings also work because individual chars are
+                # consecutive in the original text
+                self.assertEqual(search_products(conn, query="前龙井礼")[0]["sku"], "tea-b")
+
+    def test_mixed_cjk_ascii_query_still_finds_results(self):
+        """ASCII tokens mixed with CJK should not prevent CJK substring matching."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-c", "龙井茶园", city="杭州")
+                create_product(conn, "seller-c", "tea-c", "2024明前龙井", 88, 5)
+
+                # "2024" is ASCII, "明前龙井" is CJK — the product should be found.
+                results = search_products(conn, query="龙井")
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["sku"], "tea-c")
+
+    # ---- P1-08: merchant bootstrap idempotency & token recovery ----
+
+    def test_merchant_bootstrap_replays_without_client_idempotency_key(self):
+        """Replay works even when the client does not supply an Idempotency-Key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            admin_token = "admin-auto-replay-key"
+            payload = {
+                "id": "seller-x",
+                "name": "Auto Replay Tea",
+                "admin_token": admin_token,
+            }
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": admin_token}, clear=False):
+                first_status, first = handle_request(db_file, "POST", "/merchants", payload)
+                replay_status, replay = handle_request(db_file, "POST", "/merchants", payload)
+
+            self.assertEqual(first_status, 200)
+            self.assertEqual(replay_status, 200)
+            self.assertTrue(first["merchant_token"].startswith("shopping_merchant_"))
+            self.assertEqual(first["merchant_token"], replay["merchant_token"])
+            self.assertTrue(replay["idempotent"])
+            # Token must be valid
+            with db_session(db_file) as conn:
+                token_service.require_merchant_token(conn, "seller-x", first["merchant_token"])
+
+    def test_merchant_bootstrap_recover_endpoint_returns_fresh_token(self):
+        """POST /merchants/{id}/token/recover issues a new valid token via admin auth."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            admin_token = "admin-recover-secret"
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": admin_token}, clear=False):
+                create_status, created = handle_request(
+                    db_file, "POST", "/merchants",
+                    {"id": "seller-r", "name": "Recover Tea", "admin_token": admin_token},
+                )
+                recover_status, recovered = handle_request(
+                    db_file, "POST", "/merchants/seller-r/token/recover",
+                    {"admin_token": admin_token},
+                )
+
+            self.assertEqual(create_status, 200)
+            self.assertEqual(recover_status, 200)
+            self.assertTrue(recovered["recovered"])
+            self.assertTrue(recovered["merchant_token"].startswith("shopping_merchant_"))
+            self.assertNotEqual(recovered["merchant_token"], created["merchant_token"])
+            with db_session(db_file) as conn:
+                # Original token is now revoked
+                with self.assertRaises(AuthError):
+                    token_service.require_merchant_token(conn, "seller-r", created["merchant_token"])
+                # Recovered token is valid
+                token_service.require_merchant_token(conn, "seller-r", recovered["merchant_token"])
+
+    def test_merchant_bootstrap_recover_rejects_non_admin(self):
+        """Recover endpoint requires admin token; merchant token is not enough."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            admin_token = "admin-recover-auth"
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": admin_token}, clear=False):
+                _status, created = handle_request(
+                    db_file, "POST", "/merchants",
+                    {"id": "seller-z", "name": "Auth Test Tea", "admin_token": admin_token},
+                )
+                denied_status, _denied = handle_request(
+                    db_file, "POST", "/merchants/seller-z/token/recover",
+                    {"merchant_token": created["merchant_token"]},
+                )
+
+            self.assertEqual(denied_status, 403)
+
+    def test_merchant_bootstrap_stale_replay_points_to_recover_endpoint(self):
+        """After recovery rotates the token, replaying the bootstrap request raises
+        a ConflictError that mentions the recover endpoint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            admin_token = "admin-stale-replay"
+            payload = {
+                "id": "seller-s",
+                "name": "Stale Replay Tea",
+                "admin_token": admin_token,
+            }
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": admin_token}, clear=False):
+                handle_request(db_file, "POST", "/merchants", payload)
+                # Recover rotates the token
+                handle_request(
+                    db_file, "POST", "/merchants/seller-s/token/recover",
+                    {"admin_token": admin_token},
+                )
+                # Replaying the original bootstrap now fails because the deterministic
+                # token was revoked by recovery.
+                stale_status, stale = handle_request(db_file, "POST", "/merchants", payload)
+
+            self.assertEqual(stale_status, 409)
+            self.assertIn("token/recover", stale.get("error", ""))
+
+    def test_cli_merchant_create_returns_token(self):
+        """CLI merchant create outputs a merchant_token that can be used for auth."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            buf = StringIO()
+            args = SimpleNamespace(
+                db=str(db_file),
+                id="cli-tea",
+                name="CLI Tea Merchant",
+                city="杭州",
+                service_area="",
+                contact="",
+                hours="",
+                automation_boundaries="",
+                tags="",
+                delivery_fee=0,
+                delivery_eta_minutes=0,
+                delivery_radius_km=0,
+                format="json",
+                data=None,
+            )
+            with redirect_stdout(buf):
+                from shopping_cli import cli_catalog_commands
+                cli_catalog_commands.cmd_merchant_create(args)
+
+            output = json.loads(buf.getvalue())
+            self.assertTrue(output["ok"])
+            self.assertTrue(output["merchant_token"].startswith("shopping_merchant_"))
+            with db_session(db_file) as conn:
+                token_service.require_merchant_token(conn, "cli-tea", output["merchant_token"])
 
     def test_daemon_paths_do_not_collide_for_lossy_merchant_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

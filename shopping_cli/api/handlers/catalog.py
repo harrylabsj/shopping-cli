@@ -58,11 +58,22 @@ def merchant_list(conn: Any, limit: int = 50, offset: int = 0) -> list[dict[str,
     return catalog.list_merchants(conn, limit=int(limit), offset=int(offset))
 
 
+def _server_idempotency_key(admin_token_hash: str, merchant_id: str) -> str:
+    """Derive a server-side idempotency key so every bootstrap is replayable."""
+    return f"auto:{admin_token_hash}:{merchant_id}"
+
+
 def create_merchant(db_path: str | Path, payload: dict[str, Any], require_admin_token: Any) -> dict[str, Any]:
     require_admin_token(payload)
     merchant_id = str(require_field(payload, "id"))
     name = str(require_field(payload, "name"))
-    idempotency_key = idempotency.idempotency_key_from_payload(payload)
+    admin_token = api_auth.payload_admin_token(payload)
+    admin_token_hash = token_digest(admin_token)
+    # Always use a deterministic idempotency key: honour the client-supplied key
+    # when present, otherwise derive one from admin_token + merchant_id so every
+    # bootstrap is replayable even when the response was lost mid-flight.
+    client_key = idempotency.idempotency_key_from_payload(payload)
+    idempotency_key = client_key or _server_idempotency_key(admin_token_hash, merchant_id)
     request_hash = idempotency.request_hash(
         {
             "id": merchant_id,
@@ -78,12 +89,8 @@ def create_merchant(db_path: str | Path, payload: dict[str, Any], require_admin_
             "delivery_radius_km": payload.get("delivery_radius_km", 0),
         }
     )
-    admin_token = api_auth.payload_admin_token(payload)
-    admin_token_hash = token_digest(admin_token)
 
     def replay(conn: Any) -> dict[str, Any] | None:
-        if not idempotency_key:
-            return None
         row = conn.execute(
             """
             select request_hash, merchant_id from merchant_bootstrap_idempotency
@@ -103,7 +110,8 @@ def create_merchant(db_path: str | Path, payload: dict[str, Any], require_admin_
         ).fetchone()
         if token_row is not None and str(token_row["revoked_at"] or ""):
             raise ConflictError(
-                "merchant bootstrap token was rotated; use the admin token recovery endpoint"
+                "merchant bootstrap token was rotated or revoked; "
+                "use POST /merchants/{merchant_id}/token/recover to recover"
             )
         token_service.ensure_merchant_token(conn, token, replay_merchant_id)
         return {
@@ -117,21 +125,20 @@ def create_merchant(db_path: str | Path, payload: dict[str, Any], require_admin_
         replayed = replay(conn)
         if replayed is not None:
             return replayed
-        if idempotency_key:
-            try:
-                conn.execute(
-                    """
-                    insert into merchant_bootstrap_idempotency(
-                        admin_token_hash, idempotency_key, request_hash, merchant_id, created_at, updated_at
-                    ) values (?, ?, ?, ?, datetime('now'), datetime('now'))
-                    """,
-                    (admin_token_hash, idempotency_key, request_hash, merchant_id),
-                )
-            except sqlite3.IntegrityError:
-                replayed = replay(conn)
-                if replayed is not None:
-                    return replayed
-                raise
+        try:
+            conn.execute(
+                """
+                insert into merchant_bootstrap_idempotency(
+                    admin_token_hash, idempotency_key, request_hash, merchant_id, created_at, updated_at
+                ) values (?, ?, ?, ?, datetime('now'), datetime('now'))
+                """,
+                (admin_token_hash, idempotency_key, request_hash, merchant_id),
+            )
+        except sqlite3.IntegrityError:
+            replayed = replay(conn)
+            if replayed is not None:
+                return replayed
+            raise
         try:
             merchant = catalog.create_merchant(
                 conn,
@@ -149,13 +156,8 @@ def create_merchant(db_path: str | Path, payload: dict[str, Any], require_admin_
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"Merchant already exists: {merchant_id}") from exc
-        token = (
-            deterministic_merchant_token(admin_token, idempotency_key, merchant["id"])
-            if idempotency_key
-            else token_service.issue_merchant_token(conn, merchant["id"])
-        )
-        if idempotency_key:
-            token_service.ensure_merchant_token(conn, token, merchant["id"])
+        token = deterministic_merchant_token(admin_token, idempotency_key, merchant["id"])
+        token_service.ensure_merchant_token(conn, token, merchant["id"])
         return {"ok": True, "merchant": merchant, "merchant_token": token}
 
 
@@ -181,6 +183,30 @@ def rotate_merchant_token(
             actor = str(token_row["merchant_id"])
         token = token_service.rotate_merchant_token(conn, merchant_id, actor=actor)
         return {"ok": True, "merchant_id": merchant_id, "merchant_token": token, "rotated": True}
+
+
+def recover_merchant_token(
+    db_path: str | Path,
+    merchant_id: str,
+    payload: dict[str, Any],
+    require_admin_token: Any,
+) -> dict[str, Any]:
+    """Admin recovery: issue a fresh merchant token when the bootstrap token was lost.
+
+    This is the explicit recovery path promised by the bootstrap replay error.
+    It revokes all existing merchant tokens and issues a replacement, so the
+    caller does not need the lost token.
+    """
+    require_admin_token(payload)
+    with db_session(db_path) as conn:
+        catalog.require_merchant(conn, merchant_id)
+        token = token_service.rotate_merchant_token(conn, merchant_id, actor="admin")
+        return {
+            "ok": True,
+            "merchant_id": merchant_id,
+            "merchant_token": token,
+            "recovered": True,
+        }
 
 
 def revoke_merchant_tokens(

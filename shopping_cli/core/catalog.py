@@ -46,19 +46,56 @@ def cjk_bigrams(value: str) -> list[str]:
 
 
 def fts_search_document(value: str) -> str:
-    """Add space-delimited CJK bigrams while preserving the original text."""
+    """Add space-delimited CJK characters and bigrams while preserving the original text.
+
+    unicode61 treats each contiguous CJK block as a single token (e.g.
+    "西湖龙井礼盒" is one token). To support single-character queries and
+    substring matching, we inject each CJK character as an individual token
+    alongside the original text and bigrams.
+    """
     original = str(value or "")
     bigrams = cjk_bigrams(original)
-    return " ".join([original, *bigrams]).strip()
+    # Extract every individual CJK character so single-char queries match.
+    singles: list[str] = []
+    seen_singles: set[str] = set()
+    for sequence in re.findall(r"[一-鿿]+", original):
+        for ch in sequence:
+            if ch not in seen_singles:
+                singles.append(ch)
+                seen_singles.add(ch)
+    return " ".join([original, *singles, *bigrams]).strip()
 
 
 def fts_query(query: str) -> str:
+    """Build an FTS5 phrase-query string from a user query.
+
+    Emits phrase queries for whole CJK words, CJK bigrams, and — when the
+    query is a single CJK character — the individual character.  The index
+    document (fts_search_document) carries the original text, individual
+    CJK characters, and bigrams, so all three token classes are searchable.
+    """
     terms: list[str] = []
     seen: set[str] = set()
-    for candidate in [*tokenize(query), *cjk_bigrams(query)]:
+    # Whole CJK words (contiguous \w+ or CJK runs)
+    for candidate in tokenize(query):
         if candidate and candidate not in seen:
             terms.append(candidate)
             seen.add(candidate)
+    # CJK bigrams
+    cj_bigrams = cjk_bigrams(query)
+    for candidate in cj_bigrams:
+        if candidate and candidate not in seen:
+            terms.append(candidate)
+            seen.add(candidate)
+    # Individual CJK characters — only for single-character queries where
+    # no bigrams exist.  For multi-character queries the bigram and
+    # full-word phrase tokens are precise enough; individual chars would
+    # introduce false positives through the OR semantics.
+    if not cj_bigrams:
+        for ch in query:
+            if "一" <= ch <= "鿿" and ch not in seen:
+                terms.append(ch)
+                seen.add(ch)
     return " OR ".join(
         f'"{token.replace(chr(34), chr(34) + chr(34))}"'
         for token in terms
@@ -906,6 +943,11 @@ def _match_score(query: str, product: sqlite3.Row, merchant: Mapping[str, Any]) 
     for token in product_tokens:
         if len(token) >= 2 and token in query_lower:
             score += 8
+    # CJK bigrams catch substring matches when full-word tokens don't overlap
+    # (e.g. query "今天想买龙井礼盒" vs product "西湖龙井礼盒").
+    for bigram in cjk_bigrams(query_lower):
+        if bigram in searchable:
+            score += 7
     if _safe_non_negative_int(product["stock"]) > 0:
         score += 5
     score -= _safe_non_negative_float(product["price"]) / 1000
@@ -944,6 +986,14 @@ def search_products(
         max_price = _finite_float(max_price, "--max-price must be finite")
     fts_match = _fts_query(query) if query else ""
     use_index = bool(fts_match and _ensure_product_search_index_populated(conn))
+    # Compute candidate cap once so both FTS and non-FTS paths can use it.
+    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+    default_candidate_limit = max(DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT, requested_window)
+    if candidate_limit is None:
+        candidate_cap = default_candidate_limit
+    else:
+        candidate_cap = _safe_non_negative_int(candidate_limit)
+    candidate_cap = min(candidate_cap, MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT)
     values: list[Any] = []
     select_sql = """
         select p.*,
@@ -981,13 +1031,6 @@ def search_products(
         )
         values.append(fts_match)
     else:
-        requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
-        default_candidate_limit = max(DEFAULT_PRODUCT_SEARCH_CANDIDATE_LIMIT, requested_window)
-        if candidate_limit is None:
-            candidate_cap = default_candidate_limit
-        else:
-            candidate_cap = _safe_non_negative_int(candidate_limit)
-        candidate_cap = min(candidate_cap, MAX_PRODUCT_SEARCH_CANDIDATE_LIMIT)
         sql = (
             select_sql
             + """
@@ -1006,17 +1049,37 @@ def search_products(
     if not include_out_of_stock:
         sql += " and p.stock > 0"
     if use_index:
-        sql += " order by rank, p.sku limit ? offset ?"
-        values.extend([window_limit, window_start])
+        # Use a candidate cap larger than the display window so that
+        # _match_score can re-rank FTS results.  FTS5 BM25 on individual
+        # CJK characters (unicode61 tokenizer) produces noisy rankings;
+        # Python-side substring scoring is more reliable for CJK.
+        index_cap = max(candidate_cap if not query else candidate_cap, window_start + window_limit)
+        sql += " order by rank, p.sku limit ?"
+        values.append(index_cap)
         rows = conn.execute(sql, values).fetchall()
-        results: list[dict[str, Any]] = []
+        scored: list[tuple[float, float, str, sqlite3.Row]] = []
         for row in rows:
             merchant = _joined_product_merchant(row)
+            if city and merchant["city"].lower() != city.lower():
+                continue
+            price = _safe_non_negative_float(row["price"])
+            stock = _safe_non_negative_int(row["stock"])
+            if max_price is not None and price > max_price:
+                continue
+            if not include_out_of_stock and stock <= 0:
+                continue
+            score = _match_score(query, row, merchant)
+            if query and score <= (5 if stock > 0 else 0):
+                continue
+            scored.append((score, price, str(row["sku"]), row))
+        ordered = sorted(scored, key=lambda item: (-item[0], item[1], item[2]))
+        results = []
+        for score, _price, _sku, row in ordered[window_start : window_start + window_limit]:
             summary = _product_summary_from_search_row(row)
             service_area = str(summary["merchant"].get("service_area") or "")
             if area and area.lower() not in service_area.lower():
                 summary.setdefault("warnings", []).append("requested area may need merchant confirmation")
-            summary["match_score"] = _match_score(query, row, merchant)
+            summary["match_score"] = score
             results.append(summary)
         return results
     sql += " order by p.sku limit ?"
@@ -1066,6 +1129,14 @@ def search_merchants(
     window_limit = _safe_non_negative_int(limit)
     fts_match = _fts_query(query) if query else ""
     use_index = bool(fts_match and _ensure_merchant_search_index_populated(conn))
+    # Compute candidate cap once so both paths can use it.
+    requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
+    default_candidate_limit = max(DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT, requested_window)
+    if candidate_limit is None:
+        candidate_cap = default_candidate_limit
+    else:
+        candidate_cap = _safe_non_negative_int(candidate_limit)
+    candidate_cap = min(candidate_cap, MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT)
     values: list[Any] = []
     select_sql = """
         select m.*,
@@ -1091,13 +1162,6 @@ def search_merchants(
         )
         values.append(fts_match)
     else:
-        requested_window = min(window_start + window_limit, MAX_SQLITE_INTEGER)
-        default_candidate_limit = max(DEFAULT_MERCHANT_SEARCH_CANDIDATE_LIMIT, requested_window)
-        if candidate_limit is None:
-            candidate_cap = default_candidate_limit
-        else:
-            candidate_cap = _safe_non_negative_int(candidate_limit)
-        candidate_cap = min(candidate_cap, MAX_MERCHANT_SEARCH_CANDIDATE_LIMIT)
         sql = (
             select_sql
             + """
@@ -1114,17 +1178,26 @@ def search_merchants(
         values.append(city)
     sql += " group by m.id"
     if use_index:
-        sql += " order by rank, m.id limit ? offset ?"
-        values.extend([window_limit, window_start])
+        sql += " order by rank, m.id limit ?"
+        values.append(candidate_cap)
     else:
         sql += " order by m.name, m.id limit ?"
         values.append(candidate_cap)
     rows = conn.execute(sql, values).fetchall()
     if use_index:
-        results: list[dict[str, Any]] = []
+        scored: list[tuple[float, str, str, sqlite3.Row]] = []
         for merchant in rows:
+            if city and str(merchant["city"] or "").lower() != city.lower():
+                continue
+            score = _match_merchant_score(query, merchant)
+            if query and score <= 0:
+                continue
+            scored.append((score, str(merchant["id"]), str(merchant["name"]), merchant))
+        ordered = sorted(scored, key=lambda item: (-item[0], item[2].lower(), item[1]))
+        results = []
+        for score, _mid, _mname, merchant in ordered[window_start : window_start + window_limit]:
             summary = _merchant_summary_from_search_row(merchant)
-            summary["match_score"] = _match_merchant_score(query, merchant)
+            summary["match_score"] = score
             results.append(summary)
         return results
     matches: list[tuple[float, str, str, sqlite3.Row]] = []
@@ -1181,4 +1254,7 @@ def _match_merchant_score(query: str, merchant: sqlite3.Row) -> float:
     for token in merchant_tokens:
         if len(token) >= 2 and token in query_lower:
             score += 8
+    for bigram in cjk_bigrams(query_lower):
+        if bigram in searchable:
+            score += 7
     return round(score, 4)
