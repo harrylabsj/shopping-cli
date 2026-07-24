@@ -179,6 +179,10 @@ def _revoke_merchant_tokens(db_path: str | Path, merchant_id: str, payload: dict
     return catalog_handlers.revoke_merchant_tokens(db_path, merchant_id, payload, api_auth.require_admin_token)
 
 
+def _recover_merchant_token(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.recover_merchant_token(db_path, merchant_id, payload, api_auth.require_admin_token)
+
+
 def _get_merchant(db_path: str | Path, merchant_id: str) -> dict[str, Any]:
     return catalog_handlers.get_merchant(db_path, merchant_id)
 
@@ -428,6 +432,7 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
     RouteEntry({"GET"}, "/merchants/{merchant_id}/private-config", lambda db_path, payload, query, merchant_id: _get_merchant_private_config(db_path, merchant_id, payload)),
     RouteEntry({"POST"}, "/merchants/{merchant_id}/token/rotate", lambda db_path, payload, query, merchant_id: _rotate_merchant_token(db_path, merchant_id, payload)),
     RouteEntry({"POST"}, "/merchants/{merchant_id}/token/revoke", lambda db_path, payload, query, merchant_id: _revoke_merchant_tokens(db_path, merchant_id, payload)),
+    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/recover", lambda db_path, payload, query, merchant_id: _recover_merchant_token(db_path, merchant_id, payload)),
     RouteEntry({"PATCH"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _update_merchant(db_path, merchant_id, payload)),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/conversations", _merchant_conversation_list),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/human-review", _merchant_human_review_list),
@@ -680,6 +685,18 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _revoke_merchant_tokens(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth(payload, authorization),
+        )
+
+    @app.post("/merchants/{merchant_id}/token/recover")
+    def recover_merchant_token(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _recover_merchant_token(
             db_path,
             merchant_id,
             api_auth.payload_with_auth(payload, authorization),

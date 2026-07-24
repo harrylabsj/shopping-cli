@@ -86,16 +86,21 @@ def update_conversation_status(
     status: str,
     next_actor: str,
     sender: str,
+    expected_status: str,
     now: str | None = None,
 ) -> None:
-    """Update a conversation's status, next_actor, and last_sender."""
+    """Transition a conversation to *status*, requiring *expected_status* as the
+    current state.  The precondition rowcount check makes the transition atomic:
+    concurrent writers that changed the status first will see rowcount 0 and
+    raise ConflictError.
+    """
     updated = conn.execute(
         """
         update conversations
         set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
-        where id = ? and status != 'closed'
+        where id = ? and status = ? and status != 'closed'
         """,
-        (status, next_actor, now or now_iso(), sender, conversation_id),
+        (status, next_actor, now or now_iso(), sender, conversation_id, expected_status),
     )
     if updated.rowcount != 1:
         raise ConflictError(f"Conversation {conversation_id} changed concurrently or is closed")

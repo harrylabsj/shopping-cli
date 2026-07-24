@@ -139,20 +139,12 @@ def cmd_conversation_human_review(args: argparse.Namespace) -> None:
     with db_session(db_path_from_args(args)) as conn:
         conversation = conversation_summary(conn, args.conversation)
         flag = add_flag(conn, args.conversation, args.reason, severity=args.severity, sku=conversation.get("sku") or "")
-        next_actor = next_actor_for_status("human_required", flag["reason"])
-        human_review_service.update_conversation_status(
-            conn,
-            args.conversation,
-            status="human_required",
-            next_actor=next_actor,
-            sender=args.source_id or "operator",
-        )
         append_audit_event(
             conn,
             args.conversation,
             args.source_id or "operator",
             "conversation_routed",
-            {"status": "human_required", "next_actor": next_actor, "reason": flag["reason"]},
+            {"status": "human_required", "next_actor": next_actor_for_status("human_required", flag["reason"]), "reason": flag["reason"]},
         )
         review = _review_summary(conn, flag["id"])
         conversation = conversation_summary(conn, args.conversation)
@@ -194,6 +186,7 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
                 status=status,
                 next_actor=next_actor,
                 sender=args.sender,
+                expected_status="human_required",
             )
         append_audit_event(
             conn,
@@ -314,6 +307,7 @@ def cmd_human_review_resolve(args: argparse.Namespace) -> None:
                 status=status,
                 next_actor=next_actor,
                 sender=args.sender,
+                expected_status="human_required",
             )
         append_audit_event(
             conn,

@@ -94,21 +94,14 @@ def create_human_review(db_path: str | Path, conversation_id: str, payload: dict
             severity=str(payload.get("severity") or "review"),
             sku=conversation.get("sku") or "",
         )
-        next_actor = next_actor_for_status("human_required", review["reason"])
-        human_review_service.update_conversation_status(
-            conn,
-            conversation_id,
-            status="human_required",
-            next_actor=next_actor,
-            sender=actor,
-            now=now_iso(),
-        )
+        # add_flag already transitions the conversation to human_required with
+        # a rowcount-guarded UPDATE — no need for a separate status update here.
         append_audit_event(
             conn,
             conversation_id,
             actor,
             "conversation_routed",
-            {"status": "human_required", "next_actor": next_actor, "reason": review["reason"]},
+            {"status": "human_required", "next_actor": next_actor_for_status("human_required", review["reason"]), "reason": review["reason"]},
         )
         row = human_review_service.human_review_row(conn, review["id"], positive_whole_int)
         return {
@@ -170,6 +163,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 status=status,
                 next_actor=next_actor,
                 sender=actor,
+                expected_status="human_required",
                 now=now,
             )
         append_audit_event(
@@ -241,6 +235,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 status=status,
                 next_actor=next_actor,
                 sender=actor,
+                expected_status="human_required",
                 now=now,
             )
         append_audit_event(

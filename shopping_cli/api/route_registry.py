@@ -24,6 +24,7 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/merchants/{merchant_id}/private-config": {"merchants", "agents"},
     "/merchants/{merchant_id}/token/rotate": {"merchants"},
     "/merchants/{merchant_id}/token/revoke": {"merchants"},
+    "/merchants/{merchant_id}/token/recover": {"merchants"},
     "/products": {"merchants"},
     "/products/{sku}": {"merchants"},
     "/search/products": {"marketplace"},

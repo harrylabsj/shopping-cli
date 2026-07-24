@@ -177,20 +177,14 @@ class MarketplaceToolDispatcher:
         with db_session(self.db_path) as conn:
             conversation = self._conversation_for_tool(conn, conversation_id, "human_review_flag")
             flag = add_flag(conn, conversation_id, reason=reason, severity=severity, sku=conversation.get("sku") or "")
-            next_actor = next_actor_for_status("human_required", flag["reason"])
-            human_review_service.update_conversation_status(
-                conn,
-                conversation_id,
-                status="human_required",
-                next_actor=next_actor,
-                sender=self.source_id,
-            )
+            # add_flag already transitions the conversation to human_required
+            # with a rowcount-guarded UPDATE.
             append_audit_event(
                 conn,
                 conversation_id,
                 self.source_id,
                 "conversation_routed",
-                {"status": "human_required", "next_actor": next_actor, "reason": flag["reason"], "tool": "human_review_flag"},
+                {"status": "human_required", "next_actor": next_actor_for_status("human_required", flag["reason"]), "reason": flag["reason"], "tool": "human_review_flag"},
             )
             review = add_review_source(flag, self.source_id)
             conversation = conversation_summary(conn, conversation_id)

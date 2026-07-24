@@ -19,6 +19,7 @@ from shopping_cli.core.catalog import (
 )
 from shopping_cli.core.policies import create_policy, list_policies, policy_summary, search_policies
 from shopping_cli.db.session import db_session
+from shopping_cli.services import tokens as token_service
 
 
 def cmd_merchant_create(args: argparse.Namespace) -> None:
@@ -37,7 +38,16 @@ def cmd_merchant_create(args: argparse.Namespace) -> None:
             delivery_eta_minutes=args.delivery_eta_minutes,
             delivery_radius_km=args.delivery_radius_km,
         )
-    emit({"ok": True, "merchant": merchant, "message": f"Merchant created: {args.id}"}, args.format)
+        token = token_service.issue_merchant_token(conn, merchant["id"])
+    emit(
+        {
+            "ok": True,
+            "merchant": merchant,
+            "merchant_token": token,
+            "message": f"Merchant created: {args.id}",
+        },
+        args.format,
+    )
 
 
 def cmd_merchant_list(args: argparse.Namespace) -> None:
