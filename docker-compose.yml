@@ -3,8 +3,7 @@ services:
     build: .
     image: shopping-cli-api:2.0.0
     command:
-      - python3
-      - scripts/shopping_api.py
+      - shopping-cli-api
       - --db
       - /data/shopping-cli.sqlite
       - --host
@@ -25,6 +24,11 @@ services:
       SHOPPING_CHANNEL_TOKENS: "${SHOPPING_CHANNEL_TOKENS:-}"
     volumes:
       - shopping_cli_api_data:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
     restart: unless-stopped
 
   shopping-agent:
@@ -32,23 +36,23 @@ services:
     build: .
     image: shopping-cli-api:2.0.0
     command:
-      - python3
-      - scripts/shopping.py
+      - shopping-cli
       - agent
       - run
       - --merchant
-      - "${SHOPPING_AGENT_MERCHANT:-}"
+      - "${SHOPPING_AGENT_MERCHANT:?set SHOPPING_AGENT_MERCHANT before starting the agent profile}"
       - --api-url
       - http://shopping-api:8765
-      - --agent-token
-      - "${SHOPPING_AGENT_TOKEN:-}"
       - --interval
       - "${SHOPPING_AGENT_INTERVAL:-3}"
     environment:
       SHOPPING_AGENT_HOST: "${SHOPPING_AGENT_HOST:-docker-compose}"
       SHOPPING_AGENT_SESSION_ID: "${SHOPPING_AGENT_SESSION_ID:-merchant-worker}"
+      SHOPPING_AGENT_TOKEN: "${SHOPPING_AGENT_TOKEN:?set SHOPPING_AGENT_TOKEN before starting the agent profile}"
+      SHOPPING_ALLOW_INSECURE_HTTP: "true"
     depends_on:
-      - shopping-api
+      shopping-api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
