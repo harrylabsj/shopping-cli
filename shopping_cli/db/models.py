@@ -75,6 +75,7 @@ SCHEMA = [
         buyer_id text not null,
         merchant_id text not null,
         sku text not null default '',
+        reuse_key text not null default '',
         status text not null,
         next_actor text not null default '',
         created_at text not null,
@@ -203,9 +204,25 @@ SCHEMA = [
         primary key (token_hash, window_start)
     )
     """,
+    """
+    create table if not exists merchant_bootstrap_idempotency (
+        admin_token_hash text not null,
+        idempotency_key text not null,
+        request_hash text not null,
+        merchant_id text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        primary key (admin_token_hash, idempotency_key)
+    )
+    """,
 ]
 
 INDEXES = [
+    """
+    create unique index if not exists idx_conversations_unique_open_key
+    on conversations(reuse_key)
+    where reuse_key != '' and status != 'closed'
+    """,
     """
     create index if not exists idx_conversations_merchant_status_updated
     on conversations(merchant_id, status, updated_at desc)

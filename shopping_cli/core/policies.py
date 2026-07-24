@@ -13,12 +13,12 @@ flagged ``high_risk`` so the caller escalates instead of promising.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from typing import Any
 
-from shopping_cli.core.catalog import parse_tags, require_merchant, tokenize
+from shopping_cli.core.catalog import fts_query, fts_search_document, parse_tags, require_merchant, tokenize
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 DEFAULT_POLICY_SEARCH_CANDIDATE_LIMIT = 1000
@@ -57,9 +57,11 @@ def create_policy(
     tags: str | list[str] | None = None,
     high_risk: bool = False,
 ) -> dict[str, Any]:
-    merchant_id = str(merchant_id or "").strip()
-    code = str(code or "").strip()
-    body = str(body or "").strip()
+    merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
+    code = bounded_text(code, "policy code", MAX_SHORT_TEXT_CHARS).strip()
+    body = bounded_text(body, "policy body").strip()
+    category = bounded_text(category, "policy category", MAX_SHORT_TEXT_CHARS)
+    title = bounded_text(title, "policy title", MAX_SHORT_TEXT_CHARS)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not code:
@@ -110,8 +112,8 @@ def update_policy(
     Only fields that are not ``None`` are updated.  The search index is
     re-synced so that FTS results reflect the new text immediately.
     """
-    merchant_id = str(merchant_id or "").strip()
-    code = str(code or "").strip()
+    merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
+    code = bounded_text(code, "policy code", MAX_SHORT_TEXT_CHARS).strip()
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not code:
@@ -120,16 +122,16 @@ def update_policy(
     updates: list[str] = []
     values: list[Any] = []
     if body is not None:
-        body = str(body or "").strip()
+        body = bounded_text(body, "policy body").strip()
         if not body:
             raise ValidationError("policy body is required")
         updates.append("body = ?")
         values.append(body)
     if category is not None:
         updates.append("category = ?")
-        values.append(str(category or "").strip())
+        values.append(bounded_text(category, "policy category", MAX_SHORT_TEXT_CHARS).strip())
     if title is not None:
-        title = str(title or "").strip()
+        title = bounded_text(title, "policy title", MAX_SHORT_TEXT_CHARS).strip()
         if not title:
             raise ValidationError("policy title is required")
         updates.append("title = ?")
@@ -234,7 +236,7 @@ def rebuild_policy_search_index(conn: sqlite3.Connection) -> bool:
     for row in _policy_search_rows(conn):
         conn.execute(
             f"insert into {POLICY_SEARCH_INDEX_TABLE}(rowid, merchant_id, text) values (?, ?, ?)",
-            (row["rowid"], row["merchant_id"], _policy_search_text(row)),
+            (row["rowid"], row["merchant_id"], fts_search_document(_policy_search_text(row))),
         )
     return True
 
@@ -249,7 +251,7 @@ def sync_policy_search_index(conn: sqlite3.Connection, merchant_id: str = "") ->
     for row in _policy_search_rows(conn, merchant_id=merchant_id):
         conn.execute(
             f"insert into {POLICY_SEARCH_INDEX_TABLE}(rowid, merchant_id, text) values (?, ?, ?)",
-            (row["rowid"], row["merchant_id"], _policy_search_text(row)),
+            (row["rowid"], row["merchant_id"], fts_search_document(_policy_search_text(row))),
         )
 
 
@@ -257,31 +259,17 @@ def _ensure_policy_search_index_populated(conn: sqlite3.Connection) -> bool:
     if not policy_search_index_available(conn):
         return False
     try:
-        indexed_count = conn.execute(f"select count(*) from {POLICY_SEARCH_INDEX_TABLE}").fetchone()[0]
-        policy_count = conn.execute("select count(*) from policies where active = 1").fetchone()[0]
+        indexed = conn.execute(f"select 1 from {POLICY_SEARCH_INDEX_TABLE} limit 1").fetchone()
+        if indexed is not None:
+            return True
+        policy = conn.execute("select 1 from policies where active = 1 limit 1").fetchone()
     except (AttributeError, TypeError, sqlite3.OperationalError):
         return False
-    if indexed_count == policy_count:
-        return True
-    return rebuild_policy_search_index(conn)
+    return True if policy is None else rebuild_policy_search_index(conn)
 
 
 def _fts_query(query: str) -> str:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for token in tokenize(query):
-        candidates = [token]
-        for cjk_text in re.findall(r"[\u4e00-\u9fff]+", token):
-            if len(cjk_text) > 2:
-                candidates.extend(cjk_text[index : index + 2] for index in range(0, len(cjk_text) - 1))
-        for candidate in candidates:
-            if candidate and candidate not in seen:
-                terms.append(candidate)
-                seen.add(candidate)
-    quoted = []
-    for token in terms:
-        quoted.append(f'"{token.replace(chr(34), chr(34) + chr(34))}"')
-    return " OR ".join(quoted)
+    return fts_query(query)
 
 
 def _match_score(query: str, row: sqlite3.Row) -> float:

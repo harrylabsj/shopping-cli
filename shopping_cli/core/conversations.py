@@ -9,6 +9,8 @@ from shopping_cli.core.catalog import product_summary, require_merchant, require
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event, conversation_audit_events, next_actor_for_status
 from shopping_cli.db.session import decode_json, encode_json, now_iso
+from shopping_cli.core.tokens import token_digest
+from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text
 
 CONVERSATION_STATUSES = {"open", "waiting_merchant", "waiting_buyer", "human_required", "closed"}
 
@@ -60,6 +62,7 @@ def ensure_conversation(
         ).fetchone()
         if row is not None:
             return conversation_summary(conn, row["id"])
+    reuse_key = token_digest(f"{buyer_id}\n{merchant_id}\n{sku}") if reuse_open else ""
     last_insert_error: sqlite3.IntegrityError | None = None
     conversation_id = ""
     for _attempt in range(3):
@@ -69,15 +72,29 @@ def ensure_conversation(
             conn.execute(
                 """
                 insert into conversations(
-                    id, buyer_id, merchant_id, sku, status, next_actor,
+                    id, buyer_id, merchant_id, sku, reuse_key, status, next_actor,
                     created_at, updated_at, last_sender
                 )
-                values (?, ?, ?, ?, 'open', 'buyer', ?, ?, '')
+                values (?, ?, ?, ?, ?, 'open', 'buyer', ?, ?, '')
                 """,
-                (conversation_id, buyer_id, merchant_id, sku, now, now),
+                (conversation_id, buyer_id, merchant_id, sku, reuse_key, now, now),
             )
             break
         except sqlite3.IntegrityError as exc:
+            existing = conn.execute(
+                """
+                select id from conversations
+                where buyer_id = ? and merchant_id = ? and sku = ? and status != 'closed'
+                order by updated_at desc, id desc limit 1
+                """,
+                (buyer_id, merchant_id, sku),
+            ).fetchone()
+            if existing is not None:
+                if reuse_open:
+                    return conversation_summary(conn, existing["id"])
+                raise ConflictError(
+                    f"Open conversation already exists for buyer {buyer_id}, merchant {merchant_id}, sku {sku or '-'}"
+                ) from exc
             if "conversations.id" not in str(exc):
                 raise
             last_insert_error = exc
@@ -148,11 +165,22 @@ def append_message(
     status: str | None = None,
 ) -> dict[str, Any]:
     conversation = require_open_conversation(conn, conversation_id)
+    sender = bounded_text(sender, "message sender", MAX_SHORT_TEXT_CHARS).strip()
+    intent = bounded_text(intent, "message intent", MAX_SHORT_TEXT_CHARS).strip()
+    text = bounded_text(text, "message text")
     if not text.strip():
         raise ValidationError("message text is required")
     now = now_iso()
     payload = normalize_structured_payload(structured_payload)
-    if status is None:
+    unresolved_review = conn.execute(
+        "select 1 from moderation_flags where conversation_id = ? and resolved_at = '' limit 1",
+        (conversation_id,),
+    ).fetchone()
+    if unresolved_review is not None:
+        if status == "closed":
+            raise ConflictError(f"Conversation {conversation_id} has unresolved human review")
+        status = "human_required"
+    elif status is None:
         if sender == "buyer":
             status = "waiting_merchant"
         elif sender in {"merchant_agent", "merchant"}:
@@ -177,24 +205,33 @@ def append_message(
             now,
         ),
     )
-    conn.execute(
-        "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-        (status, next_actor, now, sender, conversation_id),
+    if cursor.lastrowid is None:
+        raise RuntimeError("message insert did not return an id")
+    message_id = cursor.lastrowid
+    updated = conn.execute(
+        """
+        update conversations
+        set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+        where id = ? and status = ? and status != 'closed'
+        """,
+        (status, next_actor, now, sender, conversation_id, conversation["status"]),
     )
+    if updated.rowcount != 1:
+        raise ConflictError(f"Conversation {conversation_id} changed concurrently")
     append_audit_event(
         conn,
         conversation_id,
         sender,
         "message_appended",
         {
-            "message_id": int(cursor.lastrowid),
+            "message_id": message_id,
             "intent": intent,
             "status": status,
             "next_actor": next_actor,
             "source_id": payload.get("source_id", ""),
         },
     )
-    return message_summary(conn, int(cursor.lastrowid))
+    return message_summary(conn, message_id)
 
 
 def add_flag(
@@ -204,7 +241,7 @@ def add_flag(
     severity: str = "review",
     sku: str = "",
 ) -> dict[str, Any]:
-    require_open_conversation(conn, conversation_id)
+    conversation = require_open_conversation(conn, conversation_id)
     reason = _normalize_review_text(reason, "human_required")
     severity = _normalize_review_text(severity, "review")
     sku = str(sku or "").strip()
@@ -216,14 +253,28 @@ def add_flag(
         """,
         (conversation_id, sku, reason, severity, now),
     )
+    if cursor.lastrowid is None:
+        raise RuntimeError("moderation flag insert did not return an id")
+    flag_id = cursor.lastrowid
+    next_actor = next_actor_for_status("human_required", reason)
+    updated = conn.execute(
+        """
+        update conversations
+        set status = 'human_required', next_actor = ?, updated_at = ?, last_sender = 'system'
+        where id = ? and status = ? and status != 'closed'
+        """,
+        (next_actor, now, conversation_id, conversation["status"]),
+    )
+    if updated.rowcount != 1:
+        raise ConflictError(f"Conversation {conversation_id} changed concurrently")
     append_audit_event(
         conn,
         conversation_id,
         "system",
         "human_review_flagged",
-        {"reason": reason, "severity": severity, "sku": sku, "next_actor": next_actor_for_status("human_required", reason)},
+        {"reason": reason, "severity": severity, "sku": sku, "next_actor": next_actor},
     )
-    return flag_summary(conn, int(cursor.lastrowid))
+    return flag_summary(conn, flag_id)
 
 
 def message_summary(conn: sqlite3.Connection, message_id: int) -> dict[str, Any]:
@@ -308,7 +359,8 @@ def conversation_summary(conn: sqlite3.Connection, conversation_id: str) -> dict
 
 def conversation_list_summary_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     conversation_id = str(row["id"])
-    counts = conn.execute(
+    row_keys = set(row.keys())
+    counts = row if {"message_count", "unresolved_flag_count", "audit_event_count"} <= row_keys else conn.execute(
         """
         select
             count(distinct m.id) as message_count,
@@ -343,6 +395,46 @@ def conversation_list_summary(conn: sqlite3.Connection, conversation_id: str) ->
     return conversation_list_summary_from_row(conn, require_conversation(conn, conversation_id))
 
 
+def conversation_details_batch(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    include_flags: bool = False,
+) -> list[dict[str, Any]]:
+    """Build detail dicts (summary fields plus messages) with a constant number of queries.
+
+    Unlike conversation_summary(), this never loads audit events, and only loads
+    flags when include_flags is set (one batched SELECT), so a bounded page of
+    conversations costs O(1) queries instead of per-conversation lookups.
+    """
+    rows = list(rows)
+    ids = [str(row["id"]) for row in rows]
+    placeholders = ", ".join("?" for _ in ids)
+    messages_by_id: dict[str, list[dict[str, Any]]] = {conversation_id: [] for conversation_id in ids}
+    flags_by_id: dict[str, list[dict[str, Any]]] = {conversation_id: [] for conversation_id in ids}
+    if ids:
+        message_rows = conn.execute(
+            f"select * from messages where conversation_id in ({placeholders}) order by id",
+            ids,
+        ).fetchall()
+        for message_row in message_rows:
+            messages_by_id[str(message_row["conversation_id"])].append(message_summary_from_row(message_row))
+        if include_flags:
+            flag_rows = conn.execute(
+                f"select * from moderation_flags where conversation_id in ({placeholders}) order by id",
+                ids,
+            ).fetchall()
+            for flag_row in flag_rows:
+                flags_by_id[str(flag_row["conversation_id"])].append(flag_summary_from_row(flag_row))
+    details: list[dict[str, Any]] = []
+    for row in rows:
+        detail = conversation_list_summary_from_row(conn, row)
+        detail["messages"] = messages_by_id[str(row["id"])]
+        if include_flags:
+            detail["flags"] = flags_by_id[str(row["id"])]
+        details.append(detail)
+    return details
+
+
 def merchant_conversations(
     conn: sqlite3.Connection,
     merchant_id: str,
@@ -350,22 +442,32 @@ def merchant_conversations(
     limit: int | None = None,
     offset: int = 0,
     summary_only: bool = True,
+    include_flags: bool = False,
 ) -> list[dict[str, Any]]:
     require_merchant(conn, merchant_id)
     values: list[Any] = [merchant_id]
+    projection = """select c.*,
+        (select count(*) from messages m where m.conversation_id = c.id) as message_count,
+        (select count(*) from moderation_flags f where f.conversation_id = c.id and f.resolved_at = '') as unresolved_flag_count,
+        (select count(*) from audit_events e where e.conversation_id = c.id) as audit_event_count
+        from conversations c"""
     if status:
-        sql = "select id from conversations where merchant_id = ? and status = ? order by updated_at desc"
+        sql = projection + " where c.merchant_id = ? and c.status = ? order by c.updated_at desc"
         values.append(status)
     else:
-        sql = "select id from conversations where merchant_id = ? order by updated_at desc"
+        sql = projection + " where c.merchant_id = ? order by c.updated_at desc"
     if limit is not None:
         sql += " limit ? offset ?"
         values.extend([_safe_non_negative_int(limit), _safe_non_negative_int(offset)])
     rows = conn.execute(sql, values).fetchall()
     if summary_only:
-        return [conversation_list_summary(conn, row["id"]) for row in rows]
-    return [conversation_summary(conn, row["id"]) for row in rows]
+        return [conversation_list_summary_from_row(conn, row) for row in rows]
+    return conversation_details_batch(conn, rows, include_flags=include_flags)
 
 
-def waiting_merchant_conversations(conn: sqlite3.Connection, merchant_id: str) -> list[dict[str, Any]]:
-    return merchant_conversations(conn, merchant_id, "waiting_merchant", summary_only=False)
+MAX_WAITING_MERCHANT_LIMIT = 100
+
+
+def waiting_merchant_conversations(conn: sqlite3.Connection, merchant_id: str, limit: int = MAX_WAITING_MERCHANT_LIMIT) -> list[dict[str, Any]]:
+    bounded_limit = min(_safe_non_negative_int(limit), MAX_WAITING_MERCHANT_LIMIT)
+    return merchant_conversations(conn, merchant_id, "waiting_merchant", limit=bounded_limit, summary_only=False)

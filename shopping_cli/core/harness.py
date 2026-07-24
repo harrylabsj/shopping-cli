@@ -52,7 +52,9 @@ def append_audit_event(
         """,
         (conversation_id, actor, event, encode_json(normalized_details), now_iso()),
     )
-    return audit_event_summary(conn, int(cursor.lastrowid))
+    if cursor.lastrowid is None:
+        raise RuntimeError("audit event insert did not return an id")
+    return audit_event_summary(conn, cursor.lastrowid)
 
 
 def audit_event_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:

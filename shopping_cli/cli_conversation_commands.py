@@ -6,10 +6,7 @@ import argparse
 from typing import Any
 
 from shopping_cli.cli_common import db_path_from_args, emit
-from shopping_cli.core.conversations import (
-    conversation_list_summary,
-    conversation_summary,
-)
+from shopping_cli.core.conversations import conversation_summary
 from shopping_cli.core.errors import ValidationError
 from shopping_cli.db.session import db_session
 from shopping_cli.services import conversations as conversation_service
@@ -75,15 +72,16 @@ def cmd_conversation_list(args: argparse.Namespace) -> None:
     if args.updated_since:
         clauses.append("updated_at >= ?")
         values.append(args.updated_since)
-    sql = "select id from conversations"
-    if clauses:
-        sql += " where " + " and ".join(clauses)
-    sql += " order by updated_at desc limit ? offset ?"
-    values.extend([args.limit, args.offset])
     with db_session(db_path_from_args(args)) as conn:
-        rows = conn.execute(sql, values).fetchall()
-        summarize = conversation_summary if args.details else conversation_list_summary
-        conversations = [summarize(conn, row["id"]) for row in rows]
+        if args.details:
+            ids = conversation_service.list_conversation_ids(
+                conn, clauses=clauses, values=values, limit=args.limit, offset=args.offset
+            )
+            conversations = [conversation_summary(conn, conversation_id) for conversation_id in ids]
+        else:
+            conversations = conversation_service.list_conversation_summaries(
+                conn, clauses=clauses, values=values, limit=args.limit, offset=args.offset
+            )
     if args.format == "text":
         emit_conversation_table(conversations, "No conversations found.")
         return

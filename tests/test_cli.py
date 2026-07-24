@@ -13,9 +13,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import shopping  # noqa: E402
 from helpers import run_cli as run_cli_helper  # noqa: E402
 from shopping_cli.core.tokens import token_digest  # noqa: E402
+from shopping_cli.db.session import db_session  # noqa: E402
 
 
 class ShoppingCliTest(unittest.TestCase):
@@ -1725,6 +1725,7 @@ class ShoppingCliTest(unittest.TestCase):
 
             with (
                 patch("shopping_cli.cli_agent_commands.HTTPMerchantAgentTools", FakeHTTPMerchantAgentTools),
+                patch.dict(os.environ, {"SHOPPING_AGENT_TOKEN": "agent_tok_seller_a"}, clear=False),
             ):
                 self.run_cli(
                     db_file,
@@ -1734,8 +1735,6 @@ class ShoppingCliTest(unittest.TestCase):
                     "seller-a",
                     "--api-url",
                     "http://127.0.0.1:8765",
-                    "--agent-token",
-                    "agent_tok_seller_a",
                     "--stop-file",
                     str(stop_file),
                     "--format",
@@ -2079,7 +2078,7 @@ class ShoppingCliTest(unittest.TestCase):
     def test_agent_token_command_issues_scoped_agent_token(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
-            created = json.loads(
+            json.loads(
                 self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea", "--format", "json")
             )
 
@@ -3822,7 +3821,13 @@ class ShoppingCliTest(unittest.TestCase):
                     "json",
                 )
             )
-            self.run_cli(db_file, "conversation", "close", "--conversation", "CONV-0001", "--sender", "operator")
+            # Simulate a legacy/inconsistent closed row. Normal close paths now
+            # correctly reject conversations with unresolved human review.
+            with db_session(db_file) as conn:
+                conn.execute(
+                    "update conversations set status = 'closed', next_actor = 'none' where id = ?",
+                    ("CONV-0001",),
+                )
 
             with self.assertRaises(SystemExit) as raised:
                 self.run_cli(

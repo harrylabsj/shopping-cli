@@ -7,7 +7,8 @@ import re
 import sqlite3
 from typing import Any, Mapping
 
-from shopping_cli.core.errors import NotFoundError, ValidationError
+from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -23,13 +24,45 @@ def parse_tags(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return bounded_string_list([str(item).strip() for item in value if str(item).strip()], "tags")
     parts = re.split(r"[,;，；、\n]+", str(value))
-    return [part.strip() for part in parts if part.strip()]
+    return bounded_string_list([part.strip() for part in parts if part.strip()], "tags")
 
 
 def tokenize(value: str) -> list[str]:
     return [token.lower() for token in re.findall(r"[\w\u4e00-\u9fff]+", value or "")]
+
+
+def cjk_bigrams(value: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", value or ""):
+        for index in range(0, max(len(sequence) - 1, 0)):
+            term = sequence[index : index + 2]
+            if term not in seen:
+                terms.append(term)
+                seen.add(term)
+    return terms
+
+
+def fts_search_document(value: str) -> str:
+    """Add space-delimited CJK bigrams while preserving the original text."""
+    original = str(value or "")
+    bigrams = cjk_bigrams(original)
+    return " ".join([original, *bigrams]).strip()
+
+
+def fts_query(query: str) -> str:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in [*tokenize(query), *cjk_bigrams(query)]:
+        if candidate and candidate not in seen:
+            terms.append(candidate)
+            seen.add(candidate)
+    return " OR ".join(
+        f'"{token.replace(chr(34), chr(34) + chr(34))}"'
+        for token in terms
+    )
 
 
 def require_merchant(conn: sqlite3.Connection, merchant_id: str) -> sqlite3.Row:
@@ -118,22 +151,28 @@ def create_merchant(
     delivery_eta_minutes: int = 0,
     delivery_radius_km: float = 0,
 ) -> dict[str, Any]:
-    merchant_id = str(merchant_id or "").strip()
-    name = str(name or "").strip()
+    merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
+    name = bounded_text(name, "merchant name", MAX_SHORT_TEXT_CHARS).strip()
+    city = bounded_text(city, "city", MAX_SHORT_TEXT_CHARS)
+    service_area = bounded_text(service_area, "service area")
+    contact = bounded_text(contact, "contact", MAX_SHORT_TEXT_CHARS)
+    hours = bounded_text(hours, "hours", MAX_SHORT_TEXT_CHARS)
+    automation_boundaries = bounded_text(automation_boundaries, "automation boundaries")
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not name:
         raise ValidationError("merchant name is required")
     now = now_iso()
-    conn.execute(
-        """
+    try:
+        conn.execute(
+            """
         insert into merchants(
             id, name, city, service_area, contact, hours, automation_boundaries,
             tags_json, created_at, updated_at
         )
         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
+            """,
+            (
             merchant_id,
             name,
             city,
@@ -144,8 +183,10 @@ def create_merchant(
             encode_json(parse_tags(tags)),
             now,
             now,
-        ),
-    )
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ConflictError(f"Merchant already exists: {merchant_id}") from exc
     upsert_delivery_rule(
         conn,
         merchant_id,
@@ -174,9 +215,19 @@ def update_merchant(
 ) -> dict[str, Any]:
     merchant = require_merchant(conn, merchant_id)
     if name is not None:
-        name = str(name or "").strip()
+        name = bounded_text(name, "merchant name", MAX_SHORT_TEXT_CHARS).strip()
         if not name:
             raise ValidationError("merchant name is required")
+    if city is not None:
+        city = bounded_text(city, "city", MAX_SHORT_TEXT_CHARS)
+    if service_area is not None:
+        service_area = bounded_text(service_area, "service area")
+    if contact is not None:
+        contact = bounded_text(contact, "contact", MAX_SHORT_TEXT_CHARS)
+    if hours is not None:
+        hours = bounded_text(hours, "hours", MAX_SHORT_TEXT_CHARS)
+    if automation_boundaries is not None:
+        automation_boundaries = bounded_text(automation_boundaries, "automation boundaries")
     updates: list[str] = []
     values: list[Any] = []
     field_map = {
@@ -232,6 +283,9 @@ def upsert_delivery_rule(
     notes: str = "",
     currency: str = "CNY",
 ) -> dict[str, Any]:
+    service_area = bounded_text(service_area, "service area")
+    notes = bounded_text(notes, "delivery notes")
+    currency = bounded_text(currency, "currency", 16)
     fee = _finite_float(fee, "delivery fee must be finite")
     radius_km = _finite_float(radius_km, "delivery radius must be finite")
     eta_minutes = _whole_int(eta_minutes, "delivery eta minutes must be a whole number")
@@ -277,9 +331,12 @@ def create_product(
     description: str = "",
     delivery_attributes: str | list[str] | None = None,
 ) -> dict[str, Any]:
-    merchant_id = str(merchant_id or "").strip()
-    sku = str(sku or "").strip()
-    title = str(title or "").strip()
+    merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
+    sku = bounded_text(sku, "product sku", MAX_SHORT_TEXT_CHARS).strip()
+    title = bounded_text(title, "product title", MAX_SHORT_TEXT_CHARS).strip()
+    description = bounded_text(description, "product description")
+    category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
+    currency = bounded_text(currency, "currency", 16)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not sku:
@@ -294,15 +351,16 @@ def create_product(
         raise ValidationError("--stock must be non-negative")
     require_merchant(conn, merchant_id)
     now = now_iso()
-    conn.execute(
-        """
+    try:
+        conn.execute(
+            """
         insert into products(
             sku, merchant_id, title, description, category, tags_json, price,
             currency, stock, delivery_attributes_json, active, created_at, updated_at
         )
         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-        """,
-        (
+            """,
+            (
             sku,
             merchant_id,
             title,
@@ -315,8 +373,10 @@ def create_product(
             encode_json(parse_tags(delivery_attributes)),
             now,
             now,
-        ),
-    )
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ConflictError(f"Product already exists: {sku}") from exc
     sync_product_search_index(conn, sku=sku)
     return product_summary(conn, sku)
 
@@ -338,9 +398,15 @@ def update_product(
     if merchant_id and product["merchant_id"] != merchant_id:
         raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
     if title is not None:
-        title = str(title or "").strip()
+        title = bounded_text(title, "product title", MAX_SHORT_TEXT_CHARS).strip()
         if not title:
             raise ValidationError("product title is required")
+    if currency is not None:
+        currency = bounded_text(currency, "currency", 16)
+    if category is not None:
+        category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
+    if description is not None:
+        description = bounded_text(description, "product description")
     if price is not None:
         price = _finite_float(price, "--price must be finite")
     if price is not None and price < 0:
@@ -569,21 +635,7 @@ def _search_text(product: sqlite3.Row, merchant: Mapping[str, Any]) -> str:
 
 
 def _fts_query(query: str) -> str:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for token in tokenize(query):
-        candidates = [token]
-        for cjk_text in re.findall(r"[\u4e00-\u9fff]+", token):
-            if len(cjk_text) > 2:
-                candidates.extend(cjk_text[index : index + 2] for index in range(0, len(cjk_text) - 1))
-        for candidate in candidates:
-            if candidate and candidate not in seen:
-                terms.append(candidate)
-                seen.add(candidate)
-    quoted = []
-    for token in terms:
-        quoted.append(f'"{token.replace(chr(34), chr(34) + chr(34))}"')
-    return " OR ".join(quoted)
+    return fts_query(query)
 
 
 def product_search_index_available(conn: sqlite3.Connection) -> bool:
@@ -606,7 +658,7 @@ def _product_search_document(row: sqlite3.Row) -> str:
         "service_area": row["merchant_service_area"],
         "tags_json": row["merchant_tags_json"],
     }
-    return _search_text(row, merchant)
+    return fts_search_document(_search_text(row, merchant))
 
 
 def _joined_product_search_rows(conn: sqlite3.Connection, merchant_id: str = "", sku: str = "") -> list[sqlite3.Row]:
@@ -711,58 +763,13 @@ def _ensure_product_search_index_populated(conn: sqlite3.Connection) -> bool:
     if not product_search_index_available(conn):
         return False
     try:
-        indexed_count = conn.execute(f"select count(*) from {PRODUCT_SEARCH_INDEX_TABLE}").fetchone()[0]
-        product_count = conn.execute("select count(*) from products where active = 1").fetchone()[0]
-    except (AttributeError, TypeError, sqlite3.OperationalError):
-        return False
-    if indexed_count == product_count:
-        # Count alone is not enough: the index could contain stale rows while
-        # missing active products. Verify consistency before skipping sync.
-        try:
-            stale_count = conn.execute(
-                f"""
-                select count(*) from {PRODUCT_SEARCH_INDEX_TABLE}
-                where sku not in (select sku from products where active = 1)
-                """
-            ).fetchone()[0]
-            missing_count = conn.execute(
-                f"""
-                select count(*) from products p
-                where p.active = 1 and p.sku not in (select sku from {PRODUCT_SEARCH_INDEX_TABLE})
-                """
-            ).fetchone()[0]
-        except (AttributeError, TypeError, sqlite3.OperationalError):
-            return False
-        if stale_count == 0 and missing_count == 0:
+        indexed = conn.execute(f"select 1 from {PRODUCT_SEARCH_INDEX_TABLE} limit 1").fetchone()
+        if indexed is not None:
             return True
-    # Incremental sync avoids rebuilding the entire FTS table on every startup:
-    # insert missing active rows and delete stale/extra rows.
-    try:
-        missing_rows = conn.execute(
-            f"""
-            select p.*, m.name as merchant_name, m.city as merchant_city,
-                   m.service_area as merchant_service_area, m.tags_json as merchant_tags_json
-            from products p
-            join merchants m on m.id = p.merchant_id
-            left join {PRODUCT_SEARCH_INDEX_TABLE} psi on psi.sku = p.sku
-            where p.active = 1 and psi.sku is null
-            order by p.sku
-            """
-        ).fetchall()
-        for row in missing_rows:
-            conn.execute(
-                f"insert into {PRODUCT_SEARCH_INDEX_TABLE}(sku, merchant_id, text) values (?, ?, ?)",
-                (row["sku"], row["merchant_id"], _product_search_document(row)),
-            )
-        conn.execute(
-            f"""
-            delete from {PRODUCT_SEARCH_INDEX_TABLE}
-            where sku not in (select sku from products where active = 1)
-            """
-        )
+        product = conn.execute("select 1 from products where active = 1 limit 1").fetchone()
     except (AttributeError, TypeError, sqlite3.OperationalError):
         return False
-    return True
+    return True if product is None else rebuild_product_search_index(conn)
 
 
 def merchant_search_index_available(conn: sqlite3.Connection) -> bool:
@@ -786,7 +793,7 @@ def _merchant_search_document(row: sqlite3.Row) -> str:
         row["service_area"],
         " ".join(decode_json(row["tags_json"], [])),
     ]
-    return " ".join(str(field) for field in fields if field)
+    return fts_search_document(" ".join(str(field) for field in fields if field))
 
 
 def _joined_merchant_search_rows(conn: sqlite3.Connection, merchant_id: str = "") -> list[sqlite3.Row]:
@@ -878,55 +885,13 @@ def _ensure_merchant_search_index_populated(conn: sqlite3.Connection) -> bool:
     if not merchant_search_index_available(conn):
         return False
     try:
-        indexed_count = conn.execute(f"select count(*) from {MERCHANT_SEARCH_INDEX_TABLE}").fetchone()[0]
-        merchant_count = conn.execute("select count(*) from merchants").fetchone()[0]
-    except (AttributeError, TypeError, sqlite3.OperationalError):
-        return False
-    if indexed_count == merchant_count:
-        # Count alone is not enough: verify no stale or missing rows.
-        try:
-            stale_count = conn.execute(
-                f"""
-                select count(*) from {MERCHANT_SEARCH_INDEX_TABLE}
-                where id not in (select id from merchants)
-                """
-            ).fetchone()[0]
-            missing_count = conn.execute(
-                f"""
-                select count(*) from merchants m
-                where m.id not in (select id from {MERCHANT_SEARCH_INDEX_TABLE})
-                """
-            ).fetchone()[0]
-        except (AttributeError, TypeError, sqlite3.OperationalError):
-            return False
-        if stale_count == 0 and missing_count == 0:
+        indexed = conn.execute(f"select 1 from {MERCHANT_SEARCH_INDEX_TABLE} limit 1").fetchone()
+        if indexed is not None:
             return True
-    # Incremental sync avoids rebuilding the entire FTS table on every startup:
-    # insert missing active rows and delete stale/extra rows.
-    try:
-        missing_rows = conn.execute(
-            f"""
-            select m.*
-            from merchants m
-            left join {MERCHANT_SEARCH_INDEX_TABLE} msi on msi.id = m.id
-            where msi.id is null
-            order by m.id
-            """
-        ).fetchall()
-        for row in missing_rows:
-            conn.execute(
-                f"insert into {MERCHANT_SEARCH_INDEX_TABLE}(id, text) values (?, ?)",
-                (row["id"], _merchant_search_document(row)),
-            )
-        conn.execute(
-            f"""
-            delete from {MERCHANT_SEARCH_INDEX_TABLE}
-            where id not in (select id from merchants)
-            """
-        )
+        merchant = conn.execute("select 1 from merchants limit 1").fetchone()
     except (AttributeError, TypeError, sqlite3.OperationalError):
         return False
-    return True
+    return True if merchant is None else rebuild_merchant_search_index(conn)
 
 
 def _match_score(query: str, product: sqlite3.Row, merchant: Mapping[str, Any]) -> float:

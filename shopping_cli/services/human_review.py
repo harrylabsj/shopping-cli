@@ -35,21 +35,26 @@ def human_review_row(conn: Any, review_id: str | int, positive_whole_int: Any) -
 
 def list_unresolved_reviews(
     conn: Any,
-    merchant_id: str,
+    merchant_id: str = "",
     *,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Any]:
     """Return unresolved moderation flag rows for a merchant, newest first."""
+    merchant_clause = " and c.merchant_id = ?" if merchant_id else ""
+    params: list[Any] = []
+    if merchant_id:
+        params.append(merchant_id)
+    params.extend([limit, offset])
     return conn.execute(
-        """
+        f"""
         select f.*, c.merchant_id as merchant_id, c.buyer_id as buyer_id
         from moderation_flags f
         join conversations c on c.id = f.conversation_id
-        where f.resolved_at = '' and c.merchant_id = ?
+        where f.resolved_at = ''{merchant_clause}
         order by f.created_at desc, f.id desc limit ? offset ?
         """,
-        (merchant_id, limit, offset),
+        params,
     ).fetchall()
 
 
@@ -84,10 +89,16 @@ def update_conversation_status(
     now: str | None = None,
 ) -> None:
     """Update a conversation's status, next_actor, and last_sender."""
-    conn.execute(
-        "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
+    updated = conn.execute(
+        """
+        update conversations
+        set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+        where id = ? and status != 'closed'
+        """,
         (status, next_actor, now or now_iso(), sender, conversation_id),
     )
+    if updated.rowcount != 1:
+        raise ConflictError(f"Conversation {conversation_id} changed concurrently or is closed")
 
 
 def resolve_review(
