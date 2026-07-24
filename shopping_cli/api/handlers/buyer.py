@@ -120,6 +120,13 @@ def _clear_idempotency_claim(
 
 def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     bootstrap_token_hash = api_auth.require_buyer_bootstrap_token(payload, token_digest)
+    buyer_id = str(require_field(payload, "buyer_id")).strip()
+    text = str(require_field(payload, "text"))
+    if not buyer_id:
+        raise ValidationError("buyer_id is required")
+    if not text.strip():
+        raise ValidationError("text is required")
+    payload = {**payload, "buyer_id": buyer_id, "text": text}
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     request_hash = api_idempotency.buyer_ask_request_hash(payload)
     endpoint = "/buyer/ask"
@@ -146,7 +153,6 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         if replayed is not None:
             return replayed
         try:
-            buyer_id = str(payload["buyer_id"])
             result = buyer_cli.ask(
                 conn,
                 buyer_id=buyer_id,
@@ -205,6 +211,13 @@ def ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict
 
 def create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     bootstrap_token_hash = api_auth.require_buyer_bootstrap_token(payload, token_digest)
+    buyer_id = str(require_field(payload, "buyer_id")).strip()
+    merchant_id = str(require_field(payload, "merchant_id")).strip()
+    if not buyer_id:
+        raise ValidationError("buyer id is required")
+    if not merchant_id:
+        raise ValidationError("merchant id is required")
+    payload = {**payload, "buyer_id": buyer_id, "merchant_id": merchant_id}
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     request_hash = api_idempotency.conversation_create_request_hash(payload)
     endpoint = "/conversations"
@@ -233,8 +246,8 @@ def create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[st
         try:
             conversation = conversation_service.create_conversation(
                 conn,
-                buyer_id=str(payload["buyer_id"]),
-                merchant_id=str(payload["merchant_id"]),
+                buyer_id=buyer_id,
+                merchant_id=merchant_id,
                 sku=str(payload.get("sku") or ""),
                 text=str(payload.get("text") or ""),
                 intent=str(payload.get("intent") or "ask_product"),

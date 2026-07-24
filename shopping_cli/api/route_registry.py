@@ -1,56 +1,78 @@
-"""Shared API route metadata."""
+"""Shared API route metadata derived from the executable fallback router."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 
+
+@dataclass(frozen=True)
 class RouteInfo:
+    path: str
+    methods: set[str]
+    groups: frozenset[str]
+
     def __init__(self, path: str, methods: set[str], groups: set[str] | None = None):
-        self.path = path
-        self.methods = methods
-        self.groups = frozenset(groups or set())
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "methods", methods)
+        object.__setattr__(self, "groups", frozenset(groups or set()))
 
 
-API_ROUTES: tuple[RouteInfo, ...] = (
-    RouteInfo("/health", {"GET"}, {"marketplace"}),
-    RouteInfo("/merchants", {"GET", "POST"}, {"merchants"}),
-    RouteInfo("/merchants/{merchant_id}", {"GET", "PATCH"}, {"merchants"}),
-    RouteInfo("/products", {"POST"}, {"merchants"}),
-    RouteInfo("/products/{sku}", {"GET", "PATCH"}, {"merchants"}),
-    RouteInfo("/search/products", {"GET"}, {"marketplace"}),
-    RouteInfo("/search/merchants", {"GET"}, {"marketplace"}),
-    RouteInfo("/channels/messages", {"POST"}, {"marketplace", "conversations"}),
-    RouteInfo("/buyer/ask", {"POST"}, {"marketplace", "conversations"}),
-    RouteInfo("/conversations", {"POST"}, {"conversations"}),
-    RouteInfo("/conversations/{conversation_id}", {"GET"}, {"conversations"}),
-    RouteInfo("/conversations/{conversation_id}/messages", {"POST"}, {"conversations"}),
-    RouteInfo("/conversations/{conversation_id}/close", {"POST"}, {"conversations"}),
-    RouteInfo("/buyers/{buyer_id}/conversations", {"GET"}, {"conversations"}),
-    RouteInfo("/agents/heartbeat", {"POST"}, {"agents"}),
-    RouteInfo("/agents/tokens", {"GET", "POST"}, {"agents"}),
-    RouteInfo("/agents/tokens/revoke", {"POST"}, {"agents"}),
-    RouteInfo("/agents/tokens/rotate", {"POST"}, {"agents"}),
-    RouteInfo("/agents/messages/claim", {"POST"}, {"agents"}),
-    RouteInfo("/agents/messages/complete", {"POST"}, {"agents"}),
-    RouteInfo("/agents/messages/fail", {"POST"}, {"agents"}),
-    RouteInfo("/agents/messages/abandon", {"POST"}, {"agents"}),
-    RouteInfo("/agents/messages/abandon-stale", {"POST"}, {"agents"}),
-    RouteInfo("/agents", {"GET"}, {"agents"}),
-    RouteInfo("/agents/{agent_id}", {"GET"}, {"agents"}),
-    RouteInfo("/merchants/{merchant_id}/agents", {"GET"}, {"agents"}),
-    RouteInfo("/audit/tool-calls", {"POST"}, {"agents"}),
-    RouteInfo("/audit/events", {"GET"}, {"agents", "merchants"}),
-    RouteInfo("/human-review/queue", {"GET"}, {"conversations"}),
-    RouteInfo("/human-review/{review_id}", {"GET"}, {"conversations"}),
-    RouteInfo("/human-review/{review_id}/resolve", {"POST"}, {"conversations"}),
-    RouteInfo("/merchants/{merchant_id}/conversations", {"GET"}, {"conversations"}),
-    RouteInfo("/merchants/{merchant_id}/human-review", {"GET"}, {"conversations"}),
-    RouteInfo("/conversations/{conversation_id}/human-review", {"POST"}, {"conversations"}),
-    RouteInfo("/conversations/{conversation_id}/human-review/resolve", {"POST"}, {"conversations"}),
-)
+_ROUTE_GROUPS: dict[str, set[str]] = {
+    "/health": {"marketplace"},
+    "/merchants": {"merchants"},
+    "/merchants/{merchant_id}": {"merchants"},
+    "/merchants/{merchant_id}/private-config": {"merchants", "agents"},
+    "/merchants/{merchant_id}/token/rotate": {"merchants"},
+    "/merchants/{merchant_id}/token/revoke": {"merchants"},
+    "/products": {"merchants"},
+    "/products/{sku}": {"merchants"},
+    "/search/products": {"marketplace"},
+    "/search/merchants": {"marketplace"},
+    "/channels/messages": {"marketplace", "conversations"},
+    "/buyer/ask": {"marketplace", "conversations"},
+    "/conversations": {"conversations"},
+    "/conversations/{conversation_id}": {"conversations"},
+    "/conversations/{conversation_id}/messages": {"conversations"},
+    "/conversations/{conversation_id}/close": {"conversations"},
+    "/buyers/{buyer_id}/conversations": {"conversations"},
+    "/agents/heartbeat": {"agents"},
+    "/agents/tokens": {"agents"},
+    "/agents/tokens/revoke": {"agents"},
+    "/agents/tokens/rotate": {"agents"},
+    "/agents/messages/claim": {"agents"},
+    "/agents/messages/complete": {"agents"},
+    "/agents/messages/fail": {"agents"},
+    "/agents/messages/abandon": {"agents"},
+    "/agents/messages/abandon-stale": {"agents"},
+    "/agents": {"agents"},
+    "/agents/{agent_id}": {"agents"},
+    "/merchants/{merchant_id}/agents": {"agents"},
+    "/audit/tool-calls": {"agents"},
+    "/audit/events": {"agents", "merchants"},
+    "/human-review/queue": {"conversations"},
+    "/human-review/{review_id}": {"conversations"},
+    "/human-review/{review_id}/resolve": {"conversations"},
+    "/merchants/{merchant_id}/conversations": {"conversations"},
+    "/merchants/{merchant_id}/human-review": {"conversations"},
+    "/conversations/{conversation_id}/human-review": {"conversations"},
+    "/conversations/{conversation_id}/human-review/resolve": {"conversations"},
+}
 
 
 def route_info() -> list[RouteInfo]:
-    return list(API_ROUTES)
+    # Import lazily to avoid a cycle while app.py constructs its route table.
+    from shopping_cli.api.app import _ROUTE_TABLE
+
+    methods_by_path: dict[str, set[str]] = {}
+    for entry in _ROUTE_TABLE:
+        methods_by_path.setdefault(entry.path_template, set()).update(entry.methods)
+    unknown_paths = set(methods_by_path) - set(_ROUTE_GROUPS)
+    stale_paths = set(_ROUTE_GROUPS) - set(methods_by_path)
+    if unknown_paths or stale_paths:
+        raise RuntimeError(
+            f"route group metadata is out of sync: unknown={sorted(unknown_paths)}, stale={sorted(stale_paths)}"
+        )
+    return [RouteInfo(path, methods, _ROUTE_GROUPS[path]) for path, methods in methods_by_path.items()]
 
 
 def routes_for_group(group: str) -> list[RouteInfo]:

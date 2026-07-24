@@ -8,7 +8,6 @@ from typing import Any
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT, require_field, result_limit, result_offset
 from shopping_cli.core.conversations import (
-    conversation_list_summary,
     conversation_summary,
     merchant_conversations as merchant_conversation_summaries,
     normalize_structured_payload,
@@ -135,17 +134,17 @@ def conversation_list(
             token_service.require_merchant_read_token(conn, owner_id, _payload_token(payload))
         else:
             raise AuthError("conversation list owner is required")
-        ids = conversation_service.list_conversation_ids(
-            conn,
-            clauses=clauses,
-            values=values,
-            limit=result_limit(filters.get("limit")),
-            offset=result_offset(filters.get("offset")),
-        )
-        summarize = (
-            conversation_summary if str(filters.get("include") or "").lower() == "details" else conversation_list_summary
-        )
-        return {"ok": True, "conversations": [summarize(conn, cid) for cid in ids]}
+        limit = result_limit(filters.get("limit"))
+        offset = result_offset(filters.get("offset"))
+        if str(filters.get("include") or "").lower() == "details":
+            results = conversation_service.list_conversation_details(
+                conn, clauses=clauses, values=values, limit=limit, offset=offset
+            )
+        else:
+            results = conversation_service.list_conversation_summaries(
+                conn, clauses=clauses, values=values, limit=limit, offset=offset
+            )
+        return {"ok": True, "conversations": results}
 
 
 def merchant_conversations(

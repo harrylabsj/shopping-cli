@@ -9,6 +9,8 @@ from typing import Any
 from shopping_cli.core.channels import normalize_channel
 from shopping_cli.core.errors import AuthError
 from shopping_cli.core.tokens import token_matches
+from shopping_cli.config import secret_is_usable
+from shopping_cli.api.limits import validate_payload
 
 
 def payload_token(payload: dict[str, Any]) -> str:
@@ -38,6 +40,7 @@ def payload_with_auth(
     authorization: Any = "",
     idempotency_key: Any = "",
 ) -> dict[str, Any]:
+    validate_payload(payload)
     merged = dict(payload or {})
     if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
         merged["_auth_token"] = authorization.split(" ", 1)[1].strip()
@@ -56,7 +59,7 @@ def configured_buyer_bootstrap_token() -> str:
 
 def require_admin_token(payload: dict[str, Any]) -> None:
     expected = configured_admin_token()
-    if not expected:
+    if not secret_is_usable(expected):
         raise AuthError("admin bootstrap token is not configured")
     token = payload_admin_token(payload)
     if not token:
@@ -67,7 +70,7 @@ def require_admin_token(payload: dict[str, Any]) -> None:
 
 def require_buyer_bootstrap_token(payload: dict[str, Any], digest_fn: Any) -> str:
     expected = configured_buyer_bootstrap_token()
-    if not expected:
+    if not secret_is_usable(expected):
         raise AuthError("buyer bootstrap token is not configured")
     token = payload_buyer_bootstrap_token(payload)
     if not token:
@@ -80,7 +83,7 @@ def require_buyer_bootstrap_token(payload: dict[str, Any], digest_fn: Any) -> st
 def channel_token_map() -> dict[str, str]:
     tokens: dict[str, str] = {}
     global_token = str(os.environ.get("SHOPPING_CHANNEL_TOKEN") or "").strip()
-    if global_token:
+    if secret_is_usable(global_token):
         tokens["*"] = global_token
     raw = str(os.environ.get("SHOPPING_CHANNEL_TOKENS") or "").strip()
     if not raw:
@@ -92,7 +95,7 @@ def channel_token_map() -> dict[str, str]:
     if isinstance(decoded, dict):
         for channel, token in decoded.items():
             normalized = normalize_channel(str(channel))
-            if normalized and str(token or "").strip():
+            if normalized and secret_is_usable(str(token or "")):
                 tokens[normalized] = str(token).strip()
         return tokens
     for part in raw.replace("\n", ",").split(","):
@@ -104,7 +107,7 @@ def channel_token_map() -> dict[str, str]:
             continue
         channel, token = text.split(separator, 1)
         normalized = normalize_channel(channel)
-        if normalized and token.strip():
+        if normalized and secret_is_usable(token):
             tokens[normalized] = token.strip()
     return tokens
 

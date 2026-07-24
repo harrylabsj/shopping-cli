@@ -355,8 +355,10 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertIn("/buyers/{buyer_id}/conversations", route_paths)
             self.assertIn("/agents/heartbeat", route_paths)
             self.assertIn("/agents/tokens", route_paths)
-            token_route = next(route for route in routes if route.path == "/agents/tokens")
-            self.assertEqual(token_route.methods, {"GET", "POST"})
+            token_methods = set().union(
+                *(route.methods for route in routes if route.path == "/agents/tokens")
+            )
+            self.assertEqual(token_methods, {"GET", "POST"})
             self.assertIn("/agents/tokens/revoke", route_paths)
             self.assertIn("/agents/tokens/rotate", route_paths)
             self.assertIn("/agents/messages/claim", route_paths)
@@ -2858,8 +2860,8 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "buyer_token": buyer_token,
                 },
             )
-            self.assertEqual(status, 409)
-            self.assertIn("Conversation CONV-0001 is closed", buyer_message["error"])
+            self.assertEqual(status, 403)
+            self.assertIn("revoked authorization token", buyer_message["error"])
 
             status, second_close = self.request(
                 app,
@@ -3861,8 +3863,13 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "merchant_token": merchant_token,
                 },
             )
-            self.assertEqual(status, 403)
-            self.assertIn("cannot act", spoofed_review["error"])
+            self.assertEqual(status, 200)
+            self.assertEqual(spoofed_review["review"]["reason"], "spoofed")
+            with db_session(db_file) as conn:
+                event = conn.execute(
+                    "select actor from audit_events where event = 'conversation_routed' order by id desc limit 1"
+                ).fetchone()
+            self.assertEqual(event["actor"], "seller-a")
 
     def test_api_tokens_are_stored_as_hashes_and_returned_only_once(self):
         with tempfile.TemporaryDirectory() as tmp:

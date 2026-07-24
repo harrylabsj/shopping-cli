@@ -24,27 +24,33 @@ from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
+from shopping_cli.api.limits import max_request_body_bytes, validate_payload
 from shopping_cli.core.errors import (
     AuthError,
     ConflictError,
     IdempotencyConflict,
+    MethodNotAllowedError,
     NotFoundError,
     PermissionDenied,
     RateLimitError,
+    PayloadTooLargeError,
     ShoppingCliError,
     ValidationError,
 )
 from shopping_cli.services import tokens as token_service
 
 try:  # pragma: no cover - exercised when optional dependency is installed
-    from fastapi import FastAPI, Header
+    from fastapi import FastAPI, Header, Request
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fastapi
-    FastAPI = None  # type: ignore[assignment]
+    FastAPI = None  # type: ignore[misc,assignment]
     Header = None  # type: ignore[assignment]
-    JSONResponse = None  # type: ignore[assignment]
-    RequestValidationError = None  # type: ignore[assignment]
+    JSONResponse = None  # type: ignore[misc,assignment]
+    RequestValidationError = None  # type: ignore[misc,assignment]
+    Request = None  # type: ignore[misc,assignment]
+    StarletteHTTPException = None  # type: ignore[misc,assignment]
 
 
 Handler = Callable[..., dict[str, Any]]
@@ -55,6 +61,69 @@ class RouteEntry:
     methods: set[str]
     path_template: str
     handler: Handler
+
+
+class _RequestBodyLimitMiddleware:
+    """Reject oversized HTTP bodies before FastAPI attempts to parse them."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        maximum = max_request_body_bytes()
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        try:
+            content_length = int(headers.get(b"content-length", b"0") or b"0")
+        except ValueError:
+            content_length = 0
+        if content_length > maximum:
+            await self._send_too_large(send)
+            return
+
+        messages: list[dict[str, Any]] = []
+        received = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") != "http.request":
+                break
+            received += len(message.get("body", b""))
+            if received > maximum:
+                await self._send_too_large(send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        message_index = 0
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal message_index
+            if message_index < len(messages):
+                message = messages[message_index]
+                message_index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _send_too_large(send: Any) -> None:
+        body = json.dumps({"ok": False, "error": "request body is too large"}).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 def _json_error_response(status_code: int, error: str) -> Any:
@@ -102,8 +171,24 @@ def _update_merchant(db_path: str | Path, merchant_id: str, payload: dict[str, A
     return catalog_handlers.update_merchant(db_path, merchant_id, payload, _require_merchant_token)
 
 
+def _rotate_merchant_token(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.rotate_merchant_token(db_path, merchant_id, payload, api_auth.require_admin_token)
+
+
+def _revoke_merchant_tokens(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.revoke_merchant_tokens(db_path, merchant_id, payload, api_auth.require_admin_token)
+
+
 def _get_merchant(db_path: str | Path, merchant_id: str) -> dict[str, Any]:
     return catalog_handlers.get_merchant(db_path, merchant_id)
+
+
+def _get_merchant_private_config(
+    db_path: str | Path,
+    merchant_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return catalog_handlers.get_merchant_private_config(db_path, merchant_id, payload)
 
 
 def _list_merchants(db_path: str | Path, query: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -340,6 +425,9 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
     RouteEntry({"GET"}, "/merchants", lambda db_path, payload, query, **kw: _list_merchants(db_path, query)),
     RouteEntry({"POST"}, "/merchants", lambda db_path, payload, query, **kw: _create_merchant(db_path, payload)),
     RouteEntry({"GET"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _get_merchant(db_path, merchant_id)),
+    RouteEntry({"GET"}, "/merchants/{merchant_id}/private-config", lambda db_path, payload, query, merchant_id: _get_merchant_private_config(db_path, merchant_id, payload)),
+    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/rotate", lambda db_path, payload, query, merchant_id: _rotate_merchant_token(db_path, merchant_id, payload)),
+    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/revoke", lambda db_path, payload, query, merchant_id: _revoke_merchant_tokens(db_path, merchant_id, payload)),
     RouteEntry({"PATCH"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _update_merchant(db_path, merchant_id, payload)),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/conversations", _merchant_conversation_list),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/human-review", _merchant_human_review_list),
@@ -408,6 +496,18 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
 )
 
 
+def resolve_route(method: str, path: str) -> tuple[bool, bool]:
+    """Return (path_known, method_allowed) without parsing the request body."""
+    path_known = False
+    for route in _ROUTE_TABLE:
+        if _match_path(route.path_template, path) is None:
+            continue
+        path_known = True
+        if method.upper() in route.methods:
+            return True, True
+    return path_known, False
+
+
 def handle_request(
     db_path: str | Path,
     method: str,
@@ -418,12 +518,17 @@ def handle_request(
     payload = payload or {}
     query = query or {}
     try:
+        validate_payload(payload)
+        path_matched = False
         for route in _ROUTE_TABLE:
-            if method.upper() not in route.methods:
-                continue
             path_params = _match_path(route.path_template, path)
-            if path_params is not None:
+            if path_params is None:
+                continue
+            path_matched = True
+            if method.upper() in route.methods:
                 return 200, route.handler(db_path, payload, query, **path_params)
+        if path_matched:
+            raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
         raise NotFoundError(f"No route for {method} {path}")
     except AuthError as exc:
         return 403, {"ok": False, "error": str(exc)}
@@ -437,6 +542,10 @@ def handle_request(
         return 404, {"ok": False, "error": str(exc)}
     except RateLimitError as exc:
         return 429, {"ok": False, "error": str(exc)}
+    except PayloadTooLargeError as exc:
+        return 413, {"ok": False, "error": str(exc)}
+    except MethodNotAllowedError as exc:
+        return 405, {"ok": False, "error": str(exc)}
     except ValidationError as exc:
         return 400, {"ok": False, "error": str(exc)}
     except ShoppingCliError as exc:
@@ -458,6 +567,9 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     )
     app.state.db_path = str(db_path)
     app.state.fastapi_available = True
+
+    if hasattr(app, "add_middleware"):
+        app.add_middleware(_RequestBodyLimitMiddleware)
 
     @app.exception_handler(AuthError)
     def auth_error_handler(_request: Any, exc: AuthError) -> Any:
@@ -483,6 +595,14 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     def rate_limit_error_handler(_request: Any, exc: RateLimitError) -> Any:
         return _json_error_response(429, str(exc))
 
+    @app.exception_handler(PayloadTooLargeError)
+    def payload_too_large_handler(_request: Any, exc: PayloadTooLargeError) -> Any:
+        return _json_error_response(413, str(exc))
+
+    @app.exception_handler(MethodNotAllowedError)
+    def method_not_allowed_handler(_request: Any, exc: MethodNotAllowedError) -> Any:
+        return _json_error_response(405, str(exc))
+
     @app.exception_handler(ValidationError)
     def validation_error_handler(_request: Any, exc: ValidationError) -> Any:
         return _json_error_response(400, str(exc))
@@ -496,6 +616,17 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         def request_validation_error_handler(_request: Any, exc: Exception) -> Any:
             return _json_error_response(400, str(exc))
 
+    if StarletteHTTPException is not None:  # pragma: no cover - exercised with fastapi installed
+        @app.exception_handler(StarletteHTTPException)
+        def http_exception_handler(_request: Any, exc: Any) -> Any:
+            status = int(exc.status_code)
+            message = "not found" if status == 404 else "method not allowed" if status == 405 else str(exc.detail)
+            return _json_error_response(status, message)
+
+    @app.exception_handler(Exception)
+    def unexpected_error_handler(_request: Any, _exc: Exception) -> Any:
+        return _json_error_response(500, "internal server error")
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return _health(db_path)
@@ -505,12 +636,54 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         return _list_merchants(db_path, {"limit": limit, "offset": offset})
 
     @app.post("/merchants")
-    def create_merchant(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
-        return _create_merchant(db_path, api_auth.payload_with_auth(payload, authorization))
+    def create_merchant(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _create_merchant(
+            db_path,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
 
     @app.get("/merchants/{merchant_id}")
     def get_merchant(merchant_id: str) -> dict[str, Any]:
         return _get_merchant(db_path, merchant_id)
+
+    @app.get("/merchants/{merchant_id}/private-config")
+    def get_merchant_private_config(
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_merchant_private_config(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth({}, authorization),
+        )
+
+    @app.post("/merchants/{merchant_id}/token/rotate")
+    def rotate_merchant_token(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _rotate_merchant_token(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth(payload, authorization),
+        )
+
+    @app.post("/merchants/{merchant_id}/token/revoke")
+    def revoke_merchant_tokens(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _revoke_merchant_tokens(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth(payload, authorization),
+        )
 
     @app.patch("/merchants/{merchant_id}")
     def update_merchant(
