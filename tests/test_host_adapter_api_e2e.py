@@ -172,6 +172,7 @@ class HostAdapterAPIE2ETest(unittest.TestCase):
                 opener=self.opener_for(app),
                 host="openclaw",
                 session_id="openclaw-session-1",
+                allow_insecure_http=True,
             )
             result = merchant_agent.process_once_with_tools(tools, "seller-a")
             self.assertEqual(result["replied"][0]["conversation_id"], "CONV-0001")

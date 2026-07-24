@@ -83,11 +83,10 @@ def get_human_review(db_path: str | Path, review_id: str | int, payload: dict[st
 def create_human_review(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
         conversation = conversation_summary(conn, conversation_id)
-        actor = str(payload.get("source_id") or token_service.default_merchant_agent_id(conversation["merchant_id"]))
-        if actor.startswith("shopping-cli-merchant-agent:"):
-            token_service.require_agent_or_merchant_token(conn, conversation["merchant_id"], actor, _payload_token(payload))
-        else:
-            token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+        token_row = token_service.require_api_token(conn, _payload_token(payload), "merchant or agent token required")
+        if token_row["merchant_id"] != conversation["merchant_id"] or token_row["role"] not in {"merchant", "agent"}:
+            raise AuthError("invalid merchant or agent token")
+        actor = str(token_row["agent_id"] or token_row["merchant_id"])
         review = add_flag(
             conn,
             conversation_id,
@@ -128,7 +127,8 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
             raise ConflictError(f"Human review already resolved: {review_id}")
         conversation_id = row["conversation_id"]
         conversation = conversation_summary(conn, conversation_id)
-        token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+        token_row = token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+        actor = str(token_row["agent_id"] or token_row["merchant_id"]) if token_row is not None else conversation["merchant_id"]
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()
@@ -136,7 +136,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
             conn,
             int(review_id),
             action=action,
-            sender=sender,
+            sender=actor,
             now=now,
         )
         if rowcount != 1:
@@ -156,7 +156,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 text=str(payload["text"]),
                 structured_payload={
                     "resolution": action,
-                    "source_id": payload.get("source_id") or sender,
+                    "source_id": actor,
                     "review_id": int(review_id),
                     "reason": status_reason,
                     "resolved_reason": row["reason"],
@@ -169,13 +169,13 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 conversation_id,
                 status=status,
                 next_actor=next_actor,
-                sender=sender,
+                sender=actor,
                 now=now,
             )
         append_audit_event(
             conn,
             conversation_id,
-            payload.get("source_id") or sender,
+            actor,
             "human_review_resolved",
             {
                 "review_id": int(review_id),
@@ -189,7 +189,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
             conversation_service.append_conversation_closed_audit(
                 conn,
                 conversation_id,
-                payload.get("source_id") or sender,
+                actor,
                 next_actor,
                 {"resolution": action, "review_id": int(review_id), "source": "human_review"},
             )
@@ -209,7 +209,8 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
     status = "closed" if action == "close" else "waiting_buyer"
     with db_session(db_path) as conn:
         conversation = conversation_summary(conn, conversation_id)
-        token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+        token_row = token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+        actor = str(token_row["agent_id"] or token_row["merchant_id"]) if token_row is not None else conversation["merchant_id"]
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()
@@ -217,7 +218,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
             conn,
             conversation_id,
             action=action,
-            sender=sender,
+            sender=actor,
             now=now,
         )
         if rowcount == 0:
@@ -230,7 +231,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 sender=sender,
                 intent=str(payload.get("intent") or "support"),
                 text=str(payload["text"]),
-                structured_payload={"resolution": action, "source_id": payload.get("source_id") or ""},
+                structured_payload={"resolution": action, "source_id": actor},
                 status=status,
             )
         else:
@@ -239,13 +240,13 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 conversation_id,
                 status=status,
                 next_actor=next_actor,
-                sender=sender,
+                sender=actor,
                 now=now,
             )
         append_audit_event(
             conn,
             conversation_id,
-            payload.get("source_id") or sender,
+            actor,
             "human_review_resolved",
             {"resolution": action, "status": status, "next_actor": next_actor},
         )
@@ -253,7 +254,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
             conversation_service.append_conversation_closed_audit(
                 conn,
                 conversation_id,
-                payload.get("source_id") or sender,
+                actor,
                 next_actor,
                 {"resolution": action, "source": "human_review"},
             )

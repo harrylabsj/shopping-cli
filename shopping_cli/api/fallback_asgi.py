@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qs
 
 from shopping_cli.api import auth as api_auth
+from shopping_cli.api.limits import max_request_body_bytes
 
 
 HandleRequest = Callable[[str | Path, str, str, dict[str, Any] | None, dict[str, Any] | None], tuple[int, dict[str, Any]]]
 RouteProvider = Callable[[], list[Any]]
+RouteResolver = Callable[[str, str], tuple[bool, bool]]
 
 
 class MarketplaceASGIApp:
@@ -23,10 +26,12 @@ class MarketplaceASGIApp:
         db_path: str | Path,
         handle_request_fn: HandleRequest | None = None,
         route_provider: RouteProvider | None = None,
+        route_resolver: RouteResolver | None = None,
     ):
         self.state = SimpleNamespace(db_path=str(db_path), fastapi_available=False)
         self._handle_request = handle_request_fn
         self._route_provider = route_provider
+        self._route_resolver = route_resolver
         self.routes = self._routes()
 
     def _routes(self) -> list[Any]:
@@ -44,15 +49,52 @@ class MarketplaceASGIApp:
             self._handle_request = handle_request
         return self._handle_request
 
+    def _resolver(self) -> RouteResolver:
+        if self._route_resolver is None:
+            if self._handle_request is not None:
+                # Custom handlers own their routing; stay permissive for them.
+                return lambda _method, _path: (True, True)
+            from shopping_cli.api.app import resolve_route
+
+            self._route_resolver = resolve_route
+        return self._route_resolver
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
             await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"application/json")]})
             await send({"type": "http.response.body", "body": b'{"ok":false,"error":"unsupported scope"}'})
             return
+        headers = {
+            key.decode("latin1").lower(): value.decode("latin1")
+            for key, value in scope.get("headers", [])
+        }
+        maximum = max_request_body_bytes()
+        try:
+            content_length = int(headers.get("content-length", "0") or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > maximum:
+            await self._send_json(send, 413, {"ok": False, "error": "request body is too large"})
+            return
+        method = str(scope.get("method") or "GET").upper()
+        path = str(scope.get("path") or "/")
+        path_known, method_allowed = self._resolver()(method, path)
+        if not path_known:
+            await self._send_json(send, 404, {"ok": False, "error": f"No route for {method} {path}"})
+            return
+        if not method_allowed:
+            await self._send_json(send, 405, {"ok": False, "error": f"Method not allowed for {method} {path}"})
+            return
         chunks: list[bytes] = []
+        body_size = 0
         while True:
             message = await receive()
-            chunks.append(message.get("body", b""))
+            chunk = message.get("body", b"")
+            body_size += len(chunk)
+            if body_size > maximum:
+                await self._send_json(send, 413, {"ok": False, "error": "request body is too large"})
+                return
+            chunks.append(chunk)
             if not message.get("more_body", False):
                 break
         try:
@@ -76,10 +118,6 @@ class MarketplaceASGIApp:
             await send({"type": "http.response.body", "body": body})
             return
         payload = decoded_payload
-        headers = {
-            key.decode("latin1").lower(): value.decode("latin1")
-            for key, value in scope.get("headers", [])
-        }
         payload = api_auth.payload_with_auth(
             payload,
             authorization=headers.get("authorization", ""),
@@ -90,13 +128,18 @@ class MarketplaceASGIApp:
         except UnicodeDecodeError:
             raw_query = ""
         query = parse_qs(raw_query, keep_blank_values=True)
-        status, response = self._handler()(
+        status, response = await asyncio.to_thread(
+            self._handler(),
             self.state.db_path,
-            method=str(scope.get("method") or "GET").upper(),
-            path=str(scope.get("path") or "/"),
-            payload=payload,
-            query={key: values[-1] if values else "" for key, values in query.items()},
+            method,
+            path,
+            payload,
+            {key: values[-1] if values else "" for key, values in query.items()},
         )
+        await self._send_json(send, status, response)
+
+    @staticmethod
+    async def _send_json(send: Any, status: int, response: dict[str, Any]) -> None:
         body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
         await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": body})
