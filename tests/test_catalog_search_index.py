@@ -72,6 +72,52 @@ class CatalogSearchIndexTest(unittest.TestCase):
                 self.assertTrue(rebuilt_stats["healthy"])
                 self.assertEqual([item["sku"] for item in catalog.search_products(conn, query="matcha")], ["tea-a"])
 
+    def test_cjk_fts_pagination_is_stable_and_non_overlapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                if not catalog.product_search_index_available(conn):
+                    self.skipTest("SQLite FTS5 is unavailable")
+
+                catalog.create_merchant(conn, merchant_id="seller-a", name="西湖茶庄", city="杭州", tags="tea")
+                titles = [
+                    "西湖龙井礼盒装",
+                    "明前龙井嫩芽罐装",
+                    "龙井茶礼家庭装",
+                    "狮峰龙井精品礼盒",
+                    "手工龙井伴手礼",
+                    "龙井桂花组合装",
+                ]
+                for index, title in enumerate(titles):
+                    catalog.create_product(
+                        conn,
+                        merchant_id="seller-a",
+                        sku=f"tea-{index:02d}",
+                        title=title,
+                        price=88 + index,
+                        stock=5,
+                        tags="龙井,茶叶",
+                    )
+
+                for query in ("龙井", "今天想买西湖龙井礼盒装送人"):
+                    with self.subTest(query=query):
+                        full = [item["sku"] for item in catalog.search_products(conn, query=query, limit=50)]
+                        self.assertEqual(len(full), len(titles))
+
+                        def page(offset: int) -> list[str]:
+                            return [
+                                item["sku"]
+                                for item in catalog.search_products(conn, query=query, limit=2, offset=offset)
+                            ]
+
+                        pages = [page(offset) for offset in (0, 2, 4, 6)]
+                        self.assertEqual(pages[3], [])
+                        merged = pages[0] + pages[1] + pages[2]
+                        self.assertEqual(len(merged), len(set(merged)))
+                        self.assertEqual(merged, full)
+                        repeated = [page(offset) for offset in (0, 2, 4)]
+                        self.assertEqual(repeated, pages[:3])
+
 
 if __name__ == "__main__":
     unittest.main()

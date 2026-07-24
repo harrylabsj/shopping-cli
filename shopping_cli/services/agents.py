@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
-from shopping_cli.core.errors import AuthError, NotFoundError, ValidationError
+from shopping_cli.core.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from shopping_cli.db.session import decode_json, now_iso
 from shopping_cli.services import tokens as token_service
 
@@ -163,23 +163,38 @@ def revoke_agent_token(conn: Any, merchant_id: str, *, token: Any = "", token_pr
     row = token_service.agent_token_row(conn, resolved_token)
     if row is None or row["role"] != "agent" or row["merchant_id"] != merchant_id:
         raise AuthError("invalid agent token")
-    revoked_at = row["revoked_at"] or now_iso()
     if not row["revoked_at"]:
-        conn.execute("update api_tokens set revoked_at = ? where token = ?", (revoked_at, resolved_token))
-    revoked = token_service.agent_token_row(conn, resolved_token)
-    token_service.append_agent_token_audit(
-        conn,
-        merchant_id,
-        "agent_token_revoked",
-        {"agent_id": row["agent_id"], "revoked_at": revoked_at, "token": token_service.agent_token_summary(revoked)},
-    )
+        revoked_at = now_iso()
+        updated = conn.execute(
+            "update api_tokens set revoked_at = ? where token = ? and revoked_at = ''",
+            (revoked_at, resolved_token),
+        )
+        if updated.rowcount == 1:
+            revoked = token_service.agent_token_row(conn, resolved_token)
+            token_service.append_agent_token_audit(
+                conn,
+                merchant_id,
+                "agent_token_revoked",
+                {"agent_id": row["agent_id"], "revoked_at": revoked_at, "token": token_service.agent_token_summary(revoked)},
+            )
+            return {
+                "ok": True,
+                "revoked": True,
+                "merchant_id": merchant_id,
+                "agent_id": row["agent_id"],
+                "token_role": row["role"],
+                "revoked_at": revoked_at,
+            }
+        # A concurrent transaction revoked the same token first. Fall through to
+        # the idempotent response without writing a duplicate revoke audit event.
+        row = token_service.agent_token_row(conn, resolved_token)
     return {
         "ok": True,
         "revoked": True,
         "merchant_id": merchant_id,
         "agent_id": row["agent_id"],
         "token_role": row["role"],
-        "revoked_at": revoked_at,
+        "revoked_at": row["revoked_at"],
     }
 
 
@@ -199,9 +214,15 @@ def rotate_agent_token(
     row = token_service.agent_token_row(conn, old_token)
     if row is None or row["role"] != "agent" or row["merchant_id"] != merchant_id:
         raise AuthError("invalid agent token")
-    revoked_at = row["revoked_at"] or now_iso()
-    if not row["revoked_at"]:
-        conn.execute("update api_tokens set revoked_at = ? where token = ?", (revoked_at, old_token))
+    if row["revoked_at"]:
+        raise ConflictError("agent token is already revoked or rotated")
+    revoked_at = now_iso()
+    revoked = conn.execute(
+        "update api_tokens set revoked_at = ? where token = ? and revoked_at = ''",
+        (revoked_at, old_token),
+    )
+    if revoked.rowcount != 1:
+        raise ConflictError("agent token was rotated or revoked concurrently")
     new_token, expires_at = token_service.issue_agent_token(
         conn,
         merchant_id,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Any
 
 from shopping_cli import VERSION
@@ -13,7 +12,6 @@ from shopping_cli.api.app import create_app
 from shopping_cli.cli_common import (
     db_path_from_args,
     emit,
-    emit_json,
     float_value,
     non_negative_float_at_most,
     non_negative_int,
@@ -75,7 +73,7 @@ from shopping_cli.cli_conversation_commands import (
     emit_conversation_table,
 )
 from shopping_cli.cli_llm_commands import cmd_llm_run
-from shopping_cli.config import DEFAULT_DB_PATH
+from shopping_cli.config import ConfigError, DEFAULT_DB_PATH, validate_production_config
 from shopping_cli.core.catalog import require_merchant
 from shopping_cli.core.conversations import merchant_conversations
 from shopping_cli.core.conversations import (
@@ -86,7 +84,7 @@ from shopping_cli.core.conversations import (
 )
 from shopping_cli.core.errors import ShoppingCliError
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
-from shopping_cli.db.session import db_session, now_iso
+from shopping_cli.db.session import db_session
 from shopping_cli.llm.runner import (
     MAX_LLM_PROVIDER_RETRIES,
     MAX_LLM_PROVIDER_RETRY_DELAY_SECONDS,
@@ -108,6 +106,7 @@ def cmd_merchant_human_review(args: argparse.Namespace) -> None:
             limit=args.limit,
             offset=args.offset,
             summary_only=False,
+            include_flags=True,
         )
     if args.format == "text":
         emit_conversation_table(conversations, f"No human-review conversations for {args.merchant}.")
@@ -116,9 +115,10 @@ def cmd_merchant_human_review(args: argparse.Namespace) -> None:
 
 
 def _review_summary(conn: Any, flag_id: int) -> dict[str, Any]:
-    row = conn.execute("select * from moderation_flags where id = ?", (flag_id,)).fetchone()
-    if row is None:
-        raise SystemExit(f"Unknown human review: {flag_id}")
+    try:
+        row = human_review_service.human_review_row(conn, flag_id, lambda value, _field: int(value))
+    except ShoppingCliError as exc:
+        raise SystemExit(str(exc)) from exc
     conversation = conversation_summary(conn, row["conversation_id"])
     return {
         "id": row["id"],
@@ -140,9 +140,12 @@ def cmd_conversation_human_review(args: argparse.Namespace) -> None:
         conversation = conversation_summary(conn, args.conversation)
         flag = add_flag(conn, args.conversation, args.reason, severity=args.severity, sku=conversation.get("sku") or "")
         next_actor = next_actor_for_status("human_required", flag["reason"])
-        conn.execute(
-            "update conversations set status = 'human_required', next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-            (next_actor, now_iso(), args.source_id or "operator", args.conversation),
+        human_review_service.update_conversation_status(
+            conn,
+            args.conversation,
+            status="human_required",
+            next_actor=next_actor,
+            sender=args.source_id or "operator",
         )
         append_audit_event(
             conn,
@@ -168,16 +171,10 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
     status = "closed" if args.action == "close" else "waiting_buyer"
     with db_session(db_path_from_args(args)) as conn:
         require_open_conversation(conn, args.conversation)
-        now = now_iso()
-        resolved = conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where conversation_id = ? and resolved_at = ''
-            """,
-            (now, args.action, args.sender, args.conversation),
+        resolved_count = human_review_service.resolve_all_conversation_reviews(
+            conn, args.conversation, action=args.action, sender=args.sender
         )
-        if resolved.rowcount == 0:
+        if resolved_count == 0:
             raise SystemExit(f"No unresolved human reviews for conversation: {args.conversation}")
         next_actor = next_actor_for_status(status)
         if args.text:
@@ -191,9 +188,12 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
                 status=status,
             )
         else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, args.sender, args.conversation),
+            human_review_service.update_conversation_status(
+                conn,
+                args.conversation,
+                status=status,
+                next_actor=next_actor,
+                sender=args.sender,
             )
         append_audit_event(
             conn,
@@ -210,11 +210,10 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
                 next_actor,
                 {"resolution": args.action, "source": "human_review"},
             )
-        rows = conn.execute("select id from moderation_flags where conversation_id = ? order by id", (args.conversation,)).fetchall()
+        rows = human_review_service.list_conversation_reviews(conn, args.conversation)
         reviews = [_review_summary(conn, row["id"]) for row in rows]
         conversation = conversation_summary(conn, args.conversation)
     if args.format == "text":
-        resolved_count = resolved.rowcount if resolved.rowcount >= 0 else 0
         print(f"Human review resolved: {conversation['id']}")
         print(f"Resolution: {args.action}")
         print(f"Resolved reviews: {resolved_count}")
@@ -225,19 +224,10 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
 
 
 def cmd_human_review_queue(args: argparse.Namespace) -> None:
-    sql = """
-        select f.id from moderation_flags f
-        join conversations c on c.id = f.conversation_id
-        where f.resolved_at = ''
-    """
-    values: list[Any] = []
-    if args.merchant:
-        sql += " and c.merchant_id = ?"
-        values.append(args.merchant)
-    sql += " order by f.created_at desc, f.id desc limit ? offset ?"
-    values.extend([args.limit, args.offset])
     with db_session(db_path_from_args(args)) as conn:
-        rows = conn.execute(sql, values).fetchall()
+        rows = human_review_service.list_unresolved_reviews(
+            conn, args.merchant or "", limit=args.limit, offset=args.offset
+        )
         reviews = [_review_summary(conn, row["id"]) for row in rows]
     if args.format == "text":
         if not reviews:
@@ -282,32 +272,22 @@ def cmd_human_review_show(args: argparse.Namespace) -> None:
 def cmd_human_review_resolve(args: argparse.Namespace) -> None:
     review_id = int(args.review)
     with db_session(db_path_from_args(args)) as conn:
-        row = conn.execute("select * from moderation_flags where id = ?", (review_id,)).fetchone()
-        if row is None:
-            raise SystemExit(f"Unknown human review: {review_id}")
+        try:
+            row = human_review_service.human_review_row(conn, review_id, lambda value, _field: int(value))
+        except ShoppingCliError as exc:
+            raise SystemExit(str(exc)) from exc
         if row["resolved_at"]:
             raise SystemExit(f"Human review already resolved: {review_id}")
         conversation_id = row["conversation_id"]
         require_open_conversation(conn, conversation_id)
-        now = now_iso()
-        conn.execute(
-            """
-            update moderation_flags
-            set resolved_at = ?, resolution = ?, resolved_by = ?
-            where id = ? and resolved_at = ''
-            """,
-            (now, args.action, args.sender, review_id),
+        resolved_count = human_review_service.resolve_review(
+            conn, review_id, action=args.action, sender=args.sender
         )
-        remaining_rows = conn.execute(
-            """
-            select reason from moderation_flags
-            where conversation_id = ? and resolved_at = ''
-            order by case when reason = 'suspicious_content' then 0 else 1 end, id
-            """,
-            (conversation_id,),
-        ).fetchall()
-        remaining = len(remaining_rows)
-        remaining_reason = str(remaining_rows[0]["reason"] or "") if remaining_rows else ""
+        if resolved_count != 1:
+            raise SystemExit(f"Human review already resolved: {review_id}")
+        remaining_reasons = human_review_service.remaining_unresolved_reviews(conn, conversation_id)
+        remaining = len(remaining_reasons)
+        remaining_reason = remaining_reasons[0] if remaining_reasons else ""
         status = "human_required" if remaining else ("closed" if args.action == "close" else "waiting_buyer")
         status_reason = remaining_reason if status == "human_required" else str(row["reason"] or "")
         next_actor = next_actor_for_status(status, status_reason if status == "human_required" else "")
@@ -328,9 +308,12 @@ def cmd_human_review_resolve(args: argparse.Namespace) -> None:
                 status=status,
             )
         else:
-            conn.execute(
-                "update conversations set status = ?, next_actor = ?, updated_at = ?, last_sender = ? where id = ?",
-                (status, next_actor, now, args.sender, conversation_id),
+            human_review_service.update_conversation_status(
+                conn,
+                conversation_id,
+                status=status,
+                next_actor=next_actor,
+                sender=args.sender,
             )
         append_audit_event(
             conn,
@@ -354,7 +337,7 @@ def cmd_human_review_resolve(args: argparse.Namespace) -> None:
                 {"resolution": args.action, "review_id": review_id, "source": "human_review"},
             )
         review = _review_summary(conn, review_id)
-        rows = conn.execute("select id from moderation_flags where conversation_id = ? order by id", (conversation_id,)).fetchall()
+        rows = human_review_service.list_conversation_reviews(conn, conversation_id)
         reviews = [_review_summary(conn, row["id"]) for row in rows]
         conversation = conversation_summary(conn, conversation_id)
     if args.format == "text":
@@ -469,8 +452,8 @@ def cmd_api_routes(args: argparse.Namespace) -> None:
     ]
     if args.format == "text":
         for route in route_details:
-            methods = route["methods"] or ["-"]
-            for method in methods:
+            rendered_methods = route["methods"] or ["-"]
+            for method in rendered_methods:
                 print(f"{method:<6} {route['path']}")
         return
     emit(
@@ -486,6 +469,10 @@ def cmd_api_routes(args: argparse.Namespace) -> None:
 
 
 def cmd_api_serve(args: argparse.Namespace) -> None:
+    try:
+        validate_production_config()
+    except ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
     try:
         import uvicorn
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency environment specific

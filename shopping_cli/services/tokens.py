@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -10,6 +11,9 @@ from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 from shopping_cli.db.session import now_iso
+
+DEFAULT_BUYER_TOKEN_TTL_SECONDS = 86400
+DEFAULT_MERCHANT_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def default_merchant_agent_id(merchant_id: str) -> str:
@@ -123,22 +127,23 @@ def require_api_token(conn: Any, token: Any, missing_error: str = "authorization
     return row
 
 
-def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> None:
+def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
     row = require_api_token(conn, token, "merchant token required")
     if row is None or row["role"] != "merchant" or row["merchant_id"] != merchant_id:
         raise AuthError("invalid merchant token")
+    return row
 
 
-def require_agent_or_merchant_token(conn: Any, merchant_id: str, agent_id: str, token: Any) -> None:
+def require_agent_or_merchant_token(conn: Any, merchant_id: str, agent_id: str, token: Any) -> Any:
     if agent_id != default_merchant_agent_id(merchant_id):
         raise AuthError(f"Agent {agent_id} cannot act for merchant {merchant_id}")
     row = require_api_token(conn, token, "agent or merchant token required")
     if row is None or row["merchant_id"] != merchant_id:
         raise AuthError("invalid agent or merchant token")
     if row["role"] == "merchant":
-        return
+        return row
     if row["role"] == "agent" and row["agent_id"] == agent_id:
-        return
+        return row
     raise AuthError("invalid agent or merchant token")
 
 
@@ -175,12 +180,12 @@ def require_buyer_read_token(conn: Any, buyer_id: str, token: Any) -> Any:
     raise AuthError("invalid buyer conversation read token")
 
 
-def require_merchant_read_token(conn: Any, merchant_id: str, token: Any) -> None:
+def require_merchant_read_token(conn: Any, merchant_id: str, token: Any) -> Any:
     row = require_api_token(conn, token, "merchant conversation read token required")
     if row["role"] == "merchant" and row["merchant_id"] == merchant_id:
-        return
+        return row
     if row["role"] == "agent" and row["merchant_id"] == merchant_id:
-        return
+        return row
     raise AuthError("invalid merchant conversation read token")
 
 
@@ -190,15 +195,62 @@ def append_agent_token_audit(conn: Any, merchant_id: str, event: str, details: d
 
 def issue_merchant_token(conn: Any, merchant_id: str) -> str:
     token = f"shopping_merchant_{secrets.token_urlsafe(24)}"
+    store_merchant_token(conn, token, merchant_id)
+    return token
+
+
+def store_merchant_token(conn: Any, token: str, merchant_id: str, *, ignore_conflict: bool = False) -> None:
     digest = token_digest(token)
+    try:
+        ttl_seconds = int(str(os.environ.get("SHOPPING_MERCHANT_TOKEN_TTL_SECONDS") or DEFAULT_MERCHANT_TOKEN_TTL_SECONDS))
+    except ValueError:
+        ttl_seconds = DEFAULT_MERCHANT_TOKEN_TTL_SECONDS
+    ttl_seconds = min(max(ttl_seconds, 3600), 365 * 24 * 60 * 60)
+    expires_at = (datetime.now() + timedelta(seconds=ttl_seconds)).replace(microsecond=0).isoformat()
+    insert = "insert or ignore" if ignore_conflict else "insert"
+    conn.execute(
+        f"""
+        {insert} into api_tokens(token, token_hash, token_prefix, token_suffix, role, merchant_id, buyer_id, agent_id, expires_at, created_at)
+        values (?, ?, ?, ?, 'merchant', ?, '', '', ?, ?)
+        """,
+        (digest, digest, token_prefix(token), token_suffix(token), merchant_id, expires_at, now_iso()),
+    )
+
+
+def ensure_merchant_token(conn: Any, token: str, merchant_id: str) -> str:
+    store_merchant_token(conn, token, merchant_id, ignore_conflict=True)
+    return token
+
+
+def rotate_merchant_token(conn: Any, merchant_id: str, *, actor: str = "admin") -> str:
+    revoked_at = now_iso()
     conn.execute(
         """
-        insert into api_tokens(token, token_hash, token_prefix, token_suffix, role, merchant_id, buyer_id, agent_id, created_at)
-        values (?, ?, ?, ?, 'merchant', ?, '', '', ?)
+        update api_tokens set revoked_at = ?
+        where merchant_id = ? and role = 'merchant' and revoked_at = ''
         """,
-        (digest, digest, token_prefix(token), token_suffix(token), merchant_id, now_iso()),
+        (revoked_at, merchant_id),
+    )
+    token = issue_merchant_token(conn, merchant_id)
+    append_audit_event(
+        conn,
+        "",
+        actor,
+        "merchant_token_rotated",
+        {"merchant_id": merchant_id, "revoked_at": revoked_at, "token_prefix": token_prefix(token)},
     )
     return token
+
+
+def revoke_merchant_tokens(conn: Any, merchant_id: str, *, actor: str = "admin") -> int:
+    revoked_at = now_iso()
+    cursor = conn.execute(
+        "update api_tokens set revoked_at = ? where merchant_id = ? and role = 'merchant' and revoked_at = ''",
+        (revoked_at, merchant_id),
+    )
+    count = int(cursor.rowcount or 0)
+    append_audit_event(conn, "", actor, "merchant_tokens_revoked", {"merchant_id": merchant_id, "revoked_count": count})
+    return count
 
 
 def issue_agent_token(conn: Any, merchant_id: str, agent_id: str, ttl_seconds: Any = None, positive_whole_seconds: Any = None) -> tuple[str, str]:
@@ -236,14 +288,31 @@ def store_buyer_token(
     ignore_conflict: bool = False,
 ) -> None:
     digest = token_digest(token)
+    try:
+        ttl_seconds = int(str(os.environ.get("SHOPPING_BUYER_TOKEN_TTL_SECONDS") or DEFAULT_BUYER_TOKEN_TTL_SECONDS))
+    except ValueError:
+        ttl_seconds = DEFAULT_BUYER_TOKEN_TTL_SECONDS
+    ttl_seconds = min(max(ttl_seconds, 60), 30 * 24 * 60 * 60)
+    expires_at = (datetime.now() + timedelta(seconds=ttl_seconds)).replace(microsecond=0).isoformat()
     insert = "insert or ignore" if ignore_conflict else "insert"
     conn.execute(
         f"""
         {insert} into api_tokens(
             token, token_hash, token_prefix, token_suffix, role,
-            merchant_id, buyer_id, agent_id, conversation_id, created_at
+            merchant_id, buyer_id, agent_id, conversation_id, expires_at, created_at
         )
-        values (?, ?, ?, ?, 'buyer', '', ?, '', ?, ?)
+        values (?, ?, ?, ?, 'buyer', '', ?, '', ?, ?, ?)
         """,
-        (digest, digest, token_prefix(token), token_suffix(token), buyer_id, conversation_id, now_iso()),
+        (digest, digest, token_prefix(token), token_suffix(token), buyer_id, conversation_id, expires_at, now_iso()),
     )
+
+
+def revoke_buyer_tokens_for_conversation(conn: Any, conversation_id: str) -> int:
+    cursor = conn.execute(
+        """
+        update api_tokens set revoked_at = ?
+        where role = 'buyer' and conversation_id = ? and revoked_at = ''
+        """,
+        (now_iso(), conversation_id),
+    )
+    return int(cursor.rowcount or 0)

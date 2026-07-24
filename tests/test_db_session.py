@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import threading
@@ -82,7 +83,7 @@ class DbSessionTest(unittest.TestCase):
             self.assertEqual(calls, [])
 
             with closing(sqlite3.connect(db_file)) as conn:
-                conn.execute(f"pragma user_version = 0")
+                conn.execute("pragma user_version = 0")
                 conn.commit()
 
             with patch.object(migrations_module, "MIGRATIONS", (fake_migration,)):
@@ -189,6 +190,128 @@ class DbSessionTest(unittest.TestCase):
             self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
             self.assertEqual(package_version["value"], VERSION)
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
+
+    def test_migration_v9_dedupes_open_reuse_key_and_installs_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "legacy-v8.sqlite"
+            with db_session(db_file):
+                pass
+
+            reuse_key = token_digest("alice\nseller-a\n")
+            with closing(sqlite3.connect(db_file)) as raw:
+                raw.execute("drop index idx_conversations_unique_open_key")
+                raw.execute(
+                    """
+                    insert into merchants(id, name, created_at, updated_at)
+                    values ('seller-a', 'Seller A', '2025-01-01T00:00:00', '2025-01-01T00:00:00')
+                    """
+                )
+                raw.executemany(
+                    """
+                    insert into conversations(
+                        id, buyer_id, merchant_id, sku, reuse_key, status, next_actor,
+                        created_at, updated_at, last_sender
+                    )
+                    values (?, 'alice', 'seller-a', '', ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        # Loser: older duplicate open row sharing the reuse key.
+                        ("CONV-1001", reuse_key, "waiting_merchant", "merchant_agent", "2026-01-01T00:00:00", "2026-01-01T00:00:00", "buyer"),
+                        # Winner: newest non-closed row, matching ensure_conversation's reuse order.
+                        ("CONV-1002", reuse_key, "open", "buyer", "2026-01-02T00:00:00", "2026-01-02T00:00:00", "buyer"),
+                        # Already-closed duplicates are outside the index predicate and stay untouched.
+                        ("CONV-1003", reuse_key, "closed", "", "2025-12-31T00:00:00", "2025-12-31T00:00:00", "merchant"),
+                        # Empty reuse_key rows are explicit independent conversations and stay open.
+                        ("CONV-1004", "", "open", "buyer", "2026-01-03T00:00:00", "2026-01-03T00:00:00", "buyer"),
+                    ],
+                )
+                raw.execute(
+                    """
+                    insert into messages(conversation_id, sender, intent, text, structured_payload_json, created_at)
+                    values ('CONV-1001', 'buyer', 'ask_product', 'legacy message', '{}', '2026-01-01T00:00:00')
+                    """
+                )
+                raw.execute(
+                    """
+                    insert into moderation_flags(conversation_id, sku, reason, severity, created_at)
+                    values ('CONV-1001', '', 'manual_confirmation', 'review', '2026-01-01T00:00:00')
+                    """
+                )
+                raw.execute(
+                    """
+                    insert into audit_events(conversation_id, actor, event, details_json, created_at)
+                    values ('CONV-1001', 'system', 'conversation_created', '{}', '2026-01-01T00:00:00')
+                    """
+                )
+                raw.execute("pragma user_version = 8")
+                raw.commit()
+
+            with db_session(db_file) as conn:
+                rows = {
+                    row["id"]: row
+                    for row in conn.execute(
+                        "select id, status, next_actor, last_sender from conversations"
+                    ).fetchall()
+                }
+                self.assertEqual(rows["CONV-1002"]["status"], "open")
+                self.assertEqual(rows["CONV-1002"]["last_sender"], "buyer")
+                self.assertEqual(rows["CONV-1001"]["status"], "closed")
+                self.assertEqual(rows["CONV-1001"]["next_actor"], "")
+                self.assertEqual(rows["CONV-1001"]["last_sender"], "system")
+                self.assertEqual(rows["CONV-1003"]["status"], "closed")
+                self.assertEqual(rows["CONV-1003"]["last_sender"], "merchant")
+                self.assertEqual(rows["CONV-1004"]["status"], "open")
+
+                messages = conn.execute(
+                    "select text from messages where conversation_id = 'CONV-1001'"
+                ).fetchall()
+                self.assertEqual([row["text"] for row in messages], ["legacy message"])
+                flags = conn.execute(
+                    "select resolved_at from moderation_flags where conversation_id = 'CONV-1001'"
+                ).fetchall()
+                self.assertEqual(len(flags), 1)
+                audits = conn.execute(
+                    "select event, details_json from audit_events where conversation_id = 'CONV-1001' order by id"
+                ).fetchall()
+                self.assertEqual([row["event"] for row in audits], ["conversation_created", "conversation_closed"])
+                details = json.loads(audits[1]["details_json"])
+                self.assertEqual(details["reason"], "duplicate_open_reuse_key")
+                self.assertEqual(details["winner_conversation_id"], "CONV-1002")
+
+                index = conn.execute(
+                    """
+                    select name from sqlite_master
+                    where type = 'index' and name = 'idx_conversations_unique_open_key'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(index)
+                schema_version = conn.execute("select value from meta where key = 'schema_version'").fetchone()
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+
+            self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 9)
+
+            # The installed index enforces uniqueness for new open reuse rows.
+            with self.assertRaises(sqlite3.IntegrityError) as raised:
+                with db_session(db_file) as conn:
+                    conn.execute(
+                        """
+                        insert into conversations(
+                            id, buyer_id, merchant_id, sku, reuse_key, status, next_actor,
+                            created_at, updated_at, last_sender
+                        )
+                        values ('CONV-1005', 'alice', 'seller-a', '', ?, 'open', 'buyer',
+                                '2026-01-04T00:00:00', '2026-01-04T00:00:00', 'buyer')
+                        """,
+                        (reuse_key,),
+                    )
+            self.assertIn("unique", str(raised.exception).lower())
+
+            # Reopening the migrated database is a no-op fast path.
+            with db_session(db_file) as conn:
+                again = conn.execute("pragma user_version").fetchone()[0]
+            self.assertEqual(again, CURRENT_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

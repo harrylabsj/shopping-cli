@@ -122,7 +122,7 @@ class ProjectShapeTest(unittest.TestCase):
             {
                 "SHOPPING_DEPLOYMENT_PROFILE": "production",
                 "SHOPPING_ADMIN_TOKEN": "replace-with-a-long-random-secret",
-                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "buyer-token",
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "b" * 40,
             },
             clear=False,
         ):
@@ -131,24 +131,38 @@ class ProjectShapeTest(unittest.TestCase):
 
         self.assertIn("SHOPPING_ADMIN_TOKEN", str(raised.exception))
 
-    def test_production_preflight_requires_channel_tokens(self):
+    def test_production_preflight_allows_disabled_channel_ingress(self):
         from shopping_cli import config
 
         with patch.dict(
             "os.environ",
             {
                 "SHOPPING_DEPLOYMENT_PROFILE": "production",
-                "SHOPPING_ADMIN_TOKEN": "admin-token",
-                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "buyer-token",
+                "SHOPPING_ADMIN_TOKEN": "a" * 40,
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "b" * 40,
                 "SHOPPING_CHANNEL_TOKEN": "",
                 "SHOPPING_CHANNEL_TOKENS": "telegram:replace-with-channel-token",
+            },
+            clear=False,
+        ):
+            config.validate_production_config()
+
+    def test_production_preflight_rejects_short_shared_secrets(self):
+        from shopping_cli import config
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SHOPPING_DEPLOYMENT_PROFILE": "production",
+                "SHOPPING_ADMIN_TOKEN": "a",
+                "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "b",
             },
             clear=False,
         ):
             with self.assertRaises(config.ConfigError) as raised:
                 config.validate_production_config()
 
-        self.assertIn("SHOPPING_CHANNEL_TOKEN", str(raised.exception))
+        self.assertIn("at least 32", str(raised.exception))
 
     def test_release_metadata_versions_stay_aligned(self):
         import json

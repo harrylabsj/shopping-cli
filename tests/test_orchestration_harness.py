@@ -10,7 +10,7 @@ from shopping_cli.core.catalog import create_merchant, create_product
 from shopping_cli.core.conversations import conversation_summary, next_conversation_id
 from shopping_cli.core.harness import abandon_agent_message, abandon_stale_agent_messages, claim_agent_message, complete_agent_message, fail_agent_message
 from shopping_cli.core.tokens import token_digest
-from shopping_cli.db.session import db_session, decode_json
+from shopping_cli.db.session import db_session
 
 
 class OrchestrationHarnessTest(unittest.TestCase):

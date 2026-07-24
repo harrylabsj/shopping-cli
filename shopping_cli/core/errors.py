@@ -33,3 +33,11 @@ class IdempotencyConflict(ConflictError):
 
 class RateLimitError(ShoppingCliError):
     """Raised when a caller exceeds an API rate limit."""
+
+
+class PayloadTooLargeError(ShoppingCliError):
+    """Raised when a request exceeds the configured byte limit."""
+
+
+class MethodNotAllowedError(ShoppingCliError):
+    """Raised when a path exists but does not support the request method."""

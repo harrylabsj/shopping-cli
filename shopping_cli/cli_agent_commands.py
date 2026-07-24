@@ -36,13 +36,14 @@ def _positive_whole_seconds(value: Any, field_name: str) -> int | None:
 def cmd_agent_run(args: argparse.Namespace) -> None:
     api_url = args.api_url or os.environ.get("SHOPPING_MARKETPLACE_API_URL") or os.environ.get("SHOPPING_API_URL") or ""
     if api_url:
+        if not args.once and (args.agent_token or args.merchant_token):
+            raise AuthError("long-running agents must receive tokens through SHOPPING_AGENT_TOKEN or SHOPPING_MERCHANT_TOKEN")
         token = args.agent_token or os.environ.get("SHOPPING_AGENT_TOKEN") or args.merchant_token or os.environ.get("SHOPPING_MERCHANT_TOKEN")
         if not token:
             raise AuthError("--merchant-token or --agent-token is required with --api-url")
         host = args.host or os.environ.get("SHOPPING_AGENT_HOST") or ""
         session_id = args.session_id or os.environ.get("SHOPPING_AGENT_SESSION_ID") or ""
-        tool_kwargs = {"host": host, "session_id": session_id} if host or session_id else {}
-        tools = HTTPMerchantAgentTools(api_url, args.merchant, token, **tool_kwargs)
+        tools = HTTPMerchantAgentTools(api_url, args.merchant, token, host=host, session_id=session_id)
         if args.once:
             result = merchant_agent.process_once_with_tools(tools, args.merchant)
             if args.format == "text":

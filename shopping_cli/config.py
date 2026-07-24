@@ -15,6 +15,7 @@ DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "shopping-cli"
 DEFAULT_AGENT_STALE_TTL_SECONDS = 60
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8765
+MIN_PRODUCTION_SECRET_BYTES = 32
 MAX_AGENT_STALE_TTL_SECONDS = timedelta.max.days * 24 * 60 * 60 + timedelta.max.seconds
 PLACEHOLDER_PREFIXES = ("replace-with-", "change-me", "changeme")
 SUPPORTED_DEPLOYMENT_PROFILES = {"local", "production"}
@@ -31,6 +32,19 @@ def _env_text(name: str) -> str:
 def _is_placeholder_secret(value: str) -> bool:
     text = str(value or "").strip().lower()
     return not text or any(text.startswith(prefix) for prefix in PLACEHOLDER_PREFIXES)
+
+
+def secret_is_usable(value: str, *, production: bool = False) -> bool:
+    """Return whether a configured shared secret is safe to accept.
+
+    Placeholder values are rejected in every profile. Production additionally
+    requires at least 32 UTF-8 bytes so one-character or example credentials
+    cannot accidentally protect a public deployment.
+    """
+    text = str(value or "").strip()
+    if _is_placeholder_secret(text):
+        return False
+    return not production or len(text.encode("utf-8")) >= MIN_PRODUCTION_SECRET_BYTES
 
 
 def _channel_tokens_configured() -> bool:
@@ -139,9 +153,13 @@ def agent_stale_ttl_seconds_from(value: str | int | None = None) -> int:
 
 
 def production_config_checks() -> dict[str, bool]:
+    admin_token = _env_text("SHOPPING_ADMIN_TOKEN")
+    buyer_token = _env_text("SHOPPING_BUYER_BOOTSTRAP_TOKEN")
     return {
-        "admin_token_configured": not _is_placeholder_secret(_env_text("SHOPPING_ADMIN_TOKEN")),
-        "buyer_bootstrap_token_configured": not _is_placeholder_secret(_env_text("SHOPPING_BUYER_BOOTSTRAP_TOKEN")),
+        "admin_token_configured": secret_is_usable(admin_token),
+        "buyer_bootstrap_token_configured": secret_is_usable(buyer_token),
+        "admin_token_strong": secret_is_usable(admin_token, production=True),
+        "buyer_bootstrap_token_strong": secret_is_usable(buyer_token, production=True),
         "channel_tokens_configured": _channel_tokens_configured(),
     }
 
@@ -158,16 +176,23 @@ def validate_production_config() -> None:
     if profile != "production":
         return
     checks = production_config_checks()
-    required = ("admin_token_configured", "buyer_bootstrap_token_configured", "channel_tokens_configured")
+    # Channel ingress is optional and fails closed when no channel token is
+    # configured. Admin and buyer bootstrap credentials are always required.
+    required = ("admin_token_strong", "buyer_bootstrap_token_strong")
     missing = [name for name in required if not checks[name]]
     if missing:
         variables = {
             "admin_token_configured": "SHOPPING_ADMIN_TOKEN",
             "buyer_bootstrap_token_configured": "SHOPPING_BUYER_BOOTSTRAP_TOKEN",
+            "admin_token_strong": "SHOPPING_ADMIN_TOKEN",
+            "buyer_bootstrap_token_strong": "SHOPPING_BUYER_BOOTSTRAP_TOKEN",
             "channel_tokens_configured": "SHOPPING_CHANNEL_TOKEN or SHOPPING_CHANNEL_TOKENS",
         }
         names = ", ".join(variables[name] for name in missing)
-        raise ConfigError(f"production deployment requires non-placeholder values for {names}")
+        raise ConfigError(
+            f"production deployment requires non-placeholder secrets of at least "
+            f"{MIN_PRODUCTION_SECRET_BYTES} UTF-8 bytes for {names}"
+        )
 
 
 @dataclass(frozen=True)

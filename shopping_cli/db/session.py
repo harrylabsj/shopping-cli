@@ -12,8 +12,6 @@ from typing import Any, Iterator
 from shopping_cli import VERSION
 from shopping_cli.db.migrations import (
     CURRENT_SCHEMA_VERSION,
-    backfill_conversation_next_actor,
-    migrate_api_tokens_to_hashes,
     run_migrations,
 )
 from shopping_cli.db.models import INDEXES, SCHEMA
@@ -56,12 +54,25 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
-    conn.row_factory = sqlite3.Row
-    conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-    conn.execute("pragma journal_mode = wal")
-    conn.execute("pragma foreign_keys = on")
-    init_db(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        conn.execute("pragma journal_mode = wal")
+        conn.execute("pragma foreign_keys = on")
+        version_row = conn.execute("pragma user_version").fetchone()
+        current_version = int(version_row[0] or 0) if version_row is not None else 0
+        if current_version < CURRENT_SCHEMA_VERSION:
+            init_db(conn)
+        elif current_version > CURRENT_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema version {current_version} is newer than the supported version "
+                f"{CURRENT_SCHEMA_VERSION}; upgrade shopping-cli instead of opening this database "
+                "with an older release"
+            )
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def init_db(conn: sqlite3.Connection) -> None:

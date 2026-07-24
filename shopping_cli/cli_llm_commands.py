@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 from shopping_cli.cli_common import db_path_from_args, emit, yes_no
+from shopping_cli.core.catalog import merchant_summary
 from shopping_cli.core.conversations import conversation_summary
 from shopping_cli.core.errors import AuthError, PermissionDenied
 from shopping_cli.db.session import db_session
@@ -82,11 +83,12 @@ def cmd_llm_run(args: argparse.Namespace) -> None:
         user_text = f"{user_text}\n\nConversation context:\n{json.dumps(context, ensure_ascii=False, sort_keys=True)}"
     if role == "merchant":
         automation_boundaries = ""
-        if not api_url:
+        if api_url:
+            private_config = dispatcher.merchant_private_config(actor)
+            automation_boundaries = str(private_config["automation_boundaries"])
+        else:
             with db_session(db_path_from_args(args)) as conn:
-                row = conn.execute("select automation_boundaries from merchants where id = ?", (actor,)).fetchone()
-                if row is not None:
-                    automation_boundaries = str(row["automation_boundaries"] or "")
+                automation_boundaries = str(merchant_summary(conn, actor)["automation_boundaries"] or "")
         system_prompt = merchant_system_prompt(automation_boundaries)
     else:
         system_prompt = buyer_system_prompt()

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,97 @@ def migration_006_search_indexes(conn: sqlite3.Connection) -> None:
                 raise
 
 
+def migration_007_atomic_lifecycle_constraints(conn: sqlite3.Connection) -> None:
+    """Add the key used only by callers requesting open-conversation reuse."""
+    ensure_column(conn, "conversations", "reuse_key", "text not null default ''")
+
+
+def migration_008_rebuild_cjk_search_documents(conn: sqlite3.Connection) -> None:
+    """Force lazy rebuild using the CJK bigram document format."""
+    for table in ("product_search_index", "merchant_search_index", "policy_search_index"):
+        try:
+            conn.execute(f"delete from {table}")
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+
+
+def migration_009_unique_open_reuse_key(conn: sqlite3.Connection) -> None:
+    """Deduplicate open reuse-key conversations and add the guarding index.
+
+    Databases already at schema v8 never re-run ``init_db`` (the
+    ``open_connection`` fast path), so they never receive the partial unique
+    index ``idx_conversations_unique_open_key``. Before creating it, collapse
+    duplicate non-closed rows that share a non-empty ``reuse_key``: the most
+    recently created row (matching the ``ensure_conversation`` reuse order)
+    stays the winner, and losers are closed with their messages, flags, and
+    audit history left intact for traceability. Rows with an empty
+    ``reuse_key`` are explicit independent conversations and are never
+    touched.
+    """
+    ensure_column(conn, "conversations", "reuse_key", "text not null default ''")
+    # Legacy tables may predate the NOT NULL defaults; normalize so the
+    # partial index predicate and the dedup comparisons behave. These are
+    # no-ops when the columns are already NOT NULL.
+    conn.execute("update conversations set reuse_key = '' where reuse_key is null")
+    if "sku" in _table_columns(conn, "conversations"):
+        conn.execute("update conversations set sku = '' where sku is null")
+    rows = conn.execute(
+        """
+        select id, reuse_key from conversations
+        where reuse_key != '' and status != 'closed'
+        order by reuse_key, created_at desc, id desc
+        """
+    ).fetchall()
+    winners: dict[str, str] = {}
+    losers: list[tuple[str, str]] = []
+    for row in rows:
+        reuse_key = str(row["reuse_key"])
+        if reuse_key in winners:
+            losers.append((str(row["id"]), reuse_key))
+        else:
+            winners[reuse_key] = str(row["id"])
+    now = datetime.now().replace(microsecond=0).isoformat()
+    for conversation_id, reuse_key in losers:
+        conn.execute(
+            """
+            update conversations
+            set status = 'closed', next_actor = '', updated_at = ?, last_sender = 'system'
+            where id = ? and status != 'closed'
+            """,
+            (now, conversation_id),
+        )
+        conn.execute(
+            """
+            insert into audit_events(conversation_id, actor, event, details_json, created_at)
+            values (?, 'system', 'conversation_closed', ?, ?)
+            """,
+            (
+                conversation_id,
+                json.dumps(
+                    {
+                        "event_type": "conversation_closed",
+                        "next_actor": "",
+                        "reason": "duplicate_open_reuse_key",
+                        "schema_version": 1,
+                        "source": "migration_009_unique_open_reuse_key",
+                        "winner_conversation_id": winners[reuse_key],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+    conn.execute(
+        """
+        create unique index if not exists idx_conversations_unique_open_key
+        on conversations(reuse_key)
+        where reuse_key != '' and status != 'closed'
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -156,6 +249,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "api_token_hash_columns", migration_004_api_token_hash_columns),
     Migration(5, "api_token_scope_columns", migration_005_api_token_scope_columns),
     Migration(6, "search_indexes", migration_006_search_indexes),
+    Migration(7, "atomic_lifecycle_constraints", migration_007_atomic_lifecycle_constraints),
+    Migration(8, "rebuild_cjk_search_documents", migration_008_rebuild_cjk_search_documents),
+    Migration(9, "unique_open_reuse_key", migration_009_unique_open_reuse_key),
 )
 
 
