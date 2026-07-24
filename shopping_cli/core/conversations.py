@@ -208,14 +208,31 @@ def append_message(
     if cursor.lastrowid is None:
         raise RuntimeError("message insert did not return an id")
     message_id = cursor.lastrowid
-    updated = conn.execute(
-        """
-        update conversations
-        set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
-        where id = ? and status = ? and status != 'closed'
-        """,
-        (status, next_actor, now, sender, conversation_id, conversation["status"]),
-    )
+    # When closing, atomically verify no unresolved reviews remain so a
+    # concurrent add_flag cannot slip a flag between the Python-level
+    # check and this UPDATE (TOCTOU).
+    if status == "closed":
+        updated = conn.execute(
+            """
+            update conversations
+            set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+            where id = ? and status = ? and status != 'closed'
+              and not exists (
+                  select 1 from moderation_flags
+                  where conversation_id = ? and resolved_at = ''
+              )
+            """,
+            (status, next_actor, now, sender, conversation_id, conversation["status"], conversation_id),
+        )
+    else:
+        updated = conn.execute(
+            """
+            update conversations
+            set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+            where id = ? and status = ? and status != 'closed'
+            """,
+            (status, next_actor, now, sender, conversation_id, conversation["status"]),
+        )
     if updated.rowcount != 1:
         raise ConflictError(f"Conversation {conversation_id} changed concurrently")
     append_audit_event(

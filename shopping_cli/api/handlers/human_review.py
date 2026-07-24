@@ -164,6 +164,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 next_actor=next_actor,
                 sender=actor,
                 expected_status="human_required",
+                reject_if_unresolved=(status == "closed"),
                 now=now,
             )
         append_audit_event(
@@ -236,6 +237,7 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 next_actor=next_actor,
                 sender=actor,
                 expected_status="human_required",
+                reject_if_unresolved=(status == "closed"),
                 now=now,
             )
         append_audit_event(
