@@ -11,8 +11,6 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from shopping_cli.agents import agent_cli, merchant_daemon
 from shopping_cli.agents.tools import HTTPMerchantAgentTools
 from shopping_cli.api.app import create_app, handle_request
@@ -243,8 +241,11 @@ class P2RegressionTest(unittest.TestCase):
             self.assertIn("Method not allowed", body["error"])
 
     def test_fastapi_body_limit_counts_streamed_bytes(self):
-        pytest.importorskip("fastapi")
-        pytest.importorskip("httpx")
+        try:
+            import fastapi  # noqa: F401
+            import httpx  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(str(exc)) from exc
         from fastapi.testclient import TestClient
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -278,8 +279,11 @@ class P2RegressionTest(unittest.TestCase):
                 self.assertIn("missing required field", boundary.json()["error"])
 
     def test_fastapi_routing_precedes_body_parsing(self):
-        pytest.importorskip("fastapi")
-        pytest.importorskip("httpx")
+        try:
+            import fastapi  # noqa: F401
+            import httpx  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(str(exc)) from exc
         from fastapi.testclient import TestClient
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,6 +10,10 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    import psutil
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dep
+    psutil = None
 
 ROOT = Path(__file__).resolve().parents[1]
 MAI = ROOT / "scripts" / "shopping.py"
@@ -706,6 +710,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
             self.assertTrue(stopped["ok"])
 
 
+@unittest.skipIf(psutil is None, "psutil is required for process identity tests")
 class AgentDaemonIdentityTest(unittest.TestCase):
     """P1-05 gates: identity mismatch is stale and is never signaled."""
 
@@ -837,6 +842,10 @@ class AgentDaemonIdentityTest(unittest.TestCase):
 
                 with (
                     patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=FakeProcess()),
+                    patch("shopping_cli.agents.merchant_daemon.wait_for_process_identity", return_value={
+                        "create_time": 1000.0, "executable": sys.executable,
+                        "cmdline": ["shopping_cli.cli", "agent", "run", "--merchant", "seller-a"],
+                    }),
                     patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
                 ):
                     started = merchant_daemon.start_agent(
