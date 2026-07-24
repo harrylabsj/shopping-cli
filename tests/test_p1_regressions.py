@@ -476,6 +476,82 @@ class P1RegressionTest(unittest.TestCase):
                 final = conversation_summary(conn, cid)
                 self.assertIn(final["status"], {"human_required", "closed"})
 
+    def test_resolve_close_rejects_concurrent_flag_toctou(self):
+        """When resolve+close transitions to 'closed', a concurrent add_flag
+        that snuck in between the resolve and the status update must cause
+        the close to be rejected (rowcount 0)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.seed_merchant(db_file)
+            with db_session(db_file) as conn:
+                conv = ensure_conversation(conn, "alice", "seller-a")
+                flag = add_flag(conn, conv["id"], "review_me")
+            cid = conv["id"]
+            fid = flag["id"]
+            barrier = threading.Barrier(2)
+            errors: list[Exception] = []
+
+            def resolve_and_close():
+                conn = open_connection(db_file)
+                try:
+                    # Resolve the original flag
+                    human_review_service.resolve_review(
+                        conn, fid, action="close", sender="merchant"
+                    )
+                    barrier.wait(timeout=5)
+                    # Try to close — but add_flag_worker may have already
+                    # inserted a new flag
+                    human_review_service.update_conversation_status(
+                        conn,
+                        cid,
+                        status="closed",
+                        next_actor="",
+                        sender="merchant",
+                        expected_status="human_required",
+                        reject_if_unresolved=True,
+                    )
+                    conn.commit()
+                except (ConflictError, sqlite3.OperationalError) as exc:
+                    conn.rollback()
+                    errors.append(exc)
+                finally:
+                    conn.close()
+
+            def add_flag_worker():
+                conn = open_connection(db_file)
+                try:
+                    barrier.wait(timeout=5)
+                    add_flag(conn, cid, "sneaky_flag")
+                    conn.commit()
+                except (ConflictError, sqlite3.OperationalError) as exc:
+                    conn.rollback()
+                    errors.append(exc)
+                finally:
+                    conn.close()
+
+            threads = [
+                threading.Thread(target=resolve_and_close),
+                threading.Thread(target=add_flag_worker),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+            with db_session(db_file) as conn:
+                final = conversation_summary(conn, cid)
+                # If close won → status is closed and ALL flags resolved.
+                # If flag won → status stays human_required with unresolved flag.
+                if final["status"] == "closed":
+                    unresolved = conn.execute(
+                        "select 1 from moderation_flags where conversation_id = ? and resolved_at = ''",
+                        (cid,),
+                    ).fetchone()
+                    self.assertIsNone(unresolved,
+                        "closed conversation must have zero unresolved flags")
+                else:
+                    self.assertEqual(final["status"], "human_required")
+
     def test_concurrent_agent_token_rotate_has_one_winner(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"

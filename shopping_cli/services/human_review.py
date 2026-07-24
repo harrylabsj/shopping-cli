@@ -87,21 +87,40 @@ def update_conversation_status(
     next_actor: str,
     sender: str,
     expected_status: str,
+    reject_if_unresolved: bool = False,
     now: str | None = None,
 ) -> None:
     """Transition a conversation to *status*, requiring *expected_status* as the
     current state.  The precondition rowcount check makes the transition atomic:
     concurrent writers that changed the status first will see rowcount 0 and
     raise ConflictError.
+
+    When *reject_if_unresolved* is True the UPDATE also verifies that no
+    unresolved moderation flags exist — closing a TOCTOU window between a
+    prior resolve_all / resolve_review call and this status transition.
     """
-    updated = conn.execute(
-        """
-        update conversations
-        set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
-        where id = ? and status = ? and status != 'closed'
-        """,
-        (status, next_actor, now or now_iso(), sender, conversation_id, expected_status),
-    )
+    if reject_if_unresolved:
+        updated = conn.execute(
+            """
+            update conversations
+            set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+            where id = ? and status = ? and status != 'closed'
+              and not exists (
+                  select 1 from moderation_flags
+                  where conversation_id = ? and resolved_at = ''
+              )
+            """,
+            (status, next_actor, now or now_iso(), sender, conversation_id, expected_status, conversation_id),
+        )
+    else:
+        updated = conn.execute(
+            """
+            update conversations
+            set status = ?, next_actor = ?, updated_at = ?, last_sender = ?
+            where id = ? and status = ? and status != 'closed'
+            """,
+            (status, next_actor, now or now_iso(), sender, conversation_id, expected_status),
+        )
     if updated.rowcount != 1:
         raise ConflictError(f"Conversation {conversation_id} changed concurrently or is closed")
 

@@ -187,6 +187,7 @@ def cmd_conversation_resolve_review(args: argparse.Namespace) -> None:
                 next_actor=next_actor,
                 sender=args.sender,
                 expected_status="human_required",
+                reject_if_unresolved=(status == "closed"),
             )
         append_audit_event(
             conn,
@@ -308,6 +309,7 @@ def cmd_human_review_resolve(args: argparse.Namespace) -> None:
                 next_actor=next_actor,
                 sender=args.sender,
                 expected_status="human_required",
+                reject_if_unresolved=(status == "closed"),
             )
         append_audit_event(
             conn,
