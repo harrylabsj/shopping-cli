@@ -1,10 +1,12 @@
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const OPENCLAW_PLUGIN_ID = 'shopping-plugin';
+const CLI_TIMEOUT_MS = 15000;
+const CLI_MAX_BUFFER_BYTES = 1024 * 1024;
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(MODULE_DIR, '..', '..');
@@ -74,8 +76,6 @@ export function resolveShoppingPluginConfig(api, pluginId = OPENCLAW_PLUGIN_ID) 
   const directConfig = api?.pluginConfig || {};
   const cfg = { ...directConfig, ...nestedConfig };
   const writesEnabled = truthy(cfg.trustedWrites)
-    || truthy(cfg.enableWrites)
-    || truthy(cfg.enableMutatingTools)
     || truthy(process.env.SHOPPING_PLUGIN_TRUSTED_WRITES);
   const trustedProjectRoot = writesEnabled || truthy(cfg.trustedProjectRoot);
 
@@ -100,17 +100,31 @@ export function buildShoppingCommand({ subcommandArgs = [], dataPath, projectRoo
   return command;
 }
 
-export function runShoppingCli({ subcommandArgs = [], dataPath, projectRoot } = {}) {
+export async function runShoppingCli({ subcommandArgs = [], dataPath, projectRoot } = {}) {
   const command = buildShoppingCommand({ subcommandArgs, dataPath, projectRoot });
-  const result = spawnSync(command[0], command.slice(1), { encoding: 'utf8' });
+  const result = await new Promise((resolve) => {
+    execFile(command[0], command.slice(1), {
+      encoding: 'utf8',
+      timeout: CLI_TIMEOUT_MS,
+      maxBuffer: CLI_MAX_BUFFER_BYTES,
+      windowsHide: true,
+    }, (error, stdout = '', stderr = '') => resolve({ error, stdout, stderr }));
+  });
   const stdout = (result.stdout || '').trim();
   const stderr = (result.stderr || '').trim();
 
   if (result.error) {
-    return { ok: false, errorType: 'spawn_error', error: String(result.error.message || result.error), command };
-  }
-  if (result.status !== 0) {
-    return { ok: false, errorType: 'cli_exit', error: `shopping exited with code ${result.status}`, exitCode: result.status, stdout, stderr, command };
+    const timedOut = result.error.killed || result.error.code === 'ETIMEDOUT';
+    const exitCode = Number.isInteger(result.error.code) ? result.error.code : undefined;
+    return {
+      ok: false,
+      errorType: timedOut ? 'cli_timeout' : exitCode !== undefined ? 'cli_exit' : 'spawn_error',
+      error: timedOut ? `shopping timed out after ${CLI_TIMEOUT_MS}ms` : String(result.error.message || result.error),
+      exitCode,
+      stdout,
+      stderr,
+      command,
+    };
   }
   if (!stdout) return { ok: true, status: 'empty_output' };
 
@@ -385,7 +399,7 @@ export function registerOpenClawPlugin(api) {
       const config = resolveShoppingPluginConfig(api);
       if (rawArgs.startsWith('search ')) {
         const query = rawArgs.slice('search '.length).trim();
-        const payload = runShoppingCli({
+        const payload = await runShoppingCli({
           subcommandArgs: ['search', 'products', '--query', query, '--format', 'json'],
           dataPath: config.dataPath,
           projectRoot: config.projectRoot,

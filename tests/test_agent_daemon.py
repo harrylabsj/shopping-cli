@@ -605,7 +605,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
 
             with (
                 patch("shopping_cli.agents.merchant_daemon.is_process_running", return_value=True),
-                patch("shopping_cli.agents.merchant_daemon.os.kill"),
+                patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
                 patch("shopping_cli.agents.merchant_daemon.time.sleep", side_effect=fake_sleep),
                 patch("shopping_cli.agents.merchant_agent.heartbeat"),
             ):
@@ -616,8 +616,8 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                     timeout=float("nan"),
                 )
 
-            self.assertTrue(sleep_durations)
-            self.assertGreater(sleep_durations[0], 0)
+            self.assertEqual(sleep_durations, [])
+            kill.assert_not_called()
             self.assertTrue(stopped["ok"])
 
     def test_agent_stop_caps_oversized_timeout(self):
@@ -650,7 +650,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
 
             with (
                 patch("shopping_cli.agents.merchant_daemon.is_process_running", return_value=True),
-                patch("shopping_cli.agents.merchant_daemon.os.kill"),
+                patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
                 patch("shopping_cli.agents.merchant_daemon.time.time", side_effect=fake_time),
                 patch("shopping_cli.agents.merchant_daemon.time.sleep", side_effect=fake_sleep),
                 patch("shopping_cli.agents.merchant_agent.heartbeat"),
@@ -663,8 +663,9 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                 )
 
             self.assertEqual(sleep_durations, [])
-            self.assertFalse(stopped["ok"])
-            self.assertTrue(stopped["running"])
+            kill.assert_not_called()
+            self.assertTrue(stopped["ok"])
+            self.assertFalse(stopped["running"])
 
     def test_agent_stop_tolerates_overflowing_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -689,7 +690,7 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
 
             with (
                 patch("shopping_cli.agents.merchant_daemon.is_process_running", return_value=True),
-                patch("shopping_cli.agents.merchant_daemon.os.kill"),
+                patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
                 patch("shopping_cli.agents.merchant_daemon.time.sleep", side_effect=fake_sleep),
                 patch("shopping_cli.agents.merchant_agent.heartbeat"),
             ):
@@ -700,8 +701,232 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                     timeout=10**4000,
                 )
 
-            self.assertTrue(sleep_durations)
+            self.assertEqual(sleep_durations, [])
+            kill.assert_not_called()
             self.assertTrue(stopped["ok"])
+
+
+class AgentDaemonIdentityTest(unittest.TestCase):
+    """P1-05 gates: identity mismatch is stale and is never signaled."""
+
+    def spawn_child(self, *markers):
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", *markers],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def stop_child(self, child):
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+
+    def write_pid_record(self, paths, record):
+        merchant_daemon.write_json_atomic(paths["pid_file"], record)
+
+    def assert_no_signal_sent(self, kill_mock):
+        # Signal-0 calls are liveness probes (e.g. from psutil), not signals.
+        signaled = [call for call in kill_mock.call_args_list if call.args[1] != 0]
+        self.assertEqual(signaled, [])
+
+    def write_running_state(self, paths, merchant_id, pid, launch_token):
+        merchant_daemon.write_state(
+            paths["state_file"],
+            merchant_id,
+            running=True,
+            counters={"checked": 0, "replied": 0},
+            pid=pid,
+            extra={"launch_token": launch_token},
+        )
+
+    def test_status_and_stop_treat_identity_mismatch_as_stale_and_never_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_file = tmp_path / "shopping-cli.sqlite"
+            state_dir = tmp_path / "state"
+            paths = merchant_daemon.agent_paths("seller-a", state_dir=state_dir)
+            merchant_daemon.ensure_agent_dirs(paths)
+
+            # Unrelated controlled child: no daemon markers in its cmdline.
+            unrelated = self.spawn_child()
+            # Controlled child that carries the daemon cmdline markers.
+            marked = self.spawn_child("shopping_cli.cli", "agent", "run", "--merchant", "seller-a")
+            children = [unrelated, marked]
+            try:
+                marked_identity = merchant_daemon.process_identity(marked.pid)
+                self.assertIsNotNone(marked_identity)
+                token = "launch-token-stale"
+                base_record = {
+                    "create_time": marked_identity["create_time"],
+                    "executable": marked_identity["executable"],
+                    "cmdline": marked_identity["cmdline"],
+                    "launch_token": token,
+                    "merchant_id": "seller-a",
+                    "mode": "api",
+                    "api_url": "http://127.0.0.1:9",
+                    "command": [
+                        sys.executable,
+                        "-m",
+                        "shopping_cli.cli",
+                        "agent",
+                        "run",
+                        "--merchant",
+                        "seller-a",
+                    ],
+                }
+                cases = {
+                    # PID reuse: a new process owns the PID with a different create_time.
+                    "pid_reuse": {**base_record, "pid": marked.pid, "create_time": marked_identity["create_time"] + 100.0},
+                    # Unrelated process: PID alive but cmdline is not the daemon.
+                    "unrelated_process": {**base_record, "pid": unrelated.pid},
+                    # Legacy pidfile: bare PID without any identity binding.
+                    "legacy_pidfile": {"pid": marked.pid},
+                    # Record written for a different merchant.
+                    "merchant_mismatch": {**base_record, "pid": marked.pid, "merchant_id": "seller-b"},
+                }
+                for name, record in cases.items():
+                    with self.subTest(case=name):
+                        launch_token = str(record.get("launch_token") or "")
+                        self.write_pid_record(paths, record)
+                        self.write_running_state(paths, "seller-a", record["pid"], launch_token)
+
+                        status = merchant_daemon.status_agent(db_file, "seller-a", state_dir=state_dir)
+                        self.assertFalse(status["running"])
+                        self.assertTrue(status["stale_pid"])
+
+                        with (
+                            patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
+                            patch("shopping_cli.agents.merchant_agent.heartbeat"),
+                        ):
+                            stopped = merchant_daemon.stop_agent(
+                                db_file,
+                                "seller-a",
+                                state_dir=state_dir,
+                                timeout=0.1,
+                            )
+                        self.assertTrue(stopped["ok"])
+                        self.assertFalse(stopped["was_running"])
+                        self.assert_no_signal_sent(kill)
+                        for child in children:
+                            self.assertIsNone(child.poll())
+            finally:
+                for child in children:
+                    self.stop_child(child)
+
+    def test_start_replaces_legacy_pidfile_without_signaling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_file = tmp_path / "shopping-cli.sqlite"
+            state_dir = tmp_path / "state"
+            paths = merchant_daemon.agent_paths("seller-a", state_dir=state_dir)
+            merchant_daemon.ensure_agent_dirs(paths)
+
+            child = self.spawn_child()
+            try:
+                # Legacy pidfile binds only a bare PID that is now owned by an
+                # unrelated process; start must treat it as stale, never signal.
+                paths["pid_file"].write_text(json.dumps({"pid": child.pid}), encoding="utf-8")
+
+                class FakeProcess:
+                    pid = 987654321
+
+                with (
+                    patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=FakeProcess()),
+                    patch("shopping_cli.agents.merchant_daemon.os.kill") as kill,
+                ):
+                    started = merchant_daemon.start_agent(
+                        db_file,
+                        "seller-a",
+                        interval=0.1,
+                        state_dir=state_dir,
+                        api_url="http://127.0.0.1:9",
+                        agent_token="agent_secret",
+                    )
+
+                self.assertTrue(started["ok"])
+                self.assertTrue(started["stale_replaced"])
+                self.assert_no_signal_sent(kill)
+                self.assertIsNone(child.poll())
+                record = json.loads(paths["pid_file"].read_text(encoding="utf-8"))
+                self.assertEqual(record["pid"], 987654321)
+                self.assertTrue(record["launch_token"])
+                self.assertEqual(record["merchant_id"], "seller-a")
+            finally:
+                self.stop_child(child)
+
+    def test_stop_racing_new_start_keeps_new_pidfile_state_and_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_file = tmp_path / "shopping-cli.sqlite"
+            state_dir = tmp_path / "state"
+            paths = merchant_daemon.agent_paths("seller-a", state_dir=state_dir)
+            markers = ("shopping_cli.cli", "agent", "run", "--merchant", "seller-a")
+            child_a = self.spawn_child(*markers)
+            child_b = self.spawn_child(*markers)
+            real_kill = os.kill
+            try:
+                with patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=child_a):
+                    started_a = merchant_daemon.start_agent(
+                        db_file,
+                        "seller-a",
+                        interval=0.1,
+                        state_dir=state_dir,
+                        api_url="http://127.0.0.1:9",
+                        agent_token="token-a",
+                    )
+                self.assertEqual(started_a["pid"], child_a.pid)
+                token_a = json.loads(paths["pid_file"].read_text(encoding="utf-8"))["launch_token"]
+
+                def kill_then_relaunch(pid, sig):
+                    if sig == 0:
+                        # Liveness probe (e.g. from psutil): pass through.
+                        return real_kill(pid, sig)
+                    # The old daemon exits on SIGTERM and a new start takes over
+                    # before the in-flight stop re-acquires the lock.
+                    real_kill(pid, sig)
+                    child_a.wait(timeout=5)
+                    with patch("shopping_cli.agents.merchant_daemon.subprocess.Popen", return_value=child_b):
+                        merchant_daemon.start_agent(
+                            db_file,
+                            "seller-a",
+                            interval=0.1,
+                            state_dir=state_dir,
+                            api_url="http://127.0.0.1:9",
+                            agent_token="token-b",
+                        )
+
+                with patch("shopping_cli.agents.merchant_daemon.os.kill", side_effect=kill_then_relaunch) as kill:
+                    stopped = merchant_daemon.stop_agent(
+                        db_file,
+                        "seller-a",
+                        state_dir=state_dir,
+                        timeout=0.5,
+                    )
+
+                # SIGTERM went only to the identity-verified old daemon.
+                sigterm_calls = [
+                    call for call in kill.call_args_list if call.args[1] == merchant_daemon.signal.SIGTERM
+                ]
+                self.assertEqual([call.args[0] for call in sigterm_calls], [child_a.pid])
+
+                record_b = json.loads(paths["pid_file"].read_text(encoding="utf-8"))
+                self.assertEqual(record_b["pid"], child_b.pid)
+                self.assertTrue(record_b["launch_token"])
+                self.assertNotEqual(record_b["launch_token"], token_a)
+                self.assertTrue(stopped["was_running"])
+                state_b = json.loads(paths["state_file"].read_text(encoding="utf-8"))
+                self.assertTrue(state_b["running"])
+                self.assertEqual(state_b["launch_token"], record_b["launch_token"])
+                self.assertEqual(state_b["pid"], child_b.pid)
+                self.assertIsNone(child_b.poll())
+            finally:
+                self.stop_child(child_a)
+                self.stop_child(child_b)
 
 
 if __name__ == "__main__":
