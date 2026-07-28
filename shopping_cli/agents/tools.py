@@ -50,20 +50,6 @@ def _positive_whole_int(value: Any, field_name: str) -> int:
     return number
 
 
-def _safe_positive_float(value: Any, default: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if not math.isfinite(number) or number <= 0:
-        return default
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
 def _normalize_agent_status(value: Any) -> str:
     status = str(value or "").strip() or "online"
     if status not in AGENT_STATUSES:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,6 +12,7 @@ from shopping_cli.core.errors import ConflictError, PermissionDenied, Validation
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.risk import infer_intent
 from shopping_cli.db.session import now_iso
+from shopping_cli.core.limits import safe_non_negative_int as _safe_non_negative_int
 
 MVP_WARNINGS = [
     "MVP records consultation only; no order is created.",
@@ -24,17 +24,6 @@ PROCESSING_STATUS = "processing"
 PROCESSED_STATUS = "processed"
 DEFAULT_PROCESSING_STALE_SECONDS = 300
 
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
 
 def normalize_channel(channel: str) -> str:

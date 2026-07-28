@@ -2,29 +2,18 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any
 
 from shopping_cli.core.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from shopping_cli.db.session import decode_json, now_iso
+from shopping_cli.core.limits import safe_non_negative_int
 from shopping_cli.services import tokens as token_service
 
 
 def default_merchant_agent_id(merchant_id: str) -> str:
     return token_service.default_merchant_agent_id(merchant_id)
 
-
-def safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
 
 def agent_summary(
