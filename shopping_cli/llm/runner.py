@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import math
 import time
 from typing import Any
 
+from shopping_cli.core.limits import safe_float as _safe_float, safe_int as _safe_int, safe_optional_int as _safe_optional_int
 from shopping_cli.llm.dispatcher import MarketplaceToolDispatcher
 from shopping_cli.llm.providers import OpenAICompatibleProvider, LLMResponse
 from shopping_cli.llm.tools import marketplace_tool_schemas
@@ -36,55 +36,6 @@ def _fallback(messages: list[dict[str, Any]], tool_results: list[dict[str, Any]]
     }
 
 
-def _safe_non_negative_int(value: Any, default: int, maximum: int | None = None) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, float) and not math.isfinite(value):
-        return default
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    number = max(number, 0)
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
-def _safe_positive_int(value: Any, default: int, maximum: int | None = None) -> int:
-    return max(_safe_non_negative_int(value, default, maximum=maximum), 1)
-
-
-def _safe_optional_non_negative_int(value: Any, maximum: int | None = None) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    number = max(number, 0)
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
-def _safe_non_negative_float(value: Any, default: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if not math.isfinite(number):
-        return default
-    number = max(number, 0.0)
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
 def _tool_call_name_and_arguments(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     function = tool_call.get("function") or {}
     name = str(function.get("name") or "")
@@ -112,12 +63,12 @@ def run_marketplace_tool_loop(
     conversation_messages = [dict(message) for message in messages]
     tool_results: list[dict[str, Any]] = []
     tools = marketplace_tool_schemas()
-    retries = _safe_non_negative_int(provider_retries, 0, maximum=MAX_LLM_PROVIDER_RETRIES)
-    tool_call_budget = _safe_optional_non_negative_int(max_tool_calls, maximum=MAX_LLM_TOOL_CALL_BUDGET)
-    steps = _safe_positive_int(max_steps, 4, maximum=MAX_LLM_TOOL_LOOP_STEPS)
-    retry_delay = _safe_non_negative_float(
+    retries = _safe_int(provider_retries, default=0, maximum=MAX_LLM_PROVIDER_RETRIES)
+    tool_call_budget = _safe_optional_int(max_tool_calls, maximum=MAX_LLM_TOOL_CALL_BUDGET)
+    steps = _safe_int(max_steps, default=4, minimum=1, maximum=MAX_LLM_TOOL_LOOP_STEPS)
+    retry_delay = _safe_float(
         provider_retry_delay_seconds,
-        0.0,
+        default=0.0,
         maximum=MAX_LLM_PROVIDER_RETRY_DELAY_SECONDS,
     )
 
