@@ -36,10 +36,13 @@ def safe_int(
     default: int = 0,
     minimum: int = 0,
     maximum: int | None = None,
+    allow_zero: bool = True,
 ) -> int:
     """Coerce *value* to int, clamping to [*minimum*, *maximum*].
 
     Bools, non-finite floats, and unparseable values return *default*.
+    When *allow_zero* is False, values <= 0 are also treated as invalid
+    and return *default* (useful for ``safe_positive_int`` semantics).
     """
     if isinstance(value, bool):
         return default
@@ -47,6 +50,30 @@ def safe_int(
         number = int(value)
     except (OverflowError, TypeError, ValueError):
         return default
+    if not allow_zero and number <= 0:
+        return default
+    number = max(number, minimum)
+    if maximum is not None:
+        number = min(number, maximum)
+    return number
+
+
+def safe_optional_int(
+    value: Any,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+    allow_zero: bool = True,
+) -> int | None:
+    """Like :func:`safe_int`, but invalid / missing input returns None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not allow_zero and number <= 0:
+        return None
     number = max(number, minimum)
     if maximum is not None:
         number = min(number, maximum)
@@ -91,7 +118,11 @@ def safe_non_negative_int(value: Any) -> int:
 
 
 def safe_positive_int(value: Any, default: int, maximum: int | None = None) -> int:
-    return safe_int(value, default=default, minimum=1, maximum=maximum)
+    return safe_int(value, default=default, allow_zero=False, maximum=maximum)
+
+
+def safe_optional_positive_int(value: Any, maximum: int | None = None) -> int | None:
+    return safe_optional_int(value, allow_zero=False, maximum=maximum)
 
 
 def safe_non_negative_float(value: Any) -> float:

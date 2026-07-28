@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from shopping_cli.core.limits import safe_int as _safe_int, safe_optional_int as _safe_optional_int
 
 
 Transport = Callable[[str, dict[str, str], dict[str, Any], int], dict[str, Any]]
@@ -38,38 +39,6 @@ def _assistant_message_from_raw(raw: Any) -> dict[str, Any]:
     return message
 
 
-def _safe_positive_int(value: Any, default: int, maximum: int | None = None) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, float) and not math.isfinite(value):
-        return default
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if number <= 0:
-        return default
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
-def _safe_optional_positive_int(value: Any, maximum: int | None = None) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    if number <= 0:
-        return None
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
 def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -93,8 +62,8 @@ class OpenAICompatibleProvider:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.timeout = _safe_positive_int(timeout, 30, maximum=MAX_PROVIDER_TIMEOUT_SECONDS)
-        self.max_tokens = _safe_optional_positive_int(max_tokens, maximum=MAX_PROVIDER_MAX_TOKENS)
+        self.timeout = _safe_int(timeout, default=30, allow_zero=False, maximum=MAX_PROVIDER_TIMEOUT_SECONDS)
+        self.max_tokens = _safe_optional_int(max_tokens, allow_zero=False, maximum=MAX_PROVIDER_MAX_TOKENS)
         self.transport = transport or _default_transport
 
     def complete(
