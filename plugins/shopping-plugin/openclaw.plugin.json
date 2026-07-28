@@ -16,6 +16,9 @@
       "dataPath": {
         "type": "string"
       },
+      "pythonPath": {
+        "type": "string"
+      },
       "trustedWrites": {
         "type": "boolean",
         "default": false

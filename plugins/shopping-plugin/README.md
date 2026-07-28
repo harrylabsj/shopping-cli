@@ -12,3 +12,4 @@ Environment fallbacks:
 - `SHOPPING_ROOT`
 - `SHOPPING_DB`
 - `SHOPPING_DATA` deprecated alias for `SHOPPING_DB`
+- `SHOPPING_PYTHON` Python 3.11+ interpreter used by the OpenClaw gateway
