@@ -9,6 +9,7 @@ from typing import Any
 
 from shopping_cli.core.errors import NotFoundError
 from shopping_cli.db.session import decode_json, encode_json, now_iso
+from shopping_cli.core.limits import safe_non_negative_int as _safe_non_negative_int
 
 AUDIT_EVENT_SCHEMA_VERSION = 1
 
@@ -98,18 +99,6 @@ FAILED_STATUS = "failed"
 ABANDONED_STATUS = "abandoned"
 RETRYABLE_PROCESS_STATUSES = {FAILED_STATUS, ABANDONED_STATUS}
 MAX_STALE_TTL_SECONDS = 9_999_999_999
-
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
 
 def _safe_positive_int(value: Any, default: int) -> int:

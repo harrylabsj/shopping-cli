@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
+from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -150,28 +151,7 @@ def _whole_int(value: Any, message: str) -> int:
     return number
 
 
-def _safe_non_negative_float(value: Any) -> float:
-    if isinstance(value, bool):
-        return 0.0
-    try:
-        number = float(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(number) or number < 0:
-        return 0.0
-    return number
-
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
+# safe_non_negative_int / safe_non_negative_float are imported from core.limits
 
 
 def create_merchant(

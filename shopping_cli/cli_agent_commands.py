@@ -15,10 +15,8 @@ from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.db.session import db_session
 from shopping_cli.services import agents as agent_service
 from shopping_cli.services import tokens as token_service
+from shopping_cli.core.limits import safe_non_negative_int as _safe_non_negative_int
 
-
-def _safe_non_negative_int(value: Any) -> int:
-    return agent_service.safe_non_negative_int(value)
 
 
 def _positive_whole_seconds(value: Any, field_name: str) -> int | None:

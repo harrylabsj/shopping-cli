@@ -18,7 +18,7 @@ from typing import Any
 
 from shopping_cli.core.catalog import fts_query, fts_search_document, parse_tags, require_merchant, tokenize
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
-from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text
+from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 DEFAULT_POLICY_SEARCH_CANDIDATE_LIMIT = 1000
@@ -26,15 +26,6 @@ MAX_POLICY_SEARCH_CANDIDATE_LIMIT = 5000
 MAX_SQLITE_INTEGER = 2**63 - 1
 POLICY_SEARCH_INDEX_TABLE = "policy_search_index"
 
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
 
 def require_policy(conn: sqlite3.Connection, merchant_id: str, code: str) -> sqlite3.Row:

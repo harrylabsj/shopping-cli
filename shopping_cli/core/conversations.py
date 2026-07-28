@@ -10,7 +10,7 @@ from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationErr
 from shopping_cli.core.harness import append_audit_event, conversation_audit_events, next_actor_for_status
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 from shopping_cli.core.tokens import token_digest
-from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text
+from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text, safe_non_negative_int as _safe_non_negative_int
 
 CONVERSATION_STATUSES = {"open", "waiting_merchant", "waiting_buyer", "human_required", "closed"}
 
@@ -144,15 +144,6 @@ def normalize_structured_payload(value: Any) -> dict[str, Any]:
         raise ValidationError("structured_payload must be an object")
     return dict(value)
 
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
 
 def append_message(

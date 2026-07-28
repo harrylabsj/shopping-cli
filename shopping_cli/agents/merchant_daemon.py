@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import math
 import os
 import secrets
 import signal
@@ -32,6 +31,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 from shopping_cli.agents import merchant_agent
 from shopping_cli.db.session import db_session, decode_json, now_iso
+from shopping_cli.core.limits import safe_non_negative_int, safe_positive_float, safe_non_negative_float_with_max as safe_non_negative_float
 
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "shopping-cli"
 MAX_AGENT_INTERVAL_SECONDS = 3600.0
@@ -137,43 +137,7 @@ def read_json(path: Path, default: Any) -> Any:
     return decoded
 
 
-def safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
 
-
-def safe_positive_float(value: Any, default: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if not math.isfinite(number) or number <= 0:
-        return default
-    if maximum is not None:
-        return min(number, maximum)
-    return number
-
-
-def safe_non_negative_float(value: Any, default: float, maximum: float | None = None) -> float:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    if not math.isfinite(number):
-        return default
-    number = max(number, 0.0)
-    if maximum is not None:
-        return min(number, maximum)
-    return number
 
 
 def safe_replied_count(value: Any) -> int:

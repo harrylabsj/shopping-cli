@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import re
 import sqlite3
@@ -14,30 +13,7 @@ from shopping_cli.agents.tools import MerchantAgentTools, SQLiteMerchantAgentToo
 from shopping_cli.core.errors import NotFoundError
 from shopping_cli.core.harness import MAX_STALE_TTL_SECONDS, message_idempotency_key
 from shopping_cli.core.risk import human_review_reason
-
-
-def _safe_non_negative_float(value: Any) -> float:
-    if isinstance(value, bool):
-        return 0.0
-    try:
-        number = float(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(number) or number < 0:
-        return 0.0
-    return number
-
-
-def _safe_non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, float) and not math.isfinite(value):
-        return 0
-    try:
-        number = int(value or 0)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(number, 0)
+from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 
 
 def _positive_message_id(value: Any) -> int:
