@@ -17,11 +17,12 @@ test('buildShoppingCommand points at the bundled Python CLI', () => {
   const command = buildShoppingCommand({
     projectRoot: '/tmp/shopping',
     dataPath: '/tmp/shopping.sqlite',
+    pythonPath: '/opt/python3.11',
     subcommandArgs: ['search', 'products', '--format', 'json'],
   });
 
   assert.deepEqual(command, [
-    'python3',
+    '/opt/python3.11',
     path.join('/tmp/shopping', 'scripts', 'shopping.py'),
     '--db',
     '/tmp/shopping.sqlite',
@@ -41,6 +42,7 @@ test('resolveShoppingPluginConfig reads OpenClaw plugin config', () => {
             config: {
               projectRoot: REPO_ROOT,
               dbPath: '/tmp/data.sqlite',
+              pythonPath: '/opt/python3.11',
               trustedWrites: true,
             },
           },
@@ -52,6 +54,7 @@ test('resolveShoppingPluginConfig reads OpenClaw plugin config', () => {
   assert.deepEqual(resolveShoppingPluginConfig(api), {
     projectRoot: REPO_ROOT,
     dataPath: '/tmp/data.sqlite',
+    pythonPath: '/opt/python3.11',
     writesEnabled: true,
   });
 });
@@ -76,6 +79,7 @@ test('resolveShoppingPluginConfig ignores untrusted project root overrides', () 
 
   assert.notEqual(config.projectRoot, '/tmp/untrusted-shopping');
   assert.equal(config.dataPath, '/tmp/data.sqlite');
+  assert.equal(config.pythonPath, 'python3');
   assert.equal(config.writesEnabled, false);
 });
 

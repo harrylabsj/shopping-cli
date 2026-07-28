@@ -8,6 +8,7 @@ const CONFIG_SCHEMA = {
     projectRoot: { type: 'string' },
     dbPath: { type: 'string' },
     dataPath: { type: 'string' },
+    pythonPath: { type: 'string' },
     trustedWrites: { type: 'boolean', default: false },
     trustedProjectRoot: { type: 'boolean', default: false },
   },
