@@ -23,6 +23,7 @@ from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
+from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.api.limits import max_request_body_bytes, validate_payload
 from shopping_cli.core.errors import (
@@ -387,6 +388,46 @@ def _resolve_human_review(db_path: str | Path, conversation_id: str, payload: di
     return human_review_handlers.resolve_human_review(db_path, conversation_id, payload)
 
 
+def _capabilities(db_path: str | Path) -> dict[str, Any]:
+    return negotiation_handlers.capabilities(db_path)
+
+
+def _negotiation_pending_messages(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.pending_messages(db_path, payload)
+
+
+def _negotiation_claim(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.claim_message(db_path, payload)
+
+
+def _negotiation_complete_claim(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.complete_claim(db_path, payload)
+
+
+def _negotiation_fail_claim(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.fail_claim(db_path, payload)
+
+
+def _negotiation_abandon_claim(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.abandon_claim(db_path, payload)
+
+
+def _negotiation_heartbeat_claims(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.heartbeat_claims(db_path, payload)
+
+
+def _negotiation_abandon_stale_claims(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.abandon_stale_claims(db_path, payload)
+
+
+def _negotiation_snapshot(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.get_snapshot(db_path, payload, query)
+
+
+def _negotiation_submit_decision(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return negotiation_handlers.submit_decision(db_path, payload)
+
+
 def _match_path(template: str, path: str) -> dict[str, str] | None:
     parts = template.split("/")
     regex_parts = []
@@ -400,19 +441,25 @@ def _match_path(template: str, path: str) -> dict[str, str] | None:
     return match.groupdict() if match else None
 
 
-def _buyer_conversation_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], buyer_id: str) -> dict[str, Any]:
+def _buyer_conversation_list(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], buyer_id: str
+) -> dict[str, Any]:
     filters = dict(query)
     filters["buyer_id"] = buyer_id
     return _conversation_list(db_path, filters, payload, owner_kind="buyer", owner_id=buyer_id)
 
 
-def _merchant_conversation_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str) -> dict[str, Any]:
+def _merchant_conversation_list(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str
+) -> dict[str, Any]:
     filters = dict(query)
     filters["merchant_id"] = merchant_id
     return _conversation_list(db_path, filters, payload, owner_kind="merchant", owner_id=merchant_id)
 
 
-def _merchant_human_review_list(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str) -> dict[str, Any]:
+def _merchant_human_review_list(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any], merchant_id: str
+) -> dict[str, Any]:
     return _merchant_conversations(
         db_path,
         merchant_id,
@@ -428,76 +475,224 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
     RouteEntry({"GET"}, "/health", lambda db_path, payload, query, **kw: _health(db_path)),
     RouteEntry({"GET"}, "/merchants", lambda db_path, payload, query, **kw: _list_merchants(db_path, query)),
     RouteEntry({"POST"}, "/merchants", lambda db_path, payload, query, **kw: _create_merchant(db_path, payload)),
-    RouteEntry({"GET"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _get_merchant(db_path, merchant_id)),
-    RouteEntry({"GET"}, "/merchants/{merchant_id}/private-config", lambda db_path, payload, query, merchant_id: _get_merchant_private_config(db_path, merchant_id, payload)),
-    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/rotate", lambda db_path, payload, query, merchant_id: _rotate_merchant_token(db_path, merchant_id, payload)),
-    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/revoke", lambda db_path, payload, query, merchant_id: _revoke_merchant_tokens(db_path, merchant_id, payload)),
-    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/recover", lambda db_path, payload, query, merchant_id: _recover_merchant_token(db_path, merchant_id, payload)),
-    RouteEntry({"PATCH"}, "/merchants/{merchant_id}", lambda db_path, payload, query, merchant_id: _update_merchant(db_path, merchant_id, payload)),
+    RouteEntry(
+        {"GET"},
+        "/merchants/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _get_merchant(db_path, merchant_id),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/merchants/{merchant_id}/private-config",
+        lambda db_path, payload, query, merchant_id: _get_merchant_private_config(db_path, merchant_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/merchants/{merchant_id}/token/rotate",
+        lambda db_path, payload, query, merchant_id: _rotate_merchant_token(db_path, merchant_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/merchants/{merchant_id}/token/revoke",
+        lambda db_path, payload, query, merchant_id: _revoke_merchant_tokens(db_path, merchant_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/merchants/{merchant_id}/token/recover",
+        lambda db_path, payload, query, merchant_id: _recover_merchant_token(db_path, merchant_id, payload),
+    ),
+    RouteEntry(
+        {"PATCH"},
+        "/merchants/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _update_merchant(db_path, merchant_id, payload),
+    ),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/conversations", _merchant_conversation_list),
     RouteEntry({"GET"}, "/merchants/{merchant_id}/human-review", _merchant_human_review_list),
-    RouteEntry({"GET"}, "/merchants/{merchant_id}/agents", lambda db_path, payload, query, merchant_id: _list_agents(
-        db_path,
-        payload,
-        owner_id=merchant_id,
-        limit=query.get("limit"),
-        offset=query.get("offset"),
-    )),
+    RouteEntry(
+        {"GET"},
+        "/merchants/{merchant_id}/agents",
+        lambda db_path, payload, query, merchant_id: _list_agents(
+            db_path,
+            payload,
+            owner_id=merchant_id,
+            limit=query.get("limit"),
+            offset=query.get("offset"),
+        ),
+    ),
     RouteEntry({"POST"}, "/products", lambda db_path, payload, query, **kw: _create_product(db_path, payload)),
     RouteEntry({"GET"}, "/products/{sku}", lambda db_path, payload, query, sku: _get_product(db_path, sku)),
-    RouteEntry({"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)),
+    RouteEntry(
+        {"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)
+    ),
     RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query)),
     RouteEntry({"GET"}, "/search/merchants", lambda db_path, payload, query, **kw: _search_merchants(db_path, query)),
-    RouteEntry({"POST"}, "/channels/messages", lambda db_path, payload, query, **kw: _ingest_channel_message(db_path, payload)),
+    RouteEntry(
+        {"POST"}, "/channels/messages", lambda db_path, payload, query, **kw: _ingest_channel_message(db_path, payload)
+    ),
     RouteEntry({"POST"}, "/buyer/ask", lambda db_path, payload, query, **kw: _buyer_ask(db_path, payload)),
-    RouteEntry({"POST"}, "/conversations", lambda db_path, payload, query, **kw: _create_conversation(db_path, payload)),
-    RouteEntry({"GET"}, "/conversations/{conversation_id}", lambda db_path, payload, query, conversation_id: _get_conversation(db_path, conversation_id, payload)),
-    RouteEntry({"POST"}, "/conversations/{conversation_id}/messages", lambda db_path, payload, query, conversation_id: _append_conversation_message(db_path, conversation_id, payload)),
-    RouteEntry({"POST"}, "/conversations/{conversation_id}/close", lambda db_path, payload, query, conversation_id: _close_conversation(db_path, conversation_id, payload)),
-    RouteEntry({"POST"}, "/conversations/{conversation_id}/human-review", lambda db_path, payload, query, conversation_id: _create_human_review(db_path, conversation_id, payload)),
-    RouteEntry({"POST"}, "/conversations/{conversation_id}/human-review/resolve", lambda db_path, payload, query, conversation_id: _resolve_human_review(db_path, conversation_id, payload)),
+    RouteEntry(
+        {"POST"}, "/conversations", lambda db_path, payload, query, **kw: _create_conversation(db_path, payload)
+    ),
+    RouteEntry(
+        {"GET"},
+        "/conversations/{conversation_id}",
+        lambda db_path, payload, query, conversation_id: _get_conversation(db_path, conversation_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/conversations/{conversation_id}/messages",
+        lambda db_path, payload, query, conversation_id: _append_conversation_message(
+            db_path, conversation_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/conversations/{conversation_id}/close",
+        lambda db_path, payload, query, conversation_id: _close_conversation(db_path, conversation_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/conversations/{conversation_id}/human-review",
+        lambda db_path, payload, query, conversation_id: _create_human_review(db_path, conversation_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/conversations/{conversation_id}/human-review/resolve",
+        lambda db_path, payload, query, conversation_id: _resolve_human_review(db_path, conversation_id, payload),
+    ),
     RouteEntry({"GET"}, "/buyers/{buyer_id}/conversations", _buyer_conversation_list),
     RouteEntry({"POST"}, "/agents/heartbeat", lambda db_path, payload, query, **kw: _agent_heartbeat(db_path, payload)),
-    RouteEntry({"GET"}, "/agents/tokens", lambda db_path, payload, query, **kw: _list_agent_tokens(
-        db_path,
-        payload,
-        merchant_id=str(query.get("merchant_id") or ""),
-        limit=query.get("limit"),
-        offset=query.get("offset"),
-    )),
+    RouteEntry(
+        {"GET"},
+        "/agents/tokens",
+        lambda db_path, payload, query, **kw: _list_agent_tokens(
+            db_path,
+            payload,
+            merchant_id=str(query.get("merchant_id") or ""),
+            limit=query.get("limit"),
+            offset=query.get("offset"),
+        ),
+    ),
     RouteEntry({"POST"}, "/agents/tokens", lambda db_path, payload, query, **kw: _create_agent_token(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/tokens/revoke", lambda db_path, payload, query, **kw: _revoke_agent_token(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/tokens/rotate", lambda db_path, payload, query, **kw: _rotate_agent_token(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/messages/claim", lambda db_path, payload, query, **kw: _claim_agent_message(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/messages/complete", lambda db_path, payload, query, **kw: _complete_agent_message(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/messages/fail", lambda db_path, payload, query, **kw: _fail_agent_message(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/messages/abandon", lambda db_path, payload, query, **kw: _abandon_agent_message(db_path, payload)),
-    RouteEntry({"POST"}, "/agents/messages/abandon-stale", lambda db_path, payload, query, **kw: _abandon_stale_agent_messages(db_path, payload)),
-    RouteEntry({"GET"}, "/agents", lambda db_path, payload, query, **kw: _list_agents(
-        db_path,
-        payload,
-        limit=query.get("limit"),
-        offset=query.get("offset"),
-    )),
-    RouteEntry({"GET"}, "/agents/{agent_id}", lambda db_path, payload, query, agent_id: _get_agent(db_path, agent_id, payload)),
-    RouteEntry({"POST"}, "/audit/tool-calls", lambda db_path, payload, query, **kw: _record_tool_call_audit(db_path, payload)),
-    RouteEntry({"GET"}, "/audit/events", lambda db_path, payload, query, **kw: _audit_events(
-        db_path,
-        payload,
-        merchant_id=str(query.get("merchant_id") or ""),
-        event=str(query.get("event") or ""),
-        limit=query.get("limit") or 50,
-        offset=query.get("offset"),
-    )),
-    RouteEntry({"GET"}, "/human-review/queue", lambda db_path, payload, query, **kw: _human_review_queue(
-        db_path,
-        payload,
-        merchant_id=str(query.get("merchant_id") or ""),
-        limit=query.get("limit"),
-        offset=query.get("offset"),
-    )),
-    RouteEntry({"GET"}, "/human-review/{review_id}", lambda db_path, payload, query, review_id: _get_human_review(db_path, review_id, payload)),
-    RouteEntry({"POST"}, "/human-review/{review_id}/resolve", lambda db_path, payload, query, review_id: _resolve_human_review_item(db_path, review_id, payload)),
+    RouteEntry(
+        {"POST"}, "/agents/tokens/revoke", lambda db_path, payload, query, **kw: _revoke_agent_token(db_path, payload)
+    ),
+    RouteEntry(
+        {"POST"}, "/agents/tokens/rotate", lambda db_path, payload, query, **kw: _rotate_agent_token(db_path, payload)
+    ),
+    RouteEntry(
+        {"POST"}, "/agents/messages/claim", lambda db_path, payload, query, **kw: _claim_agent_message(db_path, payload)
+    ),
+    RouteEntry(
+        {"POST"},
+        "/agents/messages/complete",
+        lambda db_path, payload, query, **kw: _complete_agent_message(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"}, "/agents/messages/fail", lambda db_path, payload, query, **kw: _fail_agent_message(db_path, payload)
+    ),
+    RouteEntry(
+        {"POST"},
+        "/agents/messages/abandon",
+        lambda db_path, payload, query, **kw: _abandon_agent_message(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/agents/messages/abandon-stale",
+        lambda db_path, payload, query, **kw: _abandon_stale_agent_messages(db_path, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/agents",
+        lambda db_path, payload, query, **kw: _list_agents(
+            db_path,
+            payload,
+            limit=query.get("limit"),
+            offset=query.get("offset"),
+        ),
+    ),
+    RouteEntry(
+        {"GET"}, "/agents/{agent_id}", lambda db_path, payload, query, agent_id: _get_agent(db_path, agent_id, payload)
+    ),
+    RouteEntry(
+        {"POST"}, "/audit/tool-calls", lambda db_path, payload, query, **kw: _record_tool_call_audit(db_path, payload)
+    ),
+    RouteEntry(
+        {"GET"},
+        "/audit/events",
+        lambda db_path, payload, query, **kw: _audit_events(
+            db_path,
+            payload,
+            merchant_id=str(query.get("merchant_id") or ""),
+            event=str(query.get("event") or ""),
+            limit=query.get("limit") or 50,
+            offset=query.get("offset"),
+        ),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/human-review/queue",
+        lambda db_path, payload, query, **kw: _human_review_queue(
+            db_path,
+            payload,
+            merchant_id=str(query.get("merchant_id") or ""),
+            limit=query.get("limit"),
+            offset=query.get("offset"),
+        ),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/human-review/{review_id}",
+        lambda db_path, payload, query, review_id: _get_human_review(db_path, review_id, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/human-review/{review_id}/resolve",
+        lambda db_path, payload, query, review_id: _resolve_human_review_item(db_path, review_id, payload),
+    ),
+    RouteEntry({"GET"}, "/capabilities", lambda db_path, payload, query, **kw: _capabilities(db_path)),
+    RouteEntry(
+        {"GET"},
+        "/negotiation/pending-messages",
+        lambda db_path, payload, query, **kw: _negotiation_pending_messages(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"}, "/negotiation/claims", lambda db_path, payload, query, **kw: _negotiation_claim(db_path, payload)
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/claims/complete",
+        lambda db_path, payload, query, **kw: _negotiation_complete_claim(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/claims/fail",
+        lambda db_path, payload, query, **kw: _negotiation_fail_claim(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/claims/abandon",
+        lambda db_path, payload, query, **kw: _negotiation_abandon_claim(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/claims/heartbeat",
+        lambda db_path, payload, query, **kw: _negotiation_heartbeat_claims(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/claims/abandon-stale",
+        lambda db_path, payload, query, **kw: _negotiation_abandon_stale_claims(db_path, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/negotiation/snapshot",
+        lambda db_path, payload, query, **kw: _negotiation_snapshot(db_path, payload, query),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/negotiation/decisions",
+        lambda db_path, payload, query, **kw: _negotiation_submit_decision(db_path, payload),
+    ),
 )
 
 
@@ -617,11 +812,13 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         return _json_error_response(400, str(exc))
 
     if RequestValidationError is not None:  # pragma: no cover - exercised with fastapi installed
+
         @app.exception_handler(RequestValidationError)
         def request_validation_error_handler(_request: Any, exc: Exception) -> Any:
             return _json_error_response(400, str(exc))
 
     if StarletteHTTPException is not None:  # pragma: no cover - exercised with fastapi installed
+
         @app.exception_handler(StarletteHTTPException)
         def http_exception_handler(_request: Any, exc: Any) -> Any:
             status = int(exc.status_code)
@@ -812,7 +1009,9 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
-        return _append_conversation_message(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
+        return _append_conversation_message(
+            db_path, conversation_id, api_auth.payload_with_auth(payload, authorization)
+        )
 
     @app.post("/conversations/{conversation_id}/close")
     def close_conversation(
@@ -1025,5 +1224,61 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _resolve_human_review(db_path, conversation_id, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/capabilities")
+    def capabilities() -> dict[str, Any]:
+        return _capabilities(db_path)
+
+    @app.get("/negotiation/pending-messages")
+    def negotiation_pending_messages(authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _negotiation_pending_messages(db_path, api_auth.payload_with_auth({}, authorization))
+
+    @app.post("/negotiation/claims")
+    def negotiation_claim(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _negotiation_claim(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/negotiation/claims/complete")
+    def negotiation_complete_claim(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _negotiation_complete_claim(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/negotiation/claims/fail")
+    def negotiation_fail_claim(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _negotiation_fail_claim(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/negotiation/claims/abandon")
+    def negotiation_abandon_claim(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _negotiation_abandon_claim(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/negotiation/claims/heartbeat")
+    def negotiation_heartbeat_claims(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _negotiation_heartbeat_claims(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/negotiation/claims/abandon-stale")
+    def negotiation_abandon_stale_claims(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _negotiation_abandon_stale_claims(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/negotiation/snapshot")
+    def negotiation_snapshot(
+        conversation_id: str = "",
+        message_id: str = "",
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _negotiation_snapshot(
+            db_path,
+            api_auth.payload_with_auth({}, authorization),
+            {"conversation_id": conversation_id, "message_id": message_id},
+        )
+
+    @app.post("/negotiation/decisions")
+    def negotiation_submit_decision(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _negotiation_submit_decision(db_path, api_auth.payload_with_auth(payload, authorization))
 
     return app

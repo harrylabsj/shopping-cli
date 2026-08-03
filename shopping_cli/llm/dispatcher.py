@@ -21,7 +21,6 @@ from shopping_cli.llm.contracts import (
 )
 from shopping_cli.http_client import HTTPTransport, MarketplaceHTTPClient, MarketplaceHTTPError
 from shopping_cli.services import conversations as conversation_service
-from shopping_cli.services import human_review as human_review_service
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]

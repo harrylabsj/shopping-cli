@@ -220,6 +220,18 @@ Serve the FastAPI app after installing API dependencies:
 python3 scripts/shopping.py --db ./shopping-cli.sqlite api serve --host 127.0.0.1 --port 8765
 ```
 
+## Negotiation Commerce API (shopping.negotiation/0.1)
+
+shopping-cli is the authoritative Commerce Gateway for the frozen `shopping.negotiation/0.1` protocol used by Kiwi negotiation agents. The negotiation endpoints are available in both the FastAPI app and the fallback ASGI router:
+
+- `GET /capabilities` advertises the supported protocol versions and backend capabilities; `orders` is always `false` — negotiation never creates orders, payments, or inventory reservations.
+- `GET /negotiation/pending-messages`, `POST /negotiation/claims`, `GET /negotiation/snapshot`, `POST /negotiation/decisions`, and `POST /negotiation/claims/complete|fail|abandon` cover the dual-role (buyer + merchant) claim → snapshot → decision → complete loop.
+- Role and owner identity are always derived from the Bearer token (fail closed); client-declared `merchant_id`/`role` fields are ignored. Snapshots are role-trimmed and never expose the merchant's private `automation_boundaries` floor or any buyer-private budget.
+- `POST /negotiation/decisions` is the only write intent: the server-side policy gate strictly validates the frozen decision schema, conversation state, `next_actor`, claim ownership, catalog facts, merchant floor/discount boundaries, and privacy leaks before atomically writing the structured message, advancing `next_actor`, and recording audit events. Replays with the same idempotency key never duplicate messages; a conflicting payload under a used key fails closed with 409.
+- Frozen schemas ship in `shopping_cli/contracts/shopping.negotiation/0.1/` and cross-language fixtures in `fixtures/negotiation/` (validated by `tests/test_negotiation_contracts.py`), so the runtime never depends on a sibling Kiwi checkout.
+
+See `references/negotiation-api.md` for the full endpoint contract, policy-gate order, Kiwi integration flow, and known limitations.
+
 ## Optional LLM Tool Loop
 
 `llm run` exposes the guarded OpenAI-compatible tool loop for local demos and host adapters:
