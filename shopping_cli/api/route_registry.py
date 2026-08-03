@@ -57,6 +57,16 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/merchants/{merchant_id}/human-review": {"conversations"},
     "/conversations/{conversation_id}/human-review": {"conversations"},
     "/conversations/{conversation_id}/human-review/resolve": {"conversations"},
+    "/capabilities": {"marketplace"},
+    "/negotiation/pending-messages": {"agents", "conversations"},
+    "/negotiation/claims": {"agents", "conversations"},
+    "/negotiation/claims/complete": {"agents", "conversations"},
+    "/negotiation/claims/fail": {"agents", "conversations"},
+    "/negotiation/claims/abandon": {"agents", "conversations"},
+    "/negotiation/claims/heartbeat": {"agents", "conversations"},
+    "/negotiation/claims/abandon-stale": {"agents", "conversations"},
+    "/negotiation/snapshot": {"agents", "conversations"},
+    "/negotiation/decisions": {"agents", "conversations"},
 }
 
 
