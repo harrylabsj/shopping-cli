@@ -920,11 +920,20 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
 )
 
 
-def resolve_route(method: str, path: str) -> tuple[bool, bool]:
-    """Return (path_known, method_allowed) without parsing the request body."""
+def resolve_route(
+    method: str, path: str, routes: tuple[RouteEntry, ...] | list[Any] | None = None
+) -> tuple[bool, bool]:
+    """Return (path_known, method_allowed) without parsing the request body.
+
+    *routes* defaults to the full ``_ROUTE_TABLE``; a filtered table can be
+    passed to resolve against a route subset (e.g. the kiwi-catalog
+    standalone service — see :func:`create_catalog_app`).
+    """
+    table = _ROUTE_TABLE if routes is None else tuple(routes)
     path_known = False
-    for route in _ROUTE_TABLE:
-        if _match_path(route.path_template, path) is None:
+    for route in table:
+        template = getattr(route, "path_template", None) or getattr(route, "path", "")
+        if _match_path(template, path) is None:
             continue
         path_known = True
         if method.upper() in route.methods:
@@ -994,6 +1003,31 @@ def handle_request(
         return 400, {"ok": False, "error": str(exc)}
     except Exception:
         return 500, {"ok": False, "error": "internal server error"}
+
+
+def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
+    """kiwi-catalog standalone service (阶段 1 裁剪原型).
+
+    Exposes only the Agent Catalog domain: registration / verification /
+    search / governance routes (/v1/agent-catalog/*), the hosted publication
+    surface (/v1/hosted/* — Agent Card / UCP) and /health.  The hosted
+    negotiation endpoint (/a2a/agents/{id}) and all marketplace routes are
+    excluded (切割分水岭, see docs/shopping-cli-agent-catalog-extraction-
+    plan-v1.0.md).
+
+    阶段 1 说明：路由层裁剪 + 独立 DB 文件（首次访问经 db_session 自动
+    初始化，schema 是全量超集——marketplace 表空置）；models 拆分与
+    影子表解耦属阶段 2。当前只提供 fallback ASGI 形态；FastAPI 双栈留
+    阶段 3（新仓库）。
+    """
+    from shopping_cli.api.route_registry import catalog_route_info
+
+    routes = catalog_route_info()
+    return MarketplaceASGIApp(
+        db_path,
+        route_provider=lambda: routes,
+        route_resolver=lambda method, path: resolve_route(method, path, routes=routes),
+    )
 
 
 def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
