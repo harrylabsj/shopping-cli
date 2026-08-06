@@ -333,6 +333,35 @@ def _print_stats_text(stats: dict[str, Any]) -> None:
     print(f"Skills:                {stats['skill_count']}")
     print(f"Profile snapshots:     {stats['profile_snapshot_count']}")
 
+    runtime = stats.get("runtime_metrics", {})
+    print()
+    print("Runtime metrics (this process)")
+    print("------------------------------")
+    counters = runtime.get("counters", {})
+    if counters:
+        _distribution("Counters", counters)
+    else:
+        print("Counters:  (none)")
+    latency = runtime.get("latency", {})
+    if latency:
+        print("Latency:")
+        for name in sorted(latency):
+            rec = latency[name]
+            print(f"  {name:<24} count={rec['count']} avg={rec['avg']:.3f}s max={rec['max']:.3f}s")
+    else:
+        print("Latency:   (none)")
+    gauges = runtime.get("gauges", {})
+    for name in sorted(gauges):
+        print(f"Gauge:                 {name} = {gauges[name]:g}")
+    funnel = runtime.get("funnel", {})
+    if funnel:
+        _distribution("Funnel", funnel)
+    derived = runtime.get("derived", {})
+    if derived:
+        print("Derived:")
+        for name in sorted(derived):
+            print(f"  {name:<28} {derived[name]:g}")
+
 
 def cmd_agent_catalog_stats(args: argparse.Namespace) -> None:
     """Local §24 metric subset for the local catalog store."""

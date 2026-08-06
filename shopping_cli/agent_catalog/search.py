@@ -8,9 +8,11 @@ future phase.
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Any
 
 from shopping_cli.agent_catalog.sqlite_repository import search_catalog_agents as _repo_search
+from shopping_cli.services.catalog_runtime_metrics import record_search
 
 
 def search_catalog_agents(
@@ -32,11 +34,16 @@ def search_catalog_agents(
     Ordering (§8.3): verification_status rank → last_verified_at desc →
     display_name → catalog_agent_id.
 
+    Records §24 runtime metrics (``catalog_search_latency`` +
+    ``catalog_search_result_count``).  Exceptions are not instrumented —
+    a search that raises is a caller bug, not a runtime signal.
+
     Returns (results, next_cursor).  next_cursor is None at the last page.
 
     TODO(Phase 2): region / delivery_coverage filters when data model supports them.
     """
-    return _repo_search(
+    start = time.monotonic()
+    results, next_cursor = _repo_search(
         conn,
         q=q,
         category=category,
@@ -49,3 +56,5 @@ def search_catalog_agents(
         limit=limit,
         cursor=cursor,
     )
+    record_search(time.monotonic() - start, len(results))
+    return results, next_cursor

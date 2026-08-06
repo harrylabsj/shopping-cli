@@ -33,6 +33,7 @@ from shopping_cli.agent_catalog.sqlite_repository import (
 )
 from shopping_cli.core.errors import ConflictError, PermissionDenied, ValidationError
 from shopping_cli.services.agent_catalog import get_catalog_agent_write_detail
+from shopping_cli.services.catalog_runtime_metrics import record_funnel
 
 # Terminal states a re-registration may recover from (§6 terminal states).
 _RE_REGISTERABLE = frozenset({"rejected", "suspended"})
@@ -150,6 +151,8 @@ def register_catalog_agent(
             "ucp_profile_url_present": bool(endpoints and any(e["kind"] == "ucp_profile" for e in endpoints)),
         },
     )
+    # §24 funnel: a successful registration is the discovery event.
+    record_funnel("discovery")
     return get_catalog_agent_write_detail(conn, catalog_agent_id)
 
 

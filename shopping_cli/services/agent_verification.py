@@ -83,10 +83,16 @@ from shopping_cli.discovery.verifier import (
     VerificationStateMachine,
 )
 from shopping_cli.services.agent_catalog import _validate_hosting_invariant
+from shopping_cli.services.catalog_runtime_metrics import record_funnel, set_queue_depth
 
 # The ladder rungs that carry a persisted profile (anything above DISCOVERED).
 _LADDER_RUNGS: frozenset[str] = frozenset(
     {PROFILE_VALID, DOMAIN_VERIFIED, AGENT_VERIFIED, COMMERCE_VERIFIED}
+)
+
+# Rungs that count as "verified" for the §24 funnel (domain-control proof §6).
+_VERIFIED_RUNGS: frozenset[str] = frozenset(
+    {DOMAIN_VERIFIED, AGENT_VERIFIED, COMMERCE_VERIFIED}
 )
 
 
@@ -646,6 +652,9 @@ class VerificationService:
             )
 
         if failure_kind is None:
+            # §24 funnel: a run reaching any verified rung counts as verified.
+            if status in _VERIFIED_RUNGS:
+                record_funnel("verified")
             if status == COMMERCE_VERIFIED:
                 self._write_audit(
                     catalog_agent_id,
@@ -884,6 +893,17 @@ class VerificationQueue:
             )
             worker.start()
             self._workers.append(worker)
+        self._update_depth()
+
+    def _update_depth(self) -> None:
+        """Refresh the §24 ``verification_queue_depth`` gauge.
+
+        Depth is the number of tasks enqueued but not yet finished — pending
+        plus in-flight — computed from the two lock-guarded dicts (O(1)).
+        """
+        with self._results_cv:
+            depth = len(self._tasks) - len(self._results)
+        set_queue_depth(max(depth, 0))
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -928,9 +948,11 @@ class VerificationQueue:
         except queue.Full as exc:
             with self._results_cv:
                 self._tasks.pop(task_id, None)
+            self._update_depth()
             raise VerificationQueueFullError(
                 f"verification queue is full (max_pending={self._config.max_pending})"
             ) from exc
+        self._update_depth()
         if not wait:
             return VerificationTaskResult(
                 task_id=task_id,
@@ -1022,6 +1044,7 @@ class VerificationQueue:
                 with self._results_cv:
                     self._results[task.task_id] = result
                     self._results_cv.notify_all()
+                self._update_depth()
             finally:
                 self._pending.task_done()
 

@@ -11,6 +11,10 @@ from __future__ import annotations
 from typing import Any
 
 from shopping_cli.db.session import now_iso
+from shopping_cli.services.catalog_runtime_metrics import (
+    derived_metrics,
+    snapshot_runtime_metrics,
+)
 
 # verification_status values reached after at least domain-control proof (§6).
 _VERIFIED_STATUSES = frozenset({"domain_verified", "agent_verified", "commerce_verified"})
@@ -34,6 +38,38 @@ def _grouped_counts(conn: Any, column: str) -> dict[str, int]:
     return {str(r[column]): int(r["n"]) for r in rows}
 
 
+def _runtime_metrics_subtree(hosting_mode_distribution: dict[str, int]) -> dict[str, Any]:
+    """Assemble the ``runtime_metrics`` subtree for ``catalog_stats``.
+
+    Combines the process-wide runtime registry snapshot (counters / latency /
+    gauges / funnel) with derived metrics.  ``direct_a2a_ratio`` and
+    ``hosted_gateway_ratio`` are derived from the catalog's hosting_mode
+    distribution (decision fixed in catalog_runtime_metrics docstring: there
+    is no direct A2A runtime call path yet, so ratios are data-form derived);
+    ``unknown`` mode is excluded from both denominators.
+    """
+    snapshot = snapshot_runtime_metrics()
+    mode_total = (
+        hosting_mode_distribution.get("direct", 0)
+        + hosting_mode_distribution.get("hosted", 0)
+        + hosting_mode_distribution.get("hybrid", 0)
+    )
+    direct_ratio = (
+        hosting_mode_distribution.get("direct", 0) / mode_total if mode_total else 0.0
+    )
+    hosted_ratio = (
+        hosting_mode_distribution.get("hosted", 0) / mode_total if mode_total else 0.0
+    )
+    return {
+        **snapshot,
+        "derived": {
+            **derived_metrics(snapshot),
+            "direct_a2a_ratio": round(direct_ratio, 6),
+            "hosted_gateway_ratio": round(hosted_ratio, 6),
+        },
+    }
+
+
 def catalog_stats(conn: Any) -> dict[str, Any]:
     """Local §24 metric subset for the ``agent catalog stats`` command."""
     total = _scalar(conn, "select count(*) from catalog_agents")
@@ -42,6 +78,7 @@ def catalog_stats(conn: Any) -> dict[str, Any]:
         "select count(*) from catalog_agents where verification_status in ('domain_verified','agent_verified','commerce_verified')",
     )
     stale = _scalar(conn, "select count(*) from catalog_agents where verification_status = 'stale'")
+    hosting_mode_distribution = _grouped_counts(conn, "hosting_mode")
 
     return {
         "catalog_agent_count": total,
@@ -58,13 +95,14 @@ def catalog_stats(conn: Any) -> dict[str, Any]:
             conn, "select count(*) from catalog_agents where verification_status = 'rejected'"
         ),
         "verification_status_distribution": _grouped_counts(conn, "verification_status"),
-        "hosting_mode_distribution": _grouped_counts(conn, "hosting_mode"),
+        "hosting_mode_distribution": hosting_mode_distribution,
         "source_type_distribution": _grouped_counts(conn, "source_type"),
         "lifecycle_status_distribution": _grouped_counts(conn, "lifecycle_status"),
         "capability_count": _scalar(conn, "select count(*) from agent_capabilities"),
         "endpoint_count": _scalar(conn, "select count(*) from agent_endpoints"),
         "skill_count": _scalar(conn, "select count(*) from agent_skills"),
         "profile_snapshot_count": _scalar(conn, "select count(*) from agent_profile_snapshots"),
+        "runtime_metrics": _runtime_metrics_subtree(hosting_mode_distribution),
     }
 
 
