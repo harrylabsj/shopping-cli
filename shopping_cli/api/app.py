@@ -17,6 +17,7 @@ from typing import Any, Callable
 from shopping_cli import VERSION
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
+from shopping_cli.api.handlers import agent_catalog as agent_catalog_handlers
 from shopping_cli.api.handlers import agents as agent_handlers
 from shopping_cli.api.handlers import audit as audit_handlers
 from shopping_cli.api.handlers import buyer as buyer_handlers
@@ -428,6 +429,29 @@ def _negotiation_submit_decision(db_path: str | Path, payload: dict[str, Any]) -
     return negotiation_handlers.submit_decision(db_path, payload)
 
 
+# ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────────
+
+
+def _list_catalog_agents(db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
+    return agent_catalog_handlers.list_catalog_agents(db_path, query)
+
+
+def _get_catalog_agent(
+    db_path: str | Path, _payload: dict[str, Any], _query: dict[str, Any], catalog_agent_id: str
+) -> dict[str, Any]:
+    return agent_catalog_handlers.get_catalog_agent(db_path, catalog_agent_id)
+
+
+def _search_agent_catalog(db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
+    return agent_catalog_handlers.search_agent_catalog(db_path, query)
+
+
+def _list_merchant_catalog_agents(
+    db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any], merchant_id: str
+) -> dict[str, Any]:
+    return agent_catalog_handlers.list_merchant_catalog_agents(db_path, merchant_id, query)
+
+
 def _match_path(template: str, path: str) -> dict[str, str] | None:
     parts = template.split("/")
     regex_parts = []
@@ -692,6 +716,31 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"POST"},
         "/negotiation/decisions",
         lambda db_path, payload, query, **kw: _negotiation_submit_decision(db_path, payload),
+    ),
+    # ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────
+    RouteEntry(
+        {"GET"},
+        "/v1/agent-catalog/agents",
+        lambda db_path, payload, query, **kw: _list_catalog_agents(db_path, payload, query),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/agent-catalog/agents/search",
+        lambda db_path, payload, query, **kw: _search_agent_catalog(db_path, payload, query),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}",
+        lambda db_path, payload, query, catalog_agent_id: _get_catalog_agent(
+            db_path, payload, query, catalog_agent_id
+        ),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/agent-catalog/merchants/{merchant_id}/agents",
+        lambda db_path, payload, query, merchant_id: _list_merchant_catalog_agents(
+            db_path, payload, query, merchant_id
+        ),
     ),
 )
 
@@ -1280,5 +1329,53 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
     ) -> dict[str, Any]:
         return _negotiation_submit_decision(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    # ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────
+
+    @app.get("/v1/agent-catalog/agents")
+    def list_catalog_agents(limit: str = "", cursor: str = "") -> dict[str, Any]:
+        return _list_catalog_agents(db_path, {}, {"limit": limit, "cursor": cursor})
+
+    @app.get("/v1/agent-catalog/agents/search")
+    def search_agent_catalog(
+        q: str = "",
+        category: str = "",
+        skill: str = "",
+        capability: str = "",
+        protocol: str = "",
+        hosting_mode: str = "",
+        verification_status: str = "",
+        verified_after: str = "",
+        limit: str = "",
+        cursor: str = "",
+    ) -> dict[str, Any]:
+        return _search_agent_catalog(
+            db_path,
+            {},
+            {
+                "q": q,
+                "category": category,
+                "skill": skill,
+                "capability": capability,
+                "protocol": protocol,
+                "hosting_mode": hosting_mode,
+                "verification_status": verification_status,
+                "verified_after": verified_after,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
+
+    @app.get("/v1/agent-catalog/agents/{catalog_agent_id}")
+    def get_catalog_agent(catalog_agent_id: str) -> dict[str, Any]:
+        return _get_catalog_agent(db_path, {}, {}, catalog_agent_id)
+
+    @app.get("/v1/agent-catalog/merchants/{merchant_id}/agents")
+    def list_merchant_catalog_agents(
+        merchant_id: str, limit: str = "", cursor: str = ""
+    ) -> dict[str, Any]:
+        return _list_merchant_catalog_agents(
+            db_path, {}, {"limit": limit, "cursor": cursor}, merchant_id
+        )
 
     return app

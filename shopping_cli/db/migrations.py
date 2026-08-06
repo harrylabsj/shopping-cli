@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -242,6 +242,115 @@ def migration_009_unique_open_reuse_key(conn: sqlite3.Connection) -> None:
     )
 
 
+_AGENT_CATALOG_DDL = [
+    """
+    create table if not exists catalog_agents (
+        catalog_agent_id text primary key,
+        merchant_id text,
+        hosted_runtime_agent_id text,
+        display_name text not null,
+        provider_name text not null default '',
+        canonical_domain text not null default '',
+        agent_type text not null default '',
+        source_type text not null
+            check(source_type in ('hosted','self_registered','discovered','imported','admin_curated')),
+        lifecycle_status text not null default 'active'
+            check(lifecycle_status in ('active','inactive','deprecated')),
+        verification_status text not null default 'discovered'
+            check(verification_status in (
+                'discovered','profile_valid','domain_verified','agent_verified',
+                'commerce_verified','stale','rejected','suspended','unreachable'
+            )),
+        hosting_mode text not null default 'unknown'
+            check(hosting_mode in ('direct','hosted','hybrid','unknown')),
+        first_seen_at text not null,
+        last_seen_at text not null,
+        last_verified_at text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        foreign key (merchant_id) references merchants(id),
+        foreign key (hosted_runtime_agent_id) references agents(id)
+    )
+    """,
+    """
+    create table if not exists agent_endpoints (
+        endpoint_id integer primary key autoincrement,
+        catalog_agent_id text not null,
+        kind text not null check(kind in ('a2a','agent_card','ucp_profile','hosted_gateway')),
+        url text not null default '',
+        protocol text not null default '',
+        protocol_version text not null default '',
+        preference integer not null default 0,
+        auth_summary_json text not null default '{}',
+        status text not null default 'active',
+        last_checked_at text not null default '',
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
+    """
+    create table if not exists agent_capabilities (
+        catalog_agent_id text not null,
+        namespace text not null,
+        capability_id text not null,
+        version text not null default '',
+        required integer not null default 0,
+        source text not null default '',
+        schema_url text not null default '',
+        spec_url text not null default '',
+        last_verified_at text not null default '',
+        primary key (catalog_agent_id, namespace, capability_id),
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
+    """
+    create table if not exists agent_skills (
+        catalog_agent_id text not null,
+        skill_id text not null,
+        name text not null,
+        description text not null default '',
+        tags_json text not null default '[]',
+        input_modes_json text not null default '[]',
+        output_modes_json text not null default '[]',
+        primary key (catalog_agent_id, skill_id),
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
+    """
+    create table if not exists agent_profile_snapshots (
+        snapshot_id integer primary key autoincrement,
+        catalog_agent_id text not null,
+        profile_type text not null check(profile_type in ('agent_card','ucp')),
+        source_url text not null default '',
+        etag text not null default '',
+        last_modified text not null default '',
+        content_hash text not null default '',
+        raw_json text not null default '{}',
+        fetched_at text not null default '',
+        fresh_until text not null default '',
+        validation_status text not null default 'pending',
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
+    """
+    create table if not exists agent_verifications (
+        verification_id integer primary key autoincrement,
+        catalog_agent_id text not null,
+        verification_type text not null,
+        result text not null default '',
+        evidence_json text not null default '{}',
+        checked_at text not null default '',
+        expires_at text not null default '',
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
+]
+
+
+def migration_010_agent_catalog(conn: sqlite3.Connection) -> None:
+    for statement in _AGENT_CATALOG_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -252,6 +361,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "atomic_lifecycle_constraints", migration_007_atomic_lifecycle_constraints),
     Migration(8, "rebuild_cjk_search_documents", migration_008_rebuild_cjk_search_documents),
     Migration(9, "unique_open_reuse_key", migration_009_unique_open_reuse_key),
+    Migration(10, "agent_catalog", migration_010_agent_catalog),
 )
 
 

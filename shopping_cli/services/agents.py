@@ -242,3 +242,31 @@ def rotate_agent_token(
         "revoked_at": revoked_at,
         "previous_token": token_service.agent_token_summary(previous),
     }
+
+
+# ── Agent Catalog hook (§25 Phase 1) ────────────────────────────────────────
+
+
+def register_hosted_agent_in_catalog(
+    conn: Any,
+    agent_id: str,
+    merchant_id: str,
+    *,
+    merchant_name: str = "",
+    runtime_capabilities: list[str] | None = None,
+) -> dict[str, Any]:
+    """Explicitly register a hosted runtime agent in the Commerce Agent Catalog.
+
+    This is the service-layer hook point for the one-way hosted → catalog
+    projection (§25 Phase 1).  The heartbeat path in agents/tools.py calls
+    this automatically on first heartbeat; this function exists for explicit
+    (re-)registration scenarios.
+    """
+    from shopping_cli.services.agent_catalog import ensure_hosted_catalog_agent as _ensure
+    return _ensure(
+        conn,
+        agent_id=str(agent_id).strip(),
+        merchant_id=str(merchant_id).strip(),
+        merchant_name=str(merchant_name or "").strip(),
+        runtime_capabilities=list(runtime_capabilities or []),
+    )
