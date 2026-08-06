@@ -311,6 +311,9 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
     actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_register_request_hash(payload)
 
+    response: dict[str, Any] = {}
+    cagt_id = ""
+    actor = "cli"
     with db_session(db_path) as conn:
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
@@ -340,23 +343,29 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
                 actor=actor,
             )
             cagt_id = str(result.get("catalog_agent_id") or "")
-            enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
-            response: dict[str, Any] = {
+            response = {
                 "ok": True,
                 "catalog_agent": result,
                 "verification_enqueued": True,
-                "task_id": getattr(enqueued, "task_id", ""),
+                "task_id": "",
                 "idempotent": False,
             }
             api_idempotency.complete_catalog_write_idempotency(
                 conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash, response
             )
-            return response
         except Exception:
             api_idempotency.clear_catalog_write_idempotency_claim(
                 conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
             )
             raise
+    # Enqueue AFTER the transaction commits: the persistent queue (v3.0-P4)
+    # writes its ledger through a second connection, which would deadlock
+    # against the still-open write transaction.  The task_id is returned in
+    # the response but not cached in the idempotency row (a replay is a
+    # fresh outcome, not the same run).
+    enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
+    response["task_id"] = getattr(enqueued, "task_id", "")
+    return response
 
 
 def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -387,24 +396,27 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
         try:
             agent = require_catalog_agent(conn, catalog_agent_id)
             actor = _require_catalog_write_auth(conn, agent, payload)
-            enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
-            response: dict[str, Any] = {
+            response = {
                 "ok": True,
                 "catalog_agent_id": catalog_agent_id,
                 "verification_status": agent["verification_status"],
                 "refresh_enqueued": True,
-                "task_id": getattr(enqueued, "task_id", ""),
+                "task_id": "",
                 "idempotent": False,
             }
             api_idempotency.complete_catalog_write_idempotency(
                 conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash, response
             )
-            return response
         except Exception:
             api_idempotency.clear_catalog_write_idempotency_claim(
                 conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash
             )
             raise
+    # Enqueue AFTER the transaction commits — see register_catalog_agent
+    # for the ledger write-lock rationale (v3.0-P4 persistent queue).
+    enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
+    response["task_id"] = getattr(enqueued, "task_id", "")
+    return response
 
 
 def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:

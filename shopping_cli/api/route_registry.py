@@ -105,3 +105,21 @@ def route_info() -> list[RouteInfo]:
 
 def routes_for_group(group: str) -> list[RouteInfo]:
     return [route for route in route_info() if group in route.groups]
+
+
+# ── kiwi-catalog standalone service（阶段 1 裁剪原型）───────────────────────
+# 只暴露 Agent Catalog 域：/v1/agent-catalog/*（注册/验证/搜索/治理）+
+# /v1/hosted/*（Agent Card / UCP 发布面）+ /health。 托管协商端点
+# （/a2a/agents/{id}，group 含 agent_catalog）被排除——切割分水岭。
+# 裁剪是路由层视图；阶段 1 的独立 DB 文件仍是全量 schema 超集（见
+# docs/shopping-cli-agent-catalog-extraction-plan-v1.0.md 阶段 1 调整说明）。
+
+
+def catalog_route_info() -> list[RouteInfo]:
+    """Route view for the kiwi-catalog standalone service."""
+    return [
+        route
+        for route in route_info()
+        if route.path == "/health"
+        or ("agent_catalog" in route.groups and not route.path.startswith("/a2a/"))
+    ]
