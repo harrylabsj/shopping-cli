@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from shopping_cli.agent_catalog.candidate_dto import (
+    CANDIDATE_CONTRACT_NAME,
+    CANDIDATE_DTO_VERSION,
+)
 from shopping_cli.db.session import decode_json
 
 # ── Fields that MUST NOT appear in any public response (§3.4) ───────────────
@@ -205,6 +209,15 @@ def catalog_search_result(
     # ── hosting block ───────────────────────────────────────────────────
     result["hosting"] = {
         "mode": safe_catalog.get("hosting_mode", "unknown"),
+    }
+
+    # ── contract annotation (v2.3-T1) ───────────────────────────────────
+    # Every Candidate carries the DTO name + version so consumers can gate on
+    # the contract without guessing.  Injected once at the serializer layer so
+    # all four read routes stay consistent (additive; see candidate_dto.py).
+    result["contract"] = {
+        "name": CANDIDATE_CONTRACT_NAME,
+        "version": CANDIDATE_DTO_VERSION,
     }
 
     return result
