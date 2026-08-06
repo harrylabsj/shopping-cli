@@ -515,7 +515,7 @@ class HostedPublicationBuilderTest(_HostedPublicationTestCase):
             _seed_hosted_agent(db_file, capabilities=["catalog", "inventory"])
 
             card = self._card(db_file)
-            self.assertNotIn("com.shopping.agent.capability", json.dumps(card))
+            self.assertNotIn("com.harrylabsj.shopping.capability", json.dumps(card))
 
     # ── publishability gating (§5.1) ─────────────────────────────────────
 
@@ -674,7 +674,7 @@ class HostedPublicationCapabilityProjectionTest(_HostedPublicationTestCase):
             with db_session(db_file) as conn:
                 card = build_hosted_agent_card(conn, CAGT_ID, base_url=BASE_URL)
             self.assertNotIn("catalog", json.dumps(card))
-            self.assertNotIn("com.shopping.agent.capability", json.dumps(card))
+            self.assertNotIn("com.harrylabsj.shopping.capability", json.dumps(card))
 
 
 # ── route-level tests (dual stack) ────────────────────────────────────────────

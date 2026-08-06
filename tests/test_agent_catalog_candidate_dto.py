@@ -167,7 +167,7 @@ def _full_merchant() -> dict[str, Any]:
 def _full_capabilities() -> list[dict[str, Any]]:
     return [
         {
-            "namespace": "com.shopping.agent.capability",
+            "namespace": "com.harrylabsj.shopping.capability",
             "capability_id": "catalog",
             "version": "1.0",
         },
@@ -271,7 +271,7 @@ class CapabilitiesFullyQualifiedTest(unittest.TestCase):
         )
         caps = out["capabilities"]
         self.assertEqual(caps, [
-            "com.shopping.agent.capability:catalog",
+            "com.harrylabsj.shopping.capability:catalog",
             "consultation",
         ])
         for cap in caps:
@@ -279,7 +279,7 @@ class CapabilitiesFullyQualifiedTest(unittest.TestCase):
             if ":" in cap:
                 self.assertRegex(cap, r"^[^:]+:[^:]+$")
         # The namespaced capability must carry the ':' prefix exactly once.
-        self.assertIn("com.shopping.agent.capability:catalog", caps)
+        self.assertIn("com.harrylabsj.shopping.capability:catalog", caps)
 
 
 class HostingModeMappingTest(unittest.TestCase):
@@ -429,7 +429,7 @@ class ReadRoutesContractTest(unittest.TestCase):
             )
             replace_capabilities(conn, "cagt_001", [
                 {
-                    "namespace": "com.shopping.agent.capability",
+                    "namespace": "com.harrylabsj.shopping.capability",
                     "capability_id": "catalog",
                     "version": "1.0",
                     "required": 1,
