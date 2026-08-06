@@ -33,8 +33,10 @@ from shopping_cli.cli_agent_catalog_commands import (
     cmd_agent_catalog_get,
     cmd_agent_catalog_refresh,
     cmd_agent_catalog_register,
+    cmd_agent_catalog_reinstate,
     cmd_agent_catalog_search,
     cmd_agent_catalog_stats,
+    cmd_agent_catalog_suspend,
     cmd_agent_catalog_verify,
 )
 from shopping_cli.cli_agent_commands import (
@@ -890,6 +892,20 @@ def build_parser() -> argparse.ArgumentParser:
     agent_catalog_claim.add_argument("--merchant-token", default="", dest="merchant_token")
     agent_catalog_claim.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_claim.set_defaults(func=cmd_agent_catalog_claim)
+    agent_catalog_suspend = agent_catalog_sub.add_parser("suspend", help="Suspend a catalog agent (v3.0 moderation, §10.4 P2)")
+    agent_catalog_suspend.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_suspend.add_argument("--reason", default="", help="Optional suspension reason (recorded in §23 audit)")
+    agent_catalog_suspend.add_argument("--admin-token", default="", dest="admin_token")
+    agent_catalog_suspend.add_argument("--merchant-token", default="", dest="merchant_token")
+    agent_catalog_suspend.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_suspend.set_defaults(func=cmd_agent_catalog_suspend)
+    agent_catalog_reinstate = agent_catalog_sub.add_parser("reinstate", help="Reinstate a suspended catalog agent (v3.0 moderation, §10.4 P2)")
+    agent_catalog_reinstate.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_reinstate.add_argument("--reason", default="", help="Optional reinstate reason (recorded in §23 audit)")
+    agent_catalog_reinstate.add_argument("--admin-token", default="", dest="admin_token")
+    agent_catalog_reinstate.add_argument("--merchant-token", default="", dest="merchant_token")
+    agent_catalog_reinstate.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_reinstate.set_defaults(func=cmd_agent_catalog_reinstate)
     agent_catalog_stats = agent_catalog_sub.add_parser("stats", help="Local catalog metrics (§24)")
     agent_catalog_stats.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_stats.set_defaults(func=cmd_agent_catalog_stats)

@@ -493,6 +493,18 @@ def _claim_catalog_agent(
     return agent_catalog_handlers.claim_catalog_agent(db_path, catalog_agent_id, payload)
 
 
+def _suspend_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return agent_catalog_handlers.suspend_catalog_agent(db_path, catalog_agent_id, payload)
+
+
+def _reinstate_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return agent_catalog_handlers.reinstate_catalog_agent(db_path, catalog_agent_id, payload)
+
+
 # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────────
 
 
@@ -865,6 +877,20 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"POST"},
         "/v1/agent-catalog/agents/{catalog_agent_id}/claim",
         lambda db_path, payload, query, catalog_agent_id: _claim_catalog_agent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
+        lambda db_path, payload, query, catalog_agent_id: _suspend_catalog_agent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/reinstate",
+        lambda db_path, payload, query, catalog_agent_id: _reinstate_catalog_agent(
             db_path, catalog_agent_id, payload
         ),
     ),
@@ -1591,6 +1617,33 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
         return _claim_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
+    # v3.0 moderation: suspend / reinstate are admin-only (§10.4, P2).
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/suspend")
+    def suspend_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _suspend_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/reinstate")
+    def reinstate_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _reinstate_catalog_agent(
             db_path,
             catalog_agent_id,
             api_auth.payload_with_auth(payload, authorization, idempotency_key),

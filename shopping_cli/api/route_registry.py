@@ -77,6 +77,8 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/v1/agent-catalog/agents/{catalog_agent_id}/refresh": {"agent_catalog", "marketplace"},
     "/v1/agent-catalog/agents/{catalog_agent_id}/verify": {"agent_catalog", "marketplace"},
     "/v1/agent-catalog/agents/{catalog_agent_id}/claim": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}/suspend": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}/reinstate": {"agent_catalog", "marketplace"},
     # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────
     "/v1/hosted/agents/{catalog_agent_id}/agent-card.json": {"agent_catalog", "marketplace"},
     "/v1/hosted/agents/{catalog_agent_id}/ucp": {"agent_catalog", "marketplace"},

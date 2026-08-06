@@ -26,6 +26,7 @@ from shopping_cli.agent_catalog.sqlite_repository import (
     list_profile_snapshots,
     list_verifications,
     require_catalog_agent,
+    set_verification_status,
 )
 from shopping_cli.db.session import init_db, now_iso
 from shopping_cli.discovery.fetcher import FetchError, FetchResult, ProfileFetcher, SSRFBlockError
@@ -172,6 +173,7 @@ def _seed_agent(
     source_type: str = "self_registered",
     hosting_mode: str = "direct",
     hosted_runtime_agent_id: str = "",
+    verification_status: str = DISCOVERED,
 ) -> None:
     ts = now_iso()
     runtime = hosted_runtime_agent_id or None
@@ -191,7 +193,7 @@ def _seed_agent(
             "merchant",
             source_type,
             "active",
-            DISCOVERED,
+            verification_status,
             hosting_mode,
             ts,
             ts,
@@ -274,10 +276,12 @@ class StateMachineTest(unittest.TestCase):
                     sm.transition(current, target)
 
     def test_terminal_states_have_no_outgoing_transitions(self) -> None:
+        # v3.0 P2 (moderation): SUSPENDED gained exactly one explicit exit —
+        # operator reinstate resets to DISCOVERED.  Everything else is still
+        # a closed terminal state.  REJECTED remains fully terminal.
         sm = VerificationStateMachine()
         for terminal in (REJECTED, SUSPENDED):
             for target in (
-                DISCOVERED,
                 PROFILE_VALID,
                 DOMAIN_VERIFIED,
                 AGENT_VERIFIED,
@@ -289,6 +293,9 @@ class StateMachineTest(unittest.TestCase):
                     self.assertFalse(sm.can_transition(terminal, target))
                     with self.assertRaises(InvalidStateTransitionError):
                         sm.transition(terminal, target)
+        self.assertTrue(sm.can_transition(SUSPENDED, DISCOVERED))
+        with self.assertRaises(InvalidStateTransitionError):
+            sm.transition(REJECTED, DISCOVERED)
 
     def test_stale_and_unreachable_can_reenter_the_ladder(self) -> None:
         sm = VerificationStateMachine()
@@ -592,6 +599,81 @@ class StateTransitionsTest(unittest.TestCase):
         self.assertIn("catalog_agent_suspended", names)
         with self.assertRaises(InvalidStateTransitionError):
             service.verify("cagt-1")
+
+    def test_suspend_is_idempotent_and_records_reason(self) -> None:
+        conn = _make_conn()
+        _seed_agent(conn)
+        service = _make_service(conn, fetcher=FakeFetcher())
+        first = service.suspend("cagt-1", actor="admin", reason="spam agent")
+        second = service.suspend("cagt-1", actor="admin", reason="spam agent")
+        self.assertEqual(first.status, SUSPENDED)
+        self.assertEqual(second.status, SUSPENDED)
+        events = [e for e, _ in _audit_events(conn) if e == "catalog_agent_suspended"]
+        # Idempotent second call writes no extra audit event.
+        self.assertEqual(len(events), 1)
+        details = [d for _, d in _audit_events(conn) if d.get("reason")]
+        self.assertIn("spam agent", [d["reason"] for d in details])
+
+
+class ReinstateTest(unittest.TestCase):
+    """v3.0 moderation / P2: the SUSPENDED → DISCOVERED operator path."""
+
+    def _setup(self) -> tuple[sqlite3.Connection, VerificationService]:
+        conn = _make_conn()
+        _seed_agent(conn)
+        service = _make_service(conn, fetcher=FakeFetcher())
+        self.assertEqual(service.suspend("cagt-1").status, SUSPENDED)
+        return conn, service
+
+    def test_reinstate_resets_suspended_to_discovered(self) -> None:
+        conn, service = self._setup()
+        result = service.reinstate("cagt-1", actor="admin", reason="false positive")
+        self.assertEqual(result.previous_status, SUSPENDED)
+        self.assertEqual(result.status, DISCOVERED)
+        self.assertEqual(require_catalog_agent(conn, "cagt-1")["verification_status"], DISCOVERED)
+
+    def test_reinstate_clears_last_verified_at(self) -> None:
+        conn = _make_conn()
+        _seed_agent(conn)
+        set_verification_status(conn, "cagt-1", COMMERCE_VERIFIED, last_verified_at="2026-08-01T00:00:00+00:00")
+        service = _make_service(conn, fetcher=FakeFetcher())
+        service.suspend("cagt-1")
+        service.reinstate("cagt-1")
+        self.assertEqual(require_catalog_agent(conn, "cagt-1")["last_verified_at"], "")
+
+    def test_reinstate_requires_suspended_fail_closed(self) -> None:
+        conn = _make_conn()
+        _seed_agent(conn, verification_status=COMMERCE_VERIFIED)
+        service = _make_service(conn, fetcher=FakeFetcher())
+        with self.assertRaises(InvalidStateTransitionError):
+            service.reinstate("cagt-1")
+        # State untouched.
+        self.assertEqual(require_catalog_agent(conn, "cagt-1")["verification_status"], COMMERCE_VERIFIED)
+
+    def test_reinstate_rejects_non_suspended_even_at_discovered(self) -> None:
+        # DISCOVERED → DISCOVERED is a legal state-machine self-transition
+        # (re-registration entry), so reinstate must gate on status explicitly.
+        conn = _make_conn()
+        _seed_agent(conn, verification_status=DISCOVERED)
+        service = _make_service(conn, fetcher=FakeFetcher())
+        with self.assertRaises(InvalidStateTransitionError):
+            service.reinstate("cagt-1")
+        self.assertEqual(require_catalog_agent(conn, "cagt-1")["verification_status"], DISCOVERED)
+
+    def test_reinstate_records_audit_with_previous_status(self) -> None:
+        conn, service = self._setup()
+        service.reinstate("cagt-1", actor="admin", reason="false positive")
+        audit = [d for e, d in _audit_events(conn) if e == "catalog_agent_reinstated"]
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["previous_status"], SUSPENDED)
+        self.assertEqual(audit[0]["reason"], "false positive")
+
+    def test_suspended_agent_cannot_be_promoted_after_reinstate_without_verify(self) -> None:
+        conn, service = self._setup()
+        service.reinstate("cagt-1")
+        # Reinstate only resets to DISCOVERED — the pre-suspension status is
+        # not restored automatically (v3.0 P2 decision).
+        self.assertEqual(require_catalog_agent(conn, "cagt-1")["verification_status"], DISCOVERED)
 
 
 # ── Bounded in-process verification queue (§25 Phase 2) ────────────────────
