@@ -29,6 +29,7 @@ auth metadata.
 from __future__ import annotations
 
 import itertools
+import json
 import queue
 import sqlite3
 import threading
@@ -53,7 +54,7 @@ from shopping_cli.agent_catalog.sqlite_repository import (
     upsert_profile_endpoints,
 )
 from shopping_cli.core.errors import ShoppingCliError, ValidationError
-from shopping_cli.db.session import encode_json
+from shopping_cli.db.session import encode_json, now_iso
 from shopping_cli.discovery._validation import ProfileValidationError
 from shopping_cli.discovery.agent_card import AgentCardParser, AgentCardResult
 from shopping_cli.discovery.cache import compute_content_hash
@@ -884,6 +885,58 @@ class VerificationTaskResult:
     result: VerificationResult | None = None
 
 
+def _serialize_verification_result(result: VerificationResult | None) -> str:
+    """Serialize a VerificationResult for the v15 queue ledger (result_json)."""
+    if result is None:
+        return "{}"
+    return encode_json(
+        {
+            "catalog_agent_id": result.catalog_agent_id,
+            "previous_status": result.previous_status,
+            "status": result.status,
+            "stages": [
+                {
+                    "stage": stage.stage,
+                    "outcome": stage.outcome,
+                    "target_status": stage.target_status,
+                    "reason": stage.reason,
+                    "verification_id": stage.verification_id,
+                    "snapshot_ids": list(stage.snapshot_ids),
+                    "evidence": stage.evidence,
+                }
+                for stage in result.stages
+            ],
+        }
+    )
+
+
+def _deserialize_verification_result(raw: str) -> VerificationResult | None:
+    """Rebuild a VerificationResult from ledger result_json (or None)."""
+    if not raw or raw == "{}":
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return VerificationResult(
+        catalog_agent_id=str(payload.get("catalog_agent_id", "")),
+        previous_status=str(payload.get("previous_status", "")),
+        status=str(payload.get("status", "")),
+        stages=tuple(
+            StageResult(
+                stage=str(s.get("stage", "")),
+                outcome=str(s.get("outcome", "")),
+                target_status=str(s.get("target_status", "")),
+                reason=str(s.get("reason", "") or ""),
+                verification_id=s.get("verification_id"),
+                snapshot_ids=tuple(int(x) for x in (s.get("snapshot_ids") or [])),
+                evidence=s.get("evidence"),
+            )
+            for s in (payload.get("stages") or [])
+        ),
+    )
+
+
 class VerificationQueueFullError(ShoppingCliError):
     """Raised when the bounded queue is at capacity (fail-closed)."""
 
@@ -893,7 +946,7 @@ class VerificationQueueShutdownError(ShoppingCliError):
 
 
 class VerificationQueue:
-    """Bounded in-process verification queue (§25 Phase 2).
+    """Bounded in-process verification queue (§25 Phase 2, v3.0-P4).
 
     Usage::
 
@@ -901,8 +954,16 @@ class VerificationQueue:
         outcome = queue.enqueue("cagt_123", wait=True)
         # outcome.status == "completed" | "failed" | "timeout"
 
-    The queue is thread-safe and owns no persistence state itself — it only
-    schedules tasks and reports their outcomes.  Call :meth:`shutdown` (or use
+    The queue is thread-safe and schedules tasks in a bounded in-process
+    ``queue.Queue``; ``concurrency`` worker threads form the concurrency
+    budget.  With ``db_path`` set (the production path via
+    :func:`make_verification_worker`) every task is written through to the
+    ``verification_queue_tasks`` ledger (schema v15) so tasks survive a
+    process restart: ``pending`` / ``running`` rows are recovered into a new
+    queue instance on startup (verification tasks are idempotent — refresh /
+    verify / mark_stale / suspend are safe to re-run), and ``wait()`` can
+    rebuild outcomes from the ledger.  Without ``db_path`` the queue is
+    purely in-memory (tests / embedded use).  Call :meth:`shutdown` (or use
     it as a context manager) to stop the worker threads.
     """
 
@@ -914,17 +975,37 @@ class VerificationQueue:
         service_factory: Callable[[], "VerificationService"],
         config: VerificationQueueConfig | None = None,
         now: Callable[[], float] | None = None,
+        db_path: str | Path | None = None,
     ) -> None:
         self._config = config or VerificationQueueConfig()
         self._service_factory = service_factory
         self._now = now or time.time
-        self._pending: queue.Queue[VerificationTask | None] = queue.Queue(
-            maxsize=self._config.max_pending
-        )
+        self._db_path = Path(db_path) if db_path else None
         self._results_cv = threading.Condition()
+
+        # Persistence ledger (v15).  All ledger access happens under
+        # _results_cv — a single queue thread touches it at a time plus the
+        # worker threads, which is exactly the sqlite3 serialization model.
+        self._db_conn: sqlite3.Connection | None = None
+        if self._db_path is not None:
+            self._db_conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._db_conn.row_factory = sqlite3.Row  # ledger rows are column-accessed
+
         self._results: dict[str, VerificationTaskResult] = {}
         self._tasks: dict[str, VerificationTask] = {}
         self._shutdown = threading.Event()
+
+        # Crash recovery: pending/running rows from a previous process are
+        # re-enqueued so no task is lost across a restart.  Recovered count
+        # may exceed max_pending — the bound exists to stop runaway
+        # enqueueing, not to drop recovered work, so the queue is sized to
+        # fit both.
+        recovered = self._recover_pending_tasks()
+        self._pending: queue.Queue[VerificationTask | None] = queue.Queue(
+            maxsize=max(self._config.max_pending, recovered + 1)
+        )
+        for task in self._recovered_tasks:
+            self._pending.put(task)
         self._id_seq = itertools.count(1)
         self._workers: list[threading.Thread] = []
         for i in range(self._config.concurrency):
@@ -946,6 +1027,135 @@ class VerificationQueue:
         with self._results_cv:
             depth = len(self._tasks) - len(self._results)
         set_queue_depth(max(depth, 0))
+
+    # ── Persistence ledger (v3.0-P4, schema v15) ──────────────────────────
+
+    def _recover_pending_tasks(self) -> int:
+        """Re-enqueue pending/running ledger rows from a previous process.
+
+        Returns the number of recovered tasks (they land in
+        ``self._recovered_tasks``).  Running rows are re-run too — every task
+        kind (verify / refresh / mark_stale / suspend) is idempotent, so a
+        crash mid-task leaves no duplicate side effects.  Terminal rows
+        (completed / failed / timeout) are left as an audit trail.
+        """
+        self._recovered_tasks: list[VerificationTask] = []
+        if self._db_conn is None:
+            return 0
+        with self._results_cv:
+            rows = self._db_conn.execute(
+                "select task_id, catalog_agent_id, kind, actor, enqueued_at"
+                " from verification_queue_tasks where status in ('pending','running')"
+                " order by enqueued_at"
+            ).fetchall()
+            for row in rows:
+                task = VerificationTask(
+                    catalog_agent_id=str(row["catalog_agent_id"]),
+                    task_id=str(row["task_id"]),
+                    kind=str(row["kind"]),
+                    actor=str(row["actor"]),
+                    enqueued_at=float(row["enqueued_at"]),
+                )
+                self._tasks[task.task_id] = task
+                self._recovered_tasks.append(task)
+        return len(self._recovered_tasks)
+
+    def _persist_insert(self, task: VerificationTask) -> None:
+        """Insert one pending task into the ledger (fail-closed on error)."""
+        if self._db_conn is None:
+            return
+        with self._results_cv:
+            self._db_conn.execute(
+                "insert into verification_queue_tasks("
+                " task_id, catalog_agent_id, kind, actor, status, enqueued_at,"
+                " created_at, updated_at)"
+                " values (?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (
+                    task.task_id,
+                    task.catalog_agent_id,
+                    task.kind,
+                    task.actor,
+                    task.enqueued_at,
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+            self._db_conn.commit()
+
+    def _persist_delete(self, task_id: str) -> None:
+        """Roll back a ledger insert (e.g. when the memory queue is full)."""
+        if self._db_conn is None:
+            return
+        with self._results_cv:
+            self._db_conn.execute(
+                "delete from verification_queue_tasks where task_id = ?", (task_id,)
+            )
+            self._db_conn.commit()
+
+    def _persist_running(self, task_id: str, started_at: float) -> None:
+        """Mark a task as running in the ledger."""
+        if self._db_conn is None:
+            return
+        with self._results_cv:
+            self._db_conn.execute(
+                "update verification_queue_tasks"
+                " set status = 'running', started_at = ?, updated_at = ?"
+                " where task_id = ?",
+                (started_at, now_iso(), task_id),
+            )
+            self._db_conn.commit()
+
+    def _persist_finish(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        verification_status: str = "",
+        error: str = "",
+        result: VerificationResult | None = None,
+    ) -> None:
+        """Write the terminal ledger row for a finished task."""
+        if self._db_conn is None:
+            return
+        with self._results_cv:
+            self._db_conn.execute(
+                "update verification_queue_tasks"
+                " set status = ?, verification_status = ?, error = ?,"
+                " result_json = ?, finished_at = ?, updated_at = ?"
+                " where task_id = ?",
+                (
+                    status,
+                    verification_status,
+                    error,
+                    _serialize_verification_result(result),
+                    self._now(),
+                    now_iso(),
+                    task_id,
+                ),
+            )
+            self._db_conn.commit()
+
+    def _ledger_result(self, task_id: str) -> VerificationTaskResult | None:
+        """Rebuild a finished result from the ledger (restart path for wait())."""
+        if self._db_conn is None:
+            return None
+        row = self._db_conn.execute(
+            "select * from verification_queue_tasks where task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None or row["status"] in ("pending", "running"):
+            return None
+        return VerificationTaskResult(
+            task_id=str(row["task_id"]),
+            catalog_agent_id=str(row["catalog_agent_id"]),
+            kind=str(row["kind"]),
+            status=str(row["status"]),
+            verification_status=str(row["verification_status"]),
+            error=str(row["error"]),
+            enqueued_at=float(row["enqueued_at"]),
+            started_at=float(row["started_at"]),
+            finished_at=float(row["finished_at"]),
+            result=_deserialize_verification_result(str(row["result_json"])),
+        )
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -985,9 +1195,11 @@ class VerificationQueue:
         )
         with self._results_cv:
             self._tasks[task_id] = task
+        self._persist_insert(task)
         try:
             self._pending.put_nowait(task)
         except queue.Full as exc:
+            self._persist_delete(task_id)
             with self._results_cv:
                 self._tasks.pop(task_id, None)
             self._update_depth()
@@ -1021,6 +1233,11 @@ class VerificationQueue:
                     continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    # Not finished in this process — a restarted queue may
+                    # still hold the outcome in the v15 ledger.
+                    from_ledger = self._ledger_result(task_id)
+                    if from_ledger is not None:
+                        return from_ledger
                     task = self._tasks.get(task_id)
                     return VerificationTaskResult(
                         task_id=task_id,
@@ -1093,6 +1310,7 @@ class VerificationQueue:
     def _run_task_with_timeout(self, task: VerificationTask) -> VerificationTaskResult:
         """Run *task* under the per-task deadline, reporting timeouts."""
         started_at = self._now()
+        self._persist_running(task.task_id, started_at)
         box: dict[str, Any] = {"started_at": started_at}
         runner = threading.Thread(
             target=self._execute_task,
@@ -1106,7 +1324,7 @@ class VerificationQueue:
             # The task exceeded its deadline.  The supervisor frees its slot
             # and reports a timeout; the runaway daemon thread is left to die
             # on its own — its connection is never reused.
-            return VerificationTaskResult(
+            result = VerificationTaskResult(
                 task_id=task.task_id,
                 catalog_agent_id=task.catalog_agent_id,
                 kind=task.kind,
@@ -1117,6 +1335,8 @@ class VerificationQueue:
                 started_at=started_at,
                 finished_at=self._now(),
             )
+            self._persist_finish(task.task_id, status="timeout", error=result.error)
+            return result
         return box["result"]
 
     def _execute_task(self, task: VerificationTask, box: dict[str, Any]) -> None:
@@ -1134,6 +1354,11 @@ class VerificationQueue:
                 enqueued_at=task.enqueued_at,
                 started_at=started_at,
                 finished_at=self._now(),
+            )
+            self._persist_finish(
+                task.task_id,
+                status="failed",
+                error=f"service factory failed: {exc}",
             )
             return
         try:
@@ -1164,6 +1389,11 @@ class VerificationQueue:
                 started_at=started_at,
                 finished_at=self._now(),
             )
+            self._persist_finish(
+                task.task_id,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
             return
         finally:
             close = getattr(service, "close", None)
@@ -1181,6 +1411,12 @@ class VerificationQueue:
             enqueued_at=task.enqueued_at,
             started_at=started_at,
             finished_at=self._now(),
+            result=res,
+        )
+        self._persist_finish(
+            task.task_id,
+            status="completed",
+            verification_status=res.status,
             result=res,
         )
 
@@ -1204,7 +1440,7 @@ def make_verification_worker(
         conn = open_connection(db_path)
         return VerificationService(conn, policy=policy)
 
-    return VerificationQueue(service_factory=_service_factory, config=config)
+    return VerificationQueue(service_factory=_service_factory, config=config, db_path=db_path)
 
 
 __all__ = [

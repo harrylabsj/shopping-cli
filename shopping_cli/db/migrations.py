@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 
 @dataclass(frozen=True)
@@ -452,6 +452,46 @@ def migration_014_a2a_inbound_idempotency(conn: sqlite3.Connection) -> None:
     conn.execute(_A2A_INBOUND_IDEMPOTENCY_DDL)
 
 
+_VERIFICATION_QUEUE_TASKS_DDL = """
+    create table if not exists verification_queue_tasks (
+        task_id text primary key,
+        catalog_agent_id text not null,
+        kind text not null,
+        actor text not null default 'verification_worker',
+        status text not null default 'pending'
+            check (status in ('pending','running','completed','failed','timeout')),
+        enqueued_at real not null,
+        started_at real not null default 0,
+        finished_at real not null default 0,
+        verification_status text not null default '',
+        error text not null default '',
+        result_json text not null default '{}',
+        created_at text not null,
+        updated_at text not null
+    );
+"""
+
+_VERIFICATION_QUEUE_RECOVERY_INDEX_DDL = """
+    create index if not exists idx_verification_queue_recovery
+        on verification_queue_tasks(status)
+"""
+
+
+def migration_015_verification_queue_tasks(conn: sqlite3.Connection) -> None:
+    """Add the persistent verification queue ledger (v3.0-P4, §25 Phase 2).
+
+    The in-process queue writes through to this table so tasks survive a
+    process restart: ``pending`` / ``running`` rows are recovered into a new
+    queue instance on startup (verification tasks are idempotent — refresh /
+    verify / mark_stale / suspend are safe to re-run).  ``result_json`` holds
+    a serialized :class:`VerificationResult` so a restarted queue can rebuild
+    the outcome for ``wait()``.  Terminal rows (completed / failed / timeout)
+    are kept as an audit trail; only pending / running are recovered.
+    """
+    conn.execute(_VERIFICATION_QUEUE_TASKS_DDL)
+    conn.execute(_VERIFICATION_QUEUE_RECOVERY_INDEX_DDL)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -467,6 +507,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(12, "agent_catalog_write_idempotency", migration_012_agent_catalog_write_idempotency),
     Migration(13, "agent_trust_observations", migration_013_agent_trust_observations),
     Migration(14, "a2a_inbound_idempotency", migration_014_a2a_inbound_idempotency),
+    Migration(15, "verification_queue_tasks", migration_015_verification_queue_tasks),
 )
 
 
