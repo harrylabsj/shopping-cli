@@ -36,7 +36,7 @@ from shopping_cli.a2a.knp import (
     verify_envelope_digest,
 )
 
-CAPABILITY = "example.kiwi.shopping.negotiation"
+CAPABILITY = "com.harrylabsj.kiwi.shopping.negotiation"
 NEGOTIATION_ID = "neg_01H5V8KXZqJ7Qp3mN2B6A"
 EXCHANGE_ID = "ex_01H5V8KXZqJ7Qp3mN2B6A"
 MESSAGE_ID = "msg_01H5V8KXZqJ7Qp3mN2B6A"
@@ -147,17 +147,20 @@ ACCEPT_NONBINDING_FIELDS = {
 }
 
 GOLDEN_VECTORS = (
-    ("counter_offer", COUNTER_OFFER_FIELDS, "sha256:68a18d9a93d4bc4a55d7c68f22640042f533064be723f20f0f9c25b50e7c15c8"),
-    ("offer", OFFER_FIELDS, "sha256:d8dccd8c45ba4227652750cba9c46d3f121a46d48e71cf7d3a21d96137a18b58"),
-    ("inquiry", INQUIRY_FIELDS, "sha256:088874f6cfdd69ebc33f84c5393a135de2c8b21acd2c37cce8ec2d20d12a7217"),
-    ("accept_nonbinding", ACCEPT_NONBINDING_FIELDS, "sha256:b7e938fc706f6b26891ad1843a126c52511733efeeaaf898922a0cf44c9c8f52"),
+    # Digests regenerated from the Kiwi implementation (dist/) on 2026-08-06
+    # after the capability namespace freeze (binding rc1 §8 gate 1):
+    # example.kiwi.shopping.negotiation -> com.harrylabsj.kiwi.shopping.negotiation.
+    ("counter_offer", COUNTER_OFFER_FIELDS, "sha256:87517fc5c7d13be7abba1e02349632e891aa1062da9339e90dd6249c0e985295"),
+    ("offer", OFFER_FIELDS, "sha256:99dfb819f5668835005582cfb1db4992d5bd13fa9059e4b2298dda1c466b5742"),
+    ("inquiry", INQUIRY_FIELDS, "sha256:a08539767c6fc46ddc8111fd0b1f320e85978dd164c4ed7bf592646305e91736"),
+    ("accept_nonbinding", ACCEPT_NONBINDING_FIELDS, "sha256:0231490ea2ff95b8d9a230f2dfb8901ade73f56f0e1f71921bed4157b89c69da"),
 )
 
 # The canonical JSON captured from Kiwi's ``canonicalize`` for the
 # counter_offer envelope — a byte-level cross-language anchor for the JCS port.
 COUNTER_OFFER_CANONICAL_JSON = (
     '{"action":"counter_offer","actor":"buyer",'
-    '"capability":"example.kiwi.shopping.negotiation",'
+    '"capability":"com.harrylabsj.kiwi.shopping.negotiation",'
     '"created_at":"2026-08-05T12:00:00Z",'
     '"exchange_id":"ex_01H5V8KXZqJ7Qp3mN2B6A",'
     '"in_reply_to":"msg_00H5V8KXZqJ7Qp3mN2B6A",'
