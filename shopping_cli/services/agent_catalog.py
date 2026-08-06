@@ -31,13 +31,15 @@ from shopping_cli.core.errors import NotFoundError, ValidationError
 # mapping are NOT published — the policy is an explicit allowlist, not a
 # pass-through.
 #
-# TODO: replace namespace with Kiwi-controlled reverse-domain when available.
+# §28 DoD#25: the namespace is the reverse-domain of the capability semantic
+# owner (harrylabsj.com, owned by the shopping-cli operator) — a production
+# namespace, never a documentation placeholder.
 
 _PUBLICATION_CAPABILITY_MAP: dict[str, tuple[str, str]] = {
-    "catalog": ("com.shopping.agent.capability", "catalog"),
-    "inventory": ("com.shopping.agent.capability", "inventory"),
-    "delivery": ("com.shopping.agent.capability", "delivery"),
-    "consultation": ("com.shopping.agent.capability", "consultation"),
+    "catalog": ("com.harrylabsj.shopping.capability", "catalog"),
+    "inventory": ("com.harrylabsj.shopping.capability", "inventory"),
+    "delivery": ("com.harrylabsj.shopping.capability", "delivery"),
+    "consultation": ("com.harrylabsj.shopping.capability", "consultation"),
 }
 
 

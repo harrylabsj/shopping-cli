@@ -127,7 +127,7 @@ CANDIDATE_AGENT_SCHEMA: dict[str, Any] = {
             "description": (
                 "Fully-qualified capability identifiers (§8.2). When a "
                 "namespace is present it is joined with ':' before the "
-                "capability id, e.g. 'com.shopping.agent.capability:catalog'."
+                "capability id, e.g. 'com.harrylabsj.shopping.capability:catalog'."
             ),
         },
         "skills": {
