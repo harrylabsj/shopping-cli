@@ -27,6 +27,10 @@ from shopping_cli.cli_adapter_commands import (
     cmd_adapter_inspect,
     cmd_adapter_install_command,
 )
+from shopping_cli.cli_agent_catalog_commands import (
+    cmd_agent_catalog_get,
+    cmd_agent_catalog_search,
+)
 from shopping_cli.cli_agent_commands import (
     cmd_agent_heartbeat,
     cmd_agent_list,
@@ -830,6 +834,27 @@ def build_parser() -> argparse.ArgumentParser:
     agent_revoke_token.add_argument("--merchant-token", default="")
     agent_revoke_token.add_argument("--format", choices=["text", "json"], default="text")
     agent_revoke_token.set_defaults(func=cmd_agent_revoke_token)
+
+    # ── agent catalog ─────────────────────────────────────────────────────────
+    agent_catalog = agent_sub.add_parser("catalog", help="Search and inspect Commerce Agent Catalog entries")
+    agent_catalog_sub = agent_catalog.add_subparsers(dest="agent_catalog_command", required=True)
+    agent_catalog_search = agent_catalog_sub.add_parser("search", help="Search catalog agents")
+    agent_catalog_search.add_argument("--q", default="", help="Free-text search across display name and merchant name")
+    agent_catalog_search.add_argument("--category", default="", help="Filter by agent category")
+    agent_catalog_search.add_argument("--skill", default="", help="Filter by skill id or name")
+    agent_catalog_search.add_argument("--capability", default="", help="Filter by fully-qualified capability identifier")
+    agent_catalog_search.add_argument("--protocol", default="", help="Filter by protocol (e.g. a2a, ucp)")
+    agent_catalog_search.add_argument("--hosting-mode", default="", dest="hosting_mode", help="Filter by hosting mode (hosted, direct)")
+    agent_catalog_search.add_argument("--verification-status", default="", dest="verification_status", help="Filter by verification status")
+    agent_catalog_search.add_argument("--verified-after", default="", dest="verified_after", help="Only agents verified after this ISO-8601 timestamp")
+    agent_catalog_search.add_argument("--limit", type=positive_int, default=20, help="Max results (1-100)")
+    agent_catalog_search.add_argument("--cursor", default="", help="Pagination cursor from a previous search")
+    agent_catalog_search.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_search.set_defaults(func=cmd_agent_catalog_search)
+    agent_catalog_get = agent_catalog_sub.add_parser("get", help="Show one catalog agent by id")
+    agent_catalog_get.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_get.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_get.set_defaults(func=cmd_agent_catalog_get)
 
     human_review_cli = subparsers.add_parser("human-review", help="Review flagged conversations")
     human_review_sub = human_review_cli.add_subparsers(dest="human_review_command", required=True)

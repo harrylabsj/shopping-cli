@@ -67,6 +67,11 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/negotiation/claims/abandon-stale": {"agents", "conversations"},
     "/negotiation/snapshot": {"agents", "conversations"},
     "/negotiation/decisions": {"agents", "conversations"},
+    # ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────
+    "/v1/agent-catalog/agents": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/search": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/merchants/{merchant_id}/agents": {"agent_catalog", "marketplace"},
 }
 
 
