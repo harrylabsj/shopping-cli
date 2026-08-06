@@ -373,6 +373,22 @@ SCHEMA = [
         foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
     )
     """,
+    # ── Hosted A2A inbound idempotency (v14 / v2.4-W3, binding rc1 §3.6) ────
+    # Authoritative (sender_identity, message_id) KNP idempotency ledger for
+    # the shared-host A2A JSON-RPC endpoint.  response_json stores the JSON-RPC
+    # result/error part so a replay can rebuild the identical response.
+    """
+    create table if not exists a2a_inbound_idempotency (
+        sender_identity text not null,
+        message_id text not null,
+        digest text not null,
+        status text not null default 'processing',
+        response_json text not null default '{}',
+        created_at text not null,
+        updated_at text not null,
+        primary key (sender_identity, message_id)
+    )
+    """,
 ]
 
 INDEXES = [

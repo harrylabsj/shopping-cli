@@ -23,6 +23,7 @@ from shopping_cli.api.handlers import audit as audit_handlers
 from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
+from shopping_cli.api.handlers import hosted_a2a as hosted_a2a_handlers
 from shopping_cli.api.handlers import hosted_publication as hosted_publication_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
@@ -57,7 +58,11 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     StarletteHTTPException = None  # type: ignore[misc,assignment]
 
 
-Handler = Callable[..., dict[str, Any]]
+# Route handlers return the JSON response body (a dict), except the Hosted
+# A2A JSON-RPC endpoint which returns ``(http_status, jsonrpc_body)`` so
+# ``handle_request`` can pass its HTTP status through.  The type is widened to
+# ``Any`` for that single tuple-returning handler.
+Handler = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -499,6 +504,19 @@ def _hosted_ucp_profile_document(db_path: str | Path, catalog_agent_id: str) -> 
     return hosted_publication_handlers.hosted_ucp_profile(db_path, catalog_agent_id)
 
 
+def _hosted_a2a_message_send(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """POST /a2a/agents/{catalog_agent_id} — JSON-RPC message/send.
+
+    Returns ``(http_status, jsonrpc_body)`` so ``handle_request`` can pass the
+    JSON-RPC response through unchanged (it does not use the ok/error envelope).
+    """
+    return hosted_a2a_handlers.a2a_message_send(db_path, catalog_agent_id, payload)
+
+
 def _etag_response(document: dict[str, Any], if_none_match: str) -> Any:
     """Wrap a hosted A2A document with a §18 server-side ETag.
 
@@ -865,6 +883,14 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
             db_path, catalog_agent_id
         ),
     ),
+    # ── Hosted A2A JSON-RPC endpoint v2.4-W3 (shared-host path, §14.1) ───────
+    RouteEntry(
+        {"POST"},
+        "/a2a/agents/{catalog_agent_id}",
+        lambda db_path, payload, query, catalog_agent_id: _hosted_a2a_message_send(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
 )
 
 
@@ -878,6 +904,21 @@ def resolve_route(method: str, path: str) -> tuple[bool, bool]:
         if method.upper() in route.methods:
             return True, True
     return path_known, False
+
+
+def _is_status_body_pair(result: Any) -> bool:
+    """True when a handler returned ``(http_status, body)`` directly.
+
+    Used by the Hosted A2A JSON-RPC endpoint to return its own HTTP status
+    (401/403/400) alongside a JSON-RPC response body, which does not use the
+    ok/error envelope.  No other route handler returns a tuple.
+    """
+    return (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], int)
+        and not isinstance(result[0], bool)
+    )
 
 
 def handle_request(
@@ -898,7 +939,10 @@ def handle_request(
                 continue
             path_matched = True
             if method.upper() in route.methods:
-                return 200, route.handler(db_path, payload, query, **path_params)
+                result = route.handler(db_path, payload, query, **path_params)
+                if _is_status_body_pair(result):
+                    return result
+                return 200, result
         if path_matched:
             raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
         raise NotFoundError(f"No route for {method} {path}")
@@ -1567,5 +1611,24 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         if_none_match: str = IF_NONE_MATCH_HEADER,
     ) -> Any:
         return _hosted_ucp_profile_response(db_path, catalog_agent_id, if_none_match)
+
+    @app.post("/a2a/agents/{catalog_agent_id}")
+    def hosted_a2a_message_send_route(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> Any:
+        status, body = _hosted_a2a_message_send(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization),
+        )
+        if JSONResponse is not None:
+            return JSONResponse(status_code=status, content=body)
+        # FakeFastAPI harness fallback (same shape as ``_etag_response``).
+        return SimpleNamespace(
+            status_code=status,
+            body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        )
 
     return app

@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 @dataclass(frozen=True)
@@ -426,6 +426,32 @@ def migration_013_agent_trust_observations(conn: sqlite3.Connection) -> None:
     conn.execute(_AGENT_TRUST_OBSERVATIONS_DDL)
 
 
+_A2A_INBOUND_IDEMPOTENCY_DDL = """
+    create table if not exists a2a_inbound_idempotency (
+        sender_identity text not null,
+        message_id text not null,
+        digest text not null,
+        status text not null default 'processing',
+        response_json text not null default '{}',
+        created_at text not null,
+        updated_at text not null,
+        primary key (sender_identity, message_id)
+    )
+"""
+
+
+def migration_014_a2a_inbound_idempotency(conn: sqlite3.Connection) -> None:
+    """Add the Hosted A2A inbound idempotency ledger (v2.4-W3, binding rc1 §3.6).
+
+    ``(sender_identity, message_id)`` is the authoritative KNP idempotency key
+    (D8): same id + same digest replays the stored response, same id +
+    different digest fails closed as ``idempotency_conflict``.  The response
+    snapshot holds the JSON-RPC ``{"result": ...}`` / ``{"error": ...}`` part
+    so a replay can rebuild the identical response for the current request id.
+    """
+    conn.execute(_A2A_INBOUND_IDEMPOTENCY_DDL)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -440,6 +466,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(11, "agent_catalog_register_limits", migration_011_agent_catalog_register_limits),
     Migration(12, "agent_catalog_write_idempotency", migration_012_agent_catalog_write_idempotency),
     Migration(13, "agent_trust_observations", migration_013_agent_trust_observations),
+    Migration(14, "a2a_inbound_idempotency", migration_014_a2a_inbound_idempotency),
 )
 
 
