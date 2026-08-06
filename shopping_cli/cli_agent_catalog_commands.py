@@ -1,4 +1,13 @@
-"""Agent Catalog CLI command handlers — search and get Commerce Agent Catalog entries."""
+"""Agent Catalog CLI command handlers — search/get/register/refresh/verify/claim/stats/doctor.
+
+Search and get are read-only (§10.1); register (§10.2), refresh/verify (§10.3)
+and claim (§10.4) operate directly on the local SQLite store through the shared
+service layer (``services/agent_catalog_writes.py`` and the W3 verification
+service).  The CLI deliberately does NOT enqueue into the bounded verification
+queue — the caller runs ``agent catalog verify`` / ``refresh`` explicitly so the
+result is reported synchronously.  ``stats`` / ``doctor`` are local
+observability helpers (§24) over the same store.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +17,13 @@ from typing import Any
 from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.core.errors import NotFoundError
 from shopping_cli.db.session import db_session
+from shopping_cli.services import agent_catalog_writes
 from shopping_cli.services.agent_catalog import get_catalog_agent, search_catalog_agents
+from shopping_cli.services.agent_catalog_metrics import catalog_doctor_report, catalog_stats
+from shopping_cli.services.agent_verification import (
+    InvalidStateTransitionError,
+    VerificationService,
+)
 
 
 def _format_verification(agent: dict[str, Any]) -> str:
@@ -107,6 +122,131 @@ def cmd_agent_catalog_search(args: argparse.Namespace) -> None:
     emit(response, args.format)
 
 
+def _cli_actor(args: argparse.Namespace, merchant_id: str = "") -> str:
+    """Best-effort audit actor from optional CLI tokens (default ``cli``)."""
+    if getattr(args, "admin_token", ""):
+        return "admin"
+    if getattr(args, "merchant_token", "") and merchant_id:
+        return f"merchant:{merchant_id}"
+    return "cli"
+
+
+def _print_catalog_agent(agent: dict[str, Any]) -> None:
+    print(f"Catalog Agent: {agent.get('catalog_agent_id', '')}")
+    merchant = agent.get("merchant", {}) or {}
+    print(f"Merchant: {merchant.get('name', '-')} ({merchant.get('id', '-')})")
+    domain = agent.get("canonical_domain", "")
+    if not domain:
+        domain = (agent.get("discovery", {}) or {}).get("canonical_domain", "")
+    if domain:
+        print(f"Domain: {domain}")
+    verification = agent.get("verification", {}) or {}
+    print(f"Verification Status: {verification.get('status', 'discovered')}")
+
+
+def _verification_response_json(
+    catalog_agent_id: str, result: Any
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "catalog_agent_id": catalog_agent_id,
+        "previous_status": result.previous_status,
+        "verification_status": result.status,
+        "stages": [
+            {
+                "stage": stage.stage,
+                "outcome": stage.outcome,
+                "target_status": stage.target_status,
+                "reason": stage.reason,
+                "verification_id": stage.verification_id,
+                "snapshot_ids": list(stage.snapshot_ids),
+            }
+            for stage in result.stages
+        ],
+    }
+
+
+def cmd_agent_catalog_register(args: argparse.Namespace) -> None:
+    """Create a DISCOVERED self_registered catalog agent (§10.2)."""
+    with db_session(db_path_from_args(args)) as conn:
+        result = agent_catalog_writes.register_catalog_agent(
+            conn,
+            domain=args.domain,
+            agent_card_url=getattr(args, "agent_card_url", "") or "",
+            ucp_profile_url=getattr(args, "ucp_profile_url", "") or "",
+            merchant_id=getattr(args, "merchant_id", "") or "",
+            actor=_cli_actor(args, getattr(args, "merchant_id", "") or ""),
+        )
+    if args.format == "text":
+        print(f"Registered catalog agent: {result.get('catalog_agent_id', '')}")
+        _print_catalog_agent(result)
+        return
+    emit({"ok": True, "catalog_agent": result}, args.format)
+
+
+def cmd_agent_catalog_verify(args: argparse.Namespace) -> None:
+    """Run the §6 verification ladder synchronously (§10.3)."""
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    with db_session(db_path_from_args(args)) as conn:
+        service = VerificationService(conn)
+        try:
+            result = service.verify(
+                catalog_agent_id,
+                actor=_cli_actor(args),
+                force=bool(getattr(args, "force", False)),
+            )
+        except InvalidStateTransitionError as exc:
+            raise SystemExit(str(exc))
+    if args.format == "text":
+        print(_format_verification_result(result))
+        return
+    emit(_verification_response_json(catalog_agent_id, result), args.format)
+
+
+def cmd_agent_catalog_refresh(args: argparse.Namespace) -> None:
+    """Re-fetch profiles and re-run the full ladder (§10.3 refresh)."""
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    with db_session(db_path_from_args(args)) as conn:
+        service = VerificationService(conn)
+        try:
+            result = service.refresh(catalog_agent_id, actor=_cli_actor(args))
+        except InvalidStateTransitionError as exc:
+            raise SystemExit(str(exc))
+    if args.format == "text":
+        print(_format_verification_result(result))
+        return
+    emit(_verification_response_json(catalog_agent_id, result), args.format)
+
+
+def cmd_agent_catalog_claim(args: argparse.Namespace) -> None:
+    """Claim ownership of a catalog agent (§10.4, §6.2)."""
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    merchant_id = str(args.merchant_id or "").strip()
+    with db_session(db_path_from_args(args)) as conn:
+        result = agent_catalog_writes.claim_catalog_agent(
+            conn,
+            catalog_agent_id=catalog_agent_id,
+            merchant_id=merchant_id,
+            actor=_cli_actor(args, merchant_id),
+        )
+    if args.format == "text":
+        print(f"Claimed catalog agent: {result.get('catalog_agent_id', '')}")
+        _print_catalog_agent(result)
+        return
+    emit({"ok": True, "catalog_agent": result}, args.format)
+
+
+def _format_verification_result(result: Any) -> str:
+    lines = [
+        f"Catalog Agent: {result.catalog_agent_id}",
+        f"Verification Status: {result.status} (was {result.previous_status})",
+    ]
+    for stage in result.stages:
+        reason = f" — {stage.reason}" if stage.reason else ""
+        lines.append(f"  {stage.stage}: {stage.outcome} -> {stage.target_status}{reason}")
+    return "\n".join(lines)
+
+
 def cmd_agent_catalog_get(args: argparse.Namespace) -> None:
     catalog_agent_id = str(args.catalog_agent_id).strip()
     with db_session(db_path_from_args(args)) as conn:
@@ -161,3 +301,104 @@ def cmd_agent_catalog_get(args: argparse.Namespace) -> None:
         return
 
     emit({"ok": True, "agent": agent}, args.format)
+
+
+def _print_stats_text(stats: dict[str, Any]) -> None:
+    print("Agent Catalog Stats")
+    print("===================")
+    print(f"Catalog agents:        {stats['catalog_agent_count']}")
+    print(f"Verified agents:       {stats['verified_agent_count']}")
+    print(f"Unverified agents:     {stats['unverified_agent_count']}")
+    print(f"Stale agents:          {stats['stale_agent_count']}")
+    print(f"Suspended agents:      {stats['suspended_agent_count']}")
+    print(f"Rejected agents:       {stats['rejected_agent_count']}")
+    print()
+
+    def _distribution(title: str, dist: dict[str, Any]) -> None:
+        print(f"{title}:")
+        if not dist:
+            print("  (none)")
+            return
+        for key in sorted(dist):
+            print(f"  {key:<24} {dist[key]}")
+
+    _distribution("Verification status", stats["verification_status_distribution"])
+    print()
+    _distribution("Hosting mode", stats["hosting_mode_distribution"])
+    print()
+    _distribution("Source type", stats["source_type_distribution"])
+    print()
+    print(f"Capabilities:          {stats['capability_count']}")
+    print(f"Endpoints:             {stats['endpoint_count']}")
+    print(f"Skills:                {stats['skill_count']}")
+    print(f"Profile snapshots:     {stats['profile_snapshot_count']}")
+
+
+def cmd_agent_catalog_stats(args: argparse.Namespace) -> None:
+    """Local §24 metric subset for the local catalog store."""
+    with db_session(db_path_from_args(args)) as conn:
+        stats = catalog_stats(conn)
+    if args.format == "text":
+        _print_stats_text(stats)
+        return
+    stats.setdefault("ok", True)
+    emit(stats, args.format)
+
+
+def _print_doctor_text(report: dict[str, Any]) -> None:
+    print("Catalog Doctor")
+    print("==============")
+
+    def _line(label: str, value: int, *, flag: str = "") -> None:
+        suffix = f"   [{flag}]" if flag else ""
+        print(f"{label:<28} {value}{suffix}")
+
+    _line("Total agents", report["total_agents"])
+    _line("Stale agents", report["stale_agents"], flag="ISSUE" if report["stale_agents"] else "")
+    _line(
+        "Unverified registrations",
+        report["unverified_registrations"],
+        flag="ISSUE" if report["unverified_registrations"] else "",
+    )
+    _line(
+        "Expired snapshots",
+        report["expired_profile_snapshots"],
+        flag="ISSUE" if report["expired_profile_snapshots"] else "",
+    )
+    _line("Unreachable agents", report["unreachable_agents"], flag="ISSUE" if report["unreachable_agents"] else "")
+    _line("Suspended agents", report["suspended_agents"], flag="ISSUE" if report["suspended_agents"] else "")
+    _line("Rejected agents", report["rejected_agents"], flag="ISSUE" if report["rejected_agents"] else "")
+    _line(
+        "Missing canonical domain",
+        report["missing_canonical_domain"],
+        flag="ISSUE" if report["missing_canonical_domain"] else "",
+    )
+    _line(
+        "Agents without endpoints",
+        report["agents_without_endpoints"],
+        flag="WARN" if report["agents_without_endpoints"] else "",
+    )
+    print()
+    for issue in report.get("issues", []):
+        print(f"  [ISSUE] {issue}")
+    for warning in report.get("warnings", []):
+        print(f"  [WARN]  {warning}")
+    if report["healthy"]:
+        print("\nHealth: OK")
+    else:
+        print(f"\nHealth: {len(report.get('issues', []))} issue(s) found")
+
+
+def cmd_agent_catalog_doctor(args: argparse.Namespace) -> None:
+    """Local catalog health check (§24): stale/unverified/expired-snapshot counts.
+
+    Exits with status 1 when any issue is found so scripts/CI can react.
+    """
+    with db_session(db_path_from_args(args)) as conn:
+        report = catalog_doctor_report(conn)
+    if args.format == "text":
+        _print_doctor_text(report)
+    else:
+        emit(report, args.format)
+    if not report["healthy"]:
+        raise SystemExit(1)

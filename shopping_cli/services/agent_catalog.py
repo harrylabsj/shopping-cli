@@ -12,6 +12,7 @@ from typing import Any
 from shopping_cli.agent_catalog.search import search_catalog_agents as _search
 from shopping_cli.agent_catalog.serializers import (
     catalog_agent_detail,
+    catalog_agent_write_result,
     catalog_search_result,
 )
 from shopping_cli.agent_catalog.sqlite_repository import (
@@ -180,6 +181,36 @@ def get_catalog_agent(conn: Any, catalog_agent_id: str) -> dict[str, Any]:
     }
 
     return catalog_agent_detail(
+        catalog_agent=row,
+        merchant=merchant,
+        capabilities=caps,
+        endpoints=eps,
+    )
+
+
+def get_catalog_agent_write_detail(conn: Any, catalog_agent_id: str) -> dict[str, Any]:
+    """Public detail for write responses (register §10.2 / claim §10.4).
+
+    Same composition as :func:`get_catalog_agent` plus the canonical identity
+    fields (``canonical_domain`` / ``source_type``) so a caller that just
+    registered or claimed an agent sees the exact identity it acted on.
+    """
+    row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
+    if row is None:
+        raise NotFoundError(f"Unknown catalog agent: {catalog_agent_id}")
+
+    cagt_id = str(row.get("catalog_agent_id", ""))
+    caps = list_capabilities(conn, cagt_id)
+    eps = list_endpoints(conn, cagt_id)
+    merchant: dict[str, Any] = {
+        "id": row.get("merchant_id", ""),
+        "name": row.get("merchant_name", ""),
+        "city": row.get("merchant_city", ""),
+        "service_area": row.get("merchant_service_area", ""),
+        "tags_json": row.get("merchant_tags_json", "[]"),
+    }
+
+    return catalog_agent_write_result(
         catalog_agent=row,
         merchant=merchant,
         capabilities=caps,

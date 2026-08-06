@@ -321,6 +321,58 @@ SCHEMA = [
         foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
     )
     """,
+    """
+    create table if not exists agent_catalog_register_limits (
+        canonical_domain text not null,
+        window_start text not null,
+        request_count integer not null default 0,
+        updated_at text not null,
+        primary key (canonical_domain, window_start)
+    )
+    """,
+    """
+    create table if not exists agent_catalog_write_idempotency (
+        endpoint text not null,
+        actor_key text not null,
+        idempotency_key text not null,
+        request_hash text not null,
+        status text not null,
+        response_json text not null default '{}',
+        created_at text not null,
+        updated_at text not null,
+        primary key (endpoint, actor_key, idempotency_key)
+    )
+    """,
+    """
+    create table if not exists agent_catalog_write_rate_limits (
+        actor_key text not null,
+        window_start text not null,
+        request_count integer not null default 0,
+        updated_at text not null,
+        primary key (actor_key, window_start)
+    )
+    """,
+    # ── Agent Trust Observations (v13 / v2.2 Phase 2, §5.7) ────────────
+    # Private-only: commercial reputation / protocol trust observations.  They
+    # are never exposed through public serializers, search responses, or any
+    # public API output (§3.4, §5.7).
+    """
+    create table if not exists agent_trust_observations (
+        observation_id integer primary key autoincrement,
+        catalog_agent_id text not null,
+        kind text not null
+            check(kind in (
+                'protocol_compliance','timeout_rate','schema_error_rate',
+                'successful_exchange','local_asserted_dispute'
+            )),
+        value real not null,
+        source text not null default '',
+        evidence_ref text not null default '',
+        observed_at text not null,
+        expires_at text not null default '',
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+    """,
 ]
 
 INDEXES = [
@@ -441,6 +493,10 @@ INDEXES = [
     """
     create index if not exists idx_agent_verifications_catalog_agent
     on agent_verifications(catalog_agent_id)
+    """,
+    """
+    create index if not exists idx_agent_trust_observations_catalog_agent
+    on agent_trust_observations(catalog_agent_id)
     """,
 ]
 
@@ -617,5 +673,37 @@ class AgentVerification:
             result=str(row["result"] or ""),
             evidence_json=str(row["evidence_json"] or "{}"),
             checked_at=str(row["checked_at"] or ""),
+            expires_at=str(row["expires_at"] or ""),
+        )
+
+
+@dataclass(frozen=True)
+class AgentTrustObservation:
+    """One private trust observation (§5.7).
+
+    Private-only: never exposed through public serializers, search responses,
+    or any public API output.  Commercial reputation and protocol trust stay
+    separate from public verification metadata.
+    """
+
+    observation_id: int
+    catalog_agent_id: str
+    kind: str
+    value: float
+    source: str
+    evidence_ref: str
+    observed_at: str
+    expires_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> AgentTrustObservation:
+        return cls(
+            observation_id=int(row["observation_id"]),
+            catalog_agent_id=str(row["catalog_agent_id"]),
+            kind=str(row["kind"]),
+            value=float(row["value"]),
+            source=str(row["source"] or ""),
+            evidence_ref=str(row["evidence_ref"] or ""),
+            observed_at=str(row["observed_at"] or ""),
             expires_at=str(row["expires_at"] or ""),
         )

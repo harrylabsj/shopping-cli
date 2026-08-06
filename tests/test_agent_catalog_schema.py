@@ -95,6 +95,17 @@ _AGENT_VERIFICATIONS_COLUMNS = {
     "expires_at",
 }
 
+_AGENT_TRUST_OBSERVATIONS_COLUMNS = {
+    "observation_id",
+    "catalog_agent_id",
+    "kind",
+    "value",
+    "source",
+    "evidence_ref",
+    "observed_at",
+    "expires_at",
+}
+
 _ALL_TABLES = {
     "catalog_agents": _CATALOG_AGENTS_COLUMNS,
     "agent_endpoints": _AGENT_ENDPOINTS_COLUMNS,
@@ -102,6 +113,7 @@ _ALL_TABLES = {
     "agent_skills": _AGENT_SKILLS_COLUMNS,
     "agent_profile_snapshots": _AGENT_PROFILE_SNAPSHOTS_COLUMNS,
     "agent_verifications": _AGENT_VERIFICATIONS_COLUMNS,
+    "agent_trust_observations": _AGENT_TRUST_OBSERVATIONS_COLUMNS,
 }
 
 
@@ -193,13 +205,20 @@ class AgentCatalogSchemaTest(unittest.TestCase):
                 columns = _table_columns(conn, "agent_verifications")
             self.assertEqual(columns, _AGENT_VERIFICATIONS_COLUMNS)
 
+    def test_fresh_init_agent_trust_observations_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                columns = _table_columns(conn, "agent_trust_observations")
+            self.assertEqual(columns, _AGENT_TRUST_OBSERVATIONS_COLUMNS)
+
     def test_fresh_init_sets_user_version_to_current(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             with db_session(db_file) as conn:
                 user_version = conn.execute("pragma user_version").fetchone()[0]
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 10)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 13)
 
 
 class AgentCatalogCheckConstraintsTest(unittest.TestCase):
@@ -318,6 +337,65 @@ class AgentCatalogCheckConstraintsTest(unittest.TestCase):
                         values ('cat-001', 'invalid_type')
                         """
                     )
+
+    def test_trust_observation_kind_rejects_invalid_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                _seed_catalog_agent(conn)
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute("pragma foreign_keys = on")
+                ts = now_iso()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        insert into agent_trust_observations(
+                            catalog_agent_id, kind, value, observed_at
+                        ) values ('cat-001', 'invalid_kind', 1.0, ?)
+                        """,
+                        (ts,),
+                    )
+
+    def test_trust_observation_all_valid_kinds_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                _seed_catalog_agent(conn)
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("pragma foreign_keys = on")
+                ts = now_iso()
+                for idx, kind in enumerate(
+                    (
+                        "protocol_compliance",
+                        "timeout_rate",
+                        "schema_error_rate",
+                        "successful_exchange",
+                        "local_asserted_dispute",
+                    )
+                ):
+                    conn.execute(
+                        """
+                        insert into agent_trust_observations(
+                            catalog_agent_id, kind, value, source, evidence_ref,
+                            observed_at, expires_at
+                        ) values ('cat-001', ?, ?, 'test-source', 'ev-ref', ?, '')
+                        """,
+                        (kind, float(idx + 1), ts),
+                    )
+                rows = conn.execute(
+                    "select kind from agent_trust_observations order by observation_id"
+                ).fetchall()
+            self.assertEqual(
+                [row["kind"] for row in rows],
+                [
+                    "protocol_compliance",
+                    "timeout_rate",
+                    "schema_error_rate",
+                    "successful_exchange",
+                    "local_asserted_dispute",
+                ],
+            )
 
     def test_all_valid_source_types_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,6 +569,24 @@ class AgentCatalogForeignKeyTest(unittest.TestCase):
                         """
                     )
 
+    def test_agent_trust_observations_catalog_agent_id_fk_rejects_orphan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file):
+                pass
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute("pragma foreign_keys = on")
+                ts = now_iso()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        insert into agent_trust_observations(
+                            catalog_agent_id, kind, value, observed_at
+                        ) values ('nonexistent', 'timeout_rate', 0.5, ?)
+                        """,
+                        (ts,),
+                    )
+
 
 class AgentCatalogMigrationV9ToV10Test(unittest.TestCase):
     """Verify the migration path from schema v9 to v10."""
@@ -523,7 +619,7 @@ class AgentCatalogMigrationV9ToV10Test(unittest.TestCase):
             for table in _ALL_TABLES:
                 with self.subTest(table=table):
                     self.assertIn(table, master)
-            self.assertEqual(user_version, 10)
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
 
     def test_v9_to_v10_columns_match_fresh_init(self):
         """All 6 tables created via migration v9→v10 have the same columns as a fresh init."""
@@ -590,6 +686,61 @@ class AgentCatalogMigrationV9ToV10Test(unittest.TestCase):
                 with db_session(db_file):
                     pass
             self.assertEqual(calls, ["ran"])
+
+
+class AgentCatalogMigrationV12ToV13Test(unittest.TestCase):
+    """Verify the v12 → v13 migration creates ``agent_trust_observations``."""
+
+    def test_v12_to_v13_upgrade_creates_observation_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "legacy-v12.sqlite"
+
+            # Build a v13 database then rewind to the v12 state: drop only the
+            # v13 artifacts (table + index) and set user_version to 12.
+            with db_session(db_file):
+                pass
+            with closing(sqlite3.connect(db_file)) as raw:
+                raw.execute("drop index if exists idx_agent_trust_observations_catalog_agent")
+                raw.execute("drop table if exists agent_trust_observations")
+                raw.execute("pragma user_version = 12")
+                raw.commit()
+
+            # Reopen — only migration 13 should run.
+            with db_session(db_file) as conn:
+                columns = _table_columns(conn, "agent_trust_observations")
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+                indexes = {
+                    row["name"]
+                    for row in conn.execute(
+                        "select name from sqlite_master where type = 'index'"
+                    ).fetchall()
+                }
+
+            self.assertEqual(user_version, 13)
+            self.assertEqual(columns, _AGENT_TRUST_OBSERVATIONS_COLUMNS)
+            self.assertIn("idx_agent_trust_observations_catalog_agent", indexes)
+
+    def test_v12_to_v13_observation_table_matches_fresh_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh_file = Path(tmp) / "fresh.sqlite"
+            with db_session(fresh_file):
+                pass
+
+            legacy_file = Path(tmp) / "legacy.sqlite"
+            with db_session(legacy_file):
+                pass
+            with closing(sqlite3.connect(legacy_file)) as raw:
+                raw.execute("drop index if exists idx_agent_trust_observations_catalog_agent")
+                raw.execute("drop table if exists agent_trust_observations")
+                raw.execute("pragma user_version = 12")
+                raw.commit()
+            with db_session(legacy_file):
+                pass
+
+            with db_session(fresh_file) as fresh_conn, db_session(legacy_file) as legacy_conn:
+                fresh_cols = _table_columns(fresh_conn, "agent_trust_observations")
+                legacy_cols = _table_columns(legacy_conn, "agent_trust_observations")
+                self.assertEqual(fresh_cols, legacy_cols)
 
 
 if __name__ == "__main__":

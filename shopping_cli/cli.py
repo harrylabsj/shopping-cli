@@ -28,8 +28,14 @@ from shopping_cli.cli_adapter_commands import (
     cmd_adapter_install_command,
 )
 from shopping_cli.cli_agent_catalog_commands import (
+    cmd_agent_catalog_claim,
+    cmd_agent_catalog_doctor,
     cmd_agent_catalog_get,
+    cmd_agent_catalog_refresh,
+    cmd_agent_catalog_register,
     cmd_agent_catalog_search,
+    cmd_agent_catalog_stats,
+    cmd_agent_catalog_verify,
 )
 from shopping_cli.cli_agent_commands import (
     cmd_agent_heartbeat,
@@ -855,6 +861,41 @@ def build_parser() -> argparse.ArgumentParser:
     agent_catalog_get.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
     agent_catalog_get.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_get.set_defaults(func=cmd_agent_catalog_get)
+    agent_catalog_register = agent_catalog_sub.add_parser("register", help="Register a self_registered catalog agent (§10.2)")
+    agent_catalog_register.add_argument("--domain", required=True, help="Canonical bare domain (e.g. merchant.example)")
+    agent_catalog_register.add_argument("--agent-card-url", default="", dest="agent_card_url", help="Optional public Agent Card URL")
+    agent_catalog_register.add_argument("--ucp-profile-url", default="", dest="ucp_profile_url", help="Optional public UCP Profile URL")
+    agent_catalog_register.add_argument("--merchant-id", default="", dest="merchant_id", help="Optional merchant binding")
+    agent_catalog_register.add_argument("--admin-token", default="", dest="admin_token", help="Admin token for audit actor resolution")
+    agent_catalog_register.add_argument("--merchant-token", default="", dest="merchant_token", help="Merchant token for audit actor resolution")
+    agent_catalog_register.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_register.set_defaults(func=cmd_agent_catalog_register)
+    agent_catalog_verify = agent_catalog_sub.add_parser("verify", help="Run the §6 verification ladder synchronously (§10.3)")
+    agent_catalog_verify.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_verify.add_argument("--force", action="store_true", help="Re-verify even when the profile cache is fresh")
+    agent_catalog_verify.add_argument("--admin-token", default="", dest="admin_token")
+    agent_catalog_verify.add_argument("--merchant-token", default="", dest="merchant_token")
+    agent_catalog_verify.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_verify.set_defaults(func=cmd_agent_catalog_verify)
+    agent_catalog_refresh = agent_catalog_sub.add_parser("refresh", help="Re-fetch profiles and re-run the full ladder (§10.3)")
+    agent_catalog_refresh.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_refresh.add_argument("--admin-token", default="", dest="admin_token")
+    agent_catalog_refresh.add_argument("--merchant-token", default="", dest="merchant_token")
+    agent_catalog_refresh.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_refresh.set_defaults(func=cmd_agent_catalog_refresh)
+    agent_catalog_claim = agent_catalog_sub.add_parser("claim", help="Claim ownership of a catalog agent (§10.4, §6.2)")
+    agent_catalog_claim.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_claim.add_argument("--merchant-id", required=True, dest="merchant_id", help="Merchant to claim the agent for")
+    agent_catalog_claim.add_argument("--admin-token", default="", dest="admin_token")
+    agent_catalog_claim.add_argument("--merchant-token", default="", dest="merchant_token")
+    agent_catalog_claim.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_claim.set_defaults(func=cmd_agent_catalog_claim)
+    agent_catalog_stats = agent_catalog_sub.add_parser("stats", help="Local catalog metrics (§24)")
+    agent_catalog_stats.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_stats.set_defaults(func=cmd_agent_catalog_stats)
+    agent_catalog_doctor = agent_catalog_sub.add_parser("doctor", help="Local catalog health check (§24); exits 1 on issues")
+    agent_catalog_doctor.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_doctor.set_defaults(func=cmd_agent_catalog_doctor)
 
     human_review_cli = subparsers.add_parser("human-review", help="Review flagged conversations")
     human_review_sub = human_review_cli.add_subparsers(dest="human_review_command", required=True)

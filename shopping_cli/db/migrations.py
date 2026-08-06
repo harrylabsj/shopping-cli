@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 13
 
 
 @dataclass(frozen=True)
@@ -351,6 +351,81 @@ def migration_010_agent_catalog(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_011_agent_catalog_register_limits(conn: sqlite3.Connection) -> None:
+    """Per-domain registration budget (§17.4) for the public register route."""
+    conn.execute(
+        """
+        create table if not exists agent_catalog_register_limits (
+            canonical_domain text not null,
+            window_start text not null,
+            request_count integer not null default 0,
+            updated_at text not null,
+            primary key (canonical_domain, window_start)
+        )
+        """
+    )
+
+
+def migration_012_agent_catalog_write_idempotency(conn: sqlite3.Connection) -> None:
+    """Generic idempotency + rate-limit tables for Agent Catalog writes (§10.4)."""
+    conn.execute(
+        """
+        create table if not exists agent_catalog_write_idempotency (
+            endpoint text not null,
+            actor_key text not null,
+            idempotency_key text not null,
+            request_hash text not null,
+            status text not null,
+            response_json text not null default '{}',
+            created_at text not null,
+            updated_at text not null,
+            primary key (endpoint, actor_key, idempotency_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists agent_catalog_write_rate_limits (
+            actor_key text not null,
+            window_start text not null,
+            request_count integer not null default 0,
+            updated_at text not null,
+            primary key (actor_key, window_start)
+        )
+        """
+    )
+
+
+_AGENT_TRUST_OBSERVATIONS_DDL = """
+    create table if not exists agent_trust_observations (
+        observation_id integer primary key autoincrement,
+        catalog_agent_id text not null,
+        kind text not null
+            check(kind in (
+                'protocol_compliance','timeout_rate','schema_error_rate',
+                'successful_exchange','local_asserted_dispute'
+            )),
+        value real not null,
+        source text not null default '',
+        evidence_ref text not null default '',
+        observed_at text not null,
+        expires_at text not null default '',
+        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+    )
+"""
+
+
+def migration_013_agent_trust_observations(conn: sqlite3.Connection) -> None:
+    """Add the §5.7 private-only ``agent_trust_observations`` table (v2.2 / Phase 2).
+
+    Commercial reputation and protocol trust live in this table and are
+    deliberately kept separate from public verification metadata.  Observations
+    are private-only by default: no public serializer, search response, or any
+    public API output may expose them (§5.7, §3.4).
+    """
+    conn.execute(_AGENT_TRUST_OBSERVATIONS_DDL)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -362,6 +437,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "rebuild_cjk_search_documents", migration_008_rebuild_cjk_search_documents),
     Migration(9, "unique_open_reuse_key", migration_009_unique_open_reuse_key),
     Migration(10, "agent_catalog", migration_010_agent_catalog),
+    Migration(11, "agent_catalog_register_limits", migration_011_agent_catalog_register_limits),
+    Migration(12, "agent_catalog_write_idempotency", migration_012_agent_catalog_write_idempotency),
+    Migration(13, "agent_trust_observations", migration_013_agent_trust_observations),
 )
 
 

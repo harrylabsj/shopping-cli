@@ -452,6 +452,31 @@ def _list_merchant_catalog_agents(
     return agent_catalog_handlers.list_merchant_catalog_agents(db_path, merchant_id, query)
 
 
+# ── Agent Catalog v2.2 writes (§10.2–§10.4) ──────────────────────────────────
+
+
+def _register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return agent_catalog_handlers.register_catalog_agent(db_path, payload)
+
+
+def _refresh_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return agent_catalog_handlers.refresh_catalog_agent(db_path, catalog_agent_id, payload)
+
+
+def _verify_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return agent_catalog_handlers.verify_catalog_agent(db_path, catalog_agent_id, payload)
+
+
+def _claim_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return agent_catalog_handlers.claim_catalog_agent(db_path, catalog_agent_id, payload)
+
+
 def _match_path(template: str, path: str) -> dict[str, str] | None:
     parts = template.split("/")
     regex_parts = []
@@ -740,6 +765,33 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         "/v1/agent-catalog/merchants/{merchant_id}/agents",
         lambda db_path, payload, query, merchant_id: _list_merchant_catalog_agents(
             db_path, payload, query, merchant_id
+        ),
+    ),
+    # ── Agent Catalog v2.2 writes (§10.2–§10.4) ────────────────────────────────
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/register",
+        lambda db_path, payload, query, **kw: _register_catalog_agent(db_path, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/refresh",
+        lambda db_path, payload, query, catalog_agent_id: _refresh_catalog_agent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/verify",
+        lambda db_path, payload, query, catalog_agent_id: _verify_catalog_agent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/claim",
+        lambda db_path, payload, query, catalog_agent_id: _claim_catalog_agent(
+            db_path, catalog_agent_id, payload
         ),
     ),
 )
@@ -1376,6 +1428,57 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _list_merchant_catalog_agents(
             db_path, {}, {"limit": limit, "cursor": cursor}, merchant_id
+        )
+
+    # ── Agent Catalog v2.2 writes (§10.2–§10.4) ────────────────────────────────
+
+    @app.post("/v1/agent-catalog/agents/register")
+    def register_catalog_agent(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _register_catalog_agent(
+            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/refresh")
+    def refresh_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _refresh_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/verify")
+    def verify_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _verify_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/claim")
+    def claim_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _claim_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
         )
 
     return app
