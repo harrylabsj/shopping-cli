@@ -723,5 +723,169 @@ class AgentCatalogApiTest(unittest.TestCase):
                 self.assertIn(path, route_paths, f"FastAPI missing route: {path}")
 
 
+class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
+    """§5.7 / §3.4 — private trust observations never leak through public reads.
+
+    Seeds the private ``agent_trust_observations`` table with distinctive
+    marker content and asserts NONE of the 4 public read routes (list / get /
+    search / merchant-agents) surface that content in any key or string value.
+    """
+
+    _LEAK_EVIDENCE = "EVID-LEAK-7f4aa2"
+    _LEAK_SOURCE = "SRC-LEAK-7f4aa2"
+
+    def _collect_strings(self, obj):
+        """Recursively collect every string key and string value in obj."""
+        found = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    found.append(str(key))
+                    walk(item)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item)
+            elif isinstance(value, str):
+                found.append(value)
+
+        walk(obj)
+        return found
+
+    def _seed(self, db_file):
+        from shopping_cli.agent_catalog.sqlite_repository import insert_trust_observation
+
+        with db_session(db_file) as conn:
+            catalog.create_merchant(
+                conn,
+                merchant_id="mrc_seed",
+                name="Seed Merchant",
+                city="Hangzhou",
+                service_area="Xihu",
+                tags=["electronics"],
+                contact="test@example.com",
+                automation_boundaries="full-auto",
+            )
+            upsert_catalog_agent(
+                conn,
+                catalog_agent_id="cagt_001",
+                merchant_id="mrc_seed",
+                display_name="Seed Agent Alpha",
+                canonical_domain="alpha.example.com",
+                agent_type="commerce",
+                source_type="hosted",
+                lifecycle_status="active",
+                verification_status="commerce_verified",
+                hosting_mode="hosted",
+            )
+            insert_trust_observation(
+                conn,
+                catalog_agent_id="cagt_001",
+                kind="local_asserted_dispute",
+                value=2.0,
+                source=self._LEAK_SOURCE,
+                evidence_ref=self._LEAK_EVIDENCE,
+            )
+            insert_trust_observation(
+                conn,
+                catalog_agent_id="cagt_001",
+                kind="timeout_rate",
+                value=0.3,
+                source=self._LEAK_SOURCE,
+                evidence_ref=self._LEAK_EVIDENCE,
+            )
+
+    async def _asgi_request(self, app, method, path, query_string=""):
+        sent = []
+        received = False
+
+        async def receive():
+            nonlocal received
+            if received:
+                return {"type": "http.disconnect"}
+            received = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        qs = query_string if isinstance(query_string, bytes) else query_string.encode("utf-8")
+        await app(
+            {
+                "type": "http",
+                "method": method,
+                "path": path,
+                "query_string": qs,
+                "headers": [(b"content-type", b"application/json")],
+            },
+            receive,
+            send,
+        )
+        status = next(
+            message["status"] for message in sent if message["type"] == "http.response.start"
+        )
+        body = b"".join(
+            message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+        )
+        return status, json.loads(body.decode("utf-8") or "{}")
+
+    def _request(self, app, method, path, query_string=""):
+        return asyncio.run(self._asgi_request(app, method, path, query_string))
+
+    def _assert_no_observation_leak(self, body):
+        strings = self._collect_strings(body)
+        self.assertNotIn(self._LEAK_EVIDENCE, strings)
+        self.assertNotIn(self._LEAK_SOURCE, strings)
+        keys = set(strings)
+        self.assertNotIn("evidence_ref", keys)
+        self.assertNotIn("observation_id", keys)
+
+    def test_list_route_does_not_leak_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed(db_file)
+            app = MarketplaceASGIApp(db_file)
+
+            status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
+
+        self.assertEqual(status, 200)
+        self._assert_no_observation_leak(body)
+
+    def test_get_route_does_not_leak_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed(db_file)
+            app = MarketplaceASGIApp(db_file)
+
+            status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_001")
+
+        self.assertEqual(status, 200)
+        self._assert_no_observation_leak(body)
+
+    def test_search_route_does_not_leak_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed(db_file)
+            app = MarketplaceASGIApp(db_file)
+
+            status, body = self._request(app, "GET", "/v1/agent-catalog/agents/search")
+
+        self.assertEqual(status, 200)
+        self._assert_no_observation_leak(body)
+
+    def test_merchant_agents_route_does_not_leak_observations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed(db_file)
+            app = MarketplaceASGIApp(db_file)
+
+            status, body = self._request(
+                app, "GET", "/v1/agent-catalog/merchants/mrc_seed/agents"
+            )
+
+        self.assertEqual(status, 200)
+        self._assert_no_observation_leak(body)
+
+
 if __name__ == "__main__":
     unittest.main()

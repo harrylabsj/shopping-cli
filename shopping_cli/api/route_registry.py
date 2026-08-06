@@ -72,6 +72,11 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/v1/agent-catalog/agents/search": {"agent_catalog", "marketplace"},
     "/v1/agent-catalog/agents/{catalog_agent_id}": {"agent_catalog", "marketplace"},
     "/v1/agent-catalog/merchants/{merchant_id}/agents": {"agent_catalog", "marketplace"},
+    # ── Agent Catalog v2.2 writes (§10.2–§10.4) ────────────────────────────────
+    "/v1/agent-catalog/agents/register": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}/refresh": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}/verify": {"agent_catalog", "marketplace"},
+    "/v1/agent-catalog/agents/{catalog_agent_id}/claim": {"agent_catalog", "marketplace"},
 }
 
 

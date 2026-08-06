@@ -1,27 +1,38 @@
-"""Agent Catalog public read API handlers (§10.1).
+"""Agent Catalog API handlers (§10.1 read, §10.2–§10.4 writes).
 
-v2.1 scope: public read-only.  Registration/refresh/verify/claim belong to
-Phase 2 and are NOT implemented here.
+v2.1 scope: public read-only.  v2.2 (Phase 2) adds the four write routes:
+register (§10.2), refresh/verify (§10.3), and claim (§10.4) — with real
+idempotency claim/replay, per-actor + per-domain rate limits (§17.4), §23
+audit, and the §6.2 claim proof.
 """
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
 from shopping_cli.agent_catalog.serializers import catalog_search_result
 from shopping_cli.agent_catalog.sqlite_repository import (
+    enforce_catalog_register_domain_limit,
     get_catalog_agent_with_merchant,
     list_capabilities,
     list_catalog_agents as _list_catalog_agents,
     list_catalog_agents_by_merchant as _list_catalog_agents_by_merchant,
     list_endpoints,
+    require_catalog_agent,
 )
-from shopping_cli.core.errors import NotFoundError
+from shopping_cli.api import auth as api_auth
+from shopping_cli.api import idempotency as api_idempotency
+from shopping_cli.core.errors import AuthError, NotFoundError, PermissionDenied, ValidationError
+from shopping_cli.core.tokens import token_matches
 from shopping_cli.db.session import db_session
+from shopping_cli.services import agent_catalog_writes
+from shopping_cli.services import tokens as token_service
 from shopping_cli.services.agent_catalog import search_catalog_agents as _search_catalog_agents_service
 
-from .common import result_limit
+from .common import MAX_SQLITE_INTEGER, require_field, result_limit
 
 
 def _serialize_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
@@ -107,3 +118,385 @@ def list_merchant_catalog_agents(
             "results": results,
             "next_cursor": next_cursor,
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.2 write routes (§10.2–§10.4)
+# ═══════════════════════════════════════════════════════════════════════════
+
+REGISTER_ENDPOINT = "/v1/agent-catalog/agents/register"
+REFRESH_ENDPOINT = "/v1/agent-catalog/agents/{id}/refresh"
+VERIFY_ENDPOINT = "/v1/agent-catalog/agents/{id}/verify"
+CLAIM_ENDPOINT = "/v1/agent-catalog/agents/{id}/claim"
+
+# In-process bounded verification queue (§25 Phase 2), one per db_path.  Tests
+# patch ``_verification_queue`` so no worker thread ever touches the wire.
+_QUEUE_LOCK = threading.Lock()
+_QUEUES: dict[str, Any] = {}
+
+
+# ── Dependency factories (patch points for tests) ──────────────────────────
+
+
+def _verification_queue(db_path: str | Path) -> Any:
+    """Return the bounded in-process verification queue for *db_path* (§25)."""
+    key = str(db_path)
+    with _QUEUE_LOCK:
+        queue = _QUEUES.get(key)
+        if queue is None:
+            from shopping_cli.services.agent_verification import (
+                VerificationQueueConfig,
+                make_verification_worker,
+            )
+
+            queue = make_verification_worker(db_path, config=VerificationQueueConfig())
+            _QUEUES[key] = queue
+        return queue
+
+
+def _verification_service(db_path: str | Path, conn: Any) -> Any:
+    """Build a VerificationService bound to an open connection (§6)."""
+    from shopping_cli.discovery.trust import TrustPolicy
+    from shopping_cli.services.agent_verification import VerificationService
+
+    return VerificationService(conn, policy=TrustPolicy.defaults())
+
+
+def _identity_verifier() -> Any:
+    """Build an IdentityVerifier for the HTTPS domain-control challenge (§6)."""
+    from shopping_cli.discovery.fetcher import ProfileFetcher
+    from shopping_cli.discovery.trust import TrustPolicy
+    from shopping_cli.discovery.verifier import IdentityVerifier
+
+    policy = TrustPolicy.defaults()
+    return IdentityVerifier(ProfileFetcher(policy), policy)
+
+
+# ── Rate-limit / auth configuration ────────────────────────────────────────
+
+
+def _catalog_write_rate_limit_per_minute() -> int:
+    from shopping_cli.services.buyer_bootstrap import rate_limit_per_minute
+
+    return rate_limit_per_minute(
+        os.environ.get("SHOPPING_AGENT_CATALOG_WRITE_RATE_LIMIT_PER_MINUTE"),
+        default=60,
+        maximum=MAX_SQLITE_INTEGER,
+    )
+
+
+def _catalog_register_domain_limit_per_hour() -> int:
+    raw = str(os.environ.get("SHOPPING_AGENT_CATALOG_REGISTER_DOMAIN_LIMIT_PER_HOUR") or "").strip()
+    if not raw:
+        return 20
+    try:
+        return max(0, min(int(raw), 10000))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _verification_worker_token() -> str:
+    return str(os.environ.get("SHOPPING_VERIFICATION_WORKER_TOKEN") or "").strip()
+
+
+def _require_catalog_write_auth(conn: Any, agent: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Enforce §10.3 auth: owner merchant / admin / verification worker.
+
+    Returns an actor string used for §23 audit.
+    """
+    try:
+        api_auth.require_admin_token(payload)
+        return "admin"
+    except AuthError:
+        pass
+
+    expected_worker = _verification_worker_token()
+    presented = api_auth.payload_token(payload)
+    if expected_worker and presented and token_matches(presented, expected_worker):
+        return "verification_worker"
+
+    merchant_id = str(agent.get("merchant_id") or "").strip()
+    if merchant_id:
+        try:
+            token_service.require_merchant_token(conn, merchant_id, presented)
+            return f"merchant:{merchant_id}"
+        except AuthError:
+            pass
+    raise PermissionDenied(
+        "admin, verification worker, or owner merchant authorization required for catalog writes"
+    )
+
+
+def _register_actor(conn: Any, payload: dict[str, Any], merchant_id: str) -> str:
+    """Resolve the register actor and authorize an optional merchant binding.
+
+    Register is public (§10.2).  When *merchant_id* is supplied, the caller
+    must present a valid merchant token (or admin token) for that merchant so
+    public registration cannot squat on an existing merchant's catalog entry.
+    """
+    try:
+        api_auth.require_admin_token(payload)
+        return "admin"
+    except AuthError:
+        pass
+    if merchant_id:
+        token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
+        return f"merchant:{merchant_id}"
+    return "cli"
+
+
+def _claim_identity(conn: Any, agent: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the claiming merchant + actor for the claim route (§10.4).
+
+    Admin may claim for any merchant (via ``merchant_id`` or the agent's
+    current binding).  A merchant token claims for the token's merchant.
+    """
+    try:
+        api_auth.require_admin_token(payload)
+    except AuthError:
+        pass
+    else:
+        merchant_id = str(payload.get("merchant_id") or agent.get("merchant_id") or "").strip()
+        if not merchant_id:
+            raise ValidationError("merchant_id is required to claim a catalog agent")
+        return merchant_id, "admin"
+
+    presented = api_auth.payload_token(payload)
+    row = token_service.require_api_token(conn, presented, "merchant token required to claim a catalog agent")
+    if row["role"] != "merchant":
+        raise PermissionDenied("only a merchant or admin may claim a catalog agent")
+    return str(row["merchant_id"]), f"merchant:{row['merchant_id']}"
+
+
+def _enqueue_verification(db_path: str | Path, catalog_agent_id: str, *, kind: str, actor: str) -> Any:
+    return _verification_queue(db_path).enqueue(catalog_agent_id, kind=kind, actor=actor, wait=False)
+
+
+def _verification_response(result: Any) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "catalog_agent_id": result.catalog_agent_id,
+        "previous_status": result.previous_status,
+        "verification_status": result.status,
+        "stages": [
+            {
+                "stage": stage.stage,
+                "outcome": stage.outcome,
+                "target_status": stage.target_status,
+                "reason": stage.reason,
+                "verification_id": stage.verification_id,
+                "snapshot_ids": list(stage.snapshot_ids),
+            }
+            for stage in result.stages
+        ],
+        "idempotent": False,
+    }
+
+
+# ── Handlers ───────────────────────────────────────────────────────────────
+
+
+def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/register (§10.2).
+
+    Creates a DISCOVERED self_registered record (with optional profile
+    endpoints / merchant binding) and enqueues a verification task into the
+    bounded in-process queue.  Idempotency claim/replay is real; per-actor and
+    per-domain rate limits (§17.4) are enforced before any side effect.
+    """
+    canonical = agent_catalog_writes.normalize_canonical_domain(require_field(payload, "domain"))
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    request_hash = api_idempotency.catalog_register_request_hash(payload)
+
+    with db_session(db_path) as conn:
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, actor_key, _catalog_write_rate_limit_per_minute()
+        )
+        # §17.4 per-domain budget — the public register route must not become an
+        # SSRF scanner across arbitrary domains.
+        enforce_catalog_register_domain_limit(conn, canonical, _catalog_register_domain_limit_per_hour())
+        replayed = api_idempotency.claim_catalog_write_idempotency(
+            conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            merchant_id = str(payload.get("merchant_id") or "").strip()
+            actor = _register_actor(conn, payload, merchant_id)
+            result = agent_catalog_writes.register_catalog_agent(
+                conn,
+                domain=canonical,
+                agent_card_url=str(payload.get("agent_card_url") or ""),
+                ucp_profile_url=str(payload.get("ucp_profile_url") or ""),
+                merchant_id=merchant_id,
+                actor=actor,
+            )
+            cagt_id = str(result.get("catalog_agent_id") or "")
+            enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
+            response: dict[str, Any] = {
+                "ok": True,
+                "catalog_agent": result,
+                "verification_enqueued": True,
+                "task_id": getattr(enqueued, "task_id", ""),
+                "idempotent": False,
+            }
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash, response
+            )
+            return response
+        except Exception:
+            api_idempotency.clear_catalog_write_idempotency_claim(
+                conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
+            )
+            raise
+
+
+def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/refresh (§10.3).
+
+    Enqueues an explicit-refresh task into the bounded verification queue.
+    Auth: owner merchant / admin / verification worker.
+    """
+    catalog_agent_id = str(catalog_agent_id).strip()
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
+
+    with db_session(db_path) as conn:
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, actor_key, _catalog_write_rate_limit_per_minute()
+        )
+        replayed = api_idempotency.claim_catalog_write_idempotency(
+            conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            agent = require_catalog_agent(conn, catalog_agent_id)
+            actor = _require_catalog_write_auth(conn, agent, payload)
+            enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
+            response: dict[str, Any] = {
+                "ok": True,
+                "catalog_agent_id": catalog_agent_id,
+                "verification_status": agent["verification_status"],
+                "refresh_enqueued": True,
+                "task_id": getattr(enqueued, "task_id", ""),
+                "idempotent": False,
+            }
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash, response
+            )
+            return response
+        except Exception:
+            api_idempotency.clear_catalog_write_idempotency_claim(
+                conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash
+            )
+            raise
+
+
+def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/verify (§10.3).
+
+    Runs the §6 verification ladder synchronously and returns the stage result.
+    Auth: owner merchant / admin / verification worker.  §23 audit events
+    (verified / verification_failed / refreshed / stale) are written by the
+    VerificationService.
+    """
+    catalog_agent_id = str(catalog_agent_id).strip()
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
+
+    with db_session(db_path) as conn:
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, actor_key, _catalog_write_rate_limit_per_minute()
+        )
+        replayed = api_idempotency.claim_catalog_write_idempotency(
+            conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            agent = require_catalog_agent(conn, catalog_agent_id)
+            actor = _require_catalog_write_auth(conn, agent, payload)
+            service = _verification_service(db_path, conn)
+            result = service.verify(catalog_agent_id, actor=actor)
+            response = _verification_response(result)
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash, response
+            )
+            return response
+        except Exception:
+            api_idempotency.clear_catalog_write_idempotency_claim(
+                conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash
+            )
+            raise
+
+
+def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/claim (§10.4, §6.2).
+
+    Proves ownership via hosted identity (merchant/admin) or an HTTPS
+    domain-control challenge for self_registered/discovered agents, then binds
+    the agent to the claiming merchant.  Knowing the Agent Card URL is never
+    proof of ownership.
+    """
+    catalog_agent_id = str(catalog_agent_id).strip()
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
+
+    with db_session(db_path) as conn:
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, actor_key, _catalog_write_rate_limit_per_minute()
+        )
+        replayed = api_idempotency.claim_catalog_write_idempotency(
+            conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            agent = require_catalog_agent(conn, catalog_agent_id)
+            merchant_id, actor = _claim_identity(conn, agent, payload)
+            result = agent_catalog_writes.claim_catalog_agent(
+                conn,
+                catalog_agent_id=catalog_agent_id,
+                merchant_id=merchant_id,
+                actor=actor,
+                identity_verifier=_identity_verifier(),
+            )
+            response: dict[str, Any] = {
+                "ok": True,
+                "catalog_agent": result,
+                "idempotent": False,
+            }
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash, response
+            )
+            return response
+        except Exception:
+            api_idempotency.clear_catalog_write_idempotency_claim(
+                conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash
+            )
+            raise

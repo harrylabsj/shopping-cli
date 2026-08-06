@@ -171,6 +171,22 @@ def require_catalog_agent(conn: sqlite3.Connection, catalog_agent_id: str) -> di
     return _row_to_dict(row)
 
 
+def new_catalog_agent_id() -> str:
+    """Generate a unique public catalog agent id (``cagt_`` + random suffix)."""
+    import secrets
+
+    return f"cagt_{secrets.token_urlsafe(9)}"
+
+
+def get_catalog_agent_by_domain(conn: sqlite3.Connection, canonical_domain: str) -> dict[str, Any] | None:
+    """Return the catalog agent row for a canonical domain, if any (cooldown check §17.4)."""
+    row = conn.execute(
+        "select * from catalog_agents where canonical_domain = ? order by created_at desc limit 1",
+        (canonical_domain.lower().rstrip("."),),
+    ).fetchone()
+    return _row_to_dict(row) if row is not None else None
+
+
 def get_catalog_agent_with_merchant(
     conn: sqlite3.Connection, catalog_agent_id: str
 ) -> dict[str, Any] | None:
@@ -511,6 +527,367 @@ def list_catalog_agents_by_merchant(
     return results, next_cursor
 
 
+# ── Verification / snapshot persistence (W3) ────────────────────────────────
+# These functions support the verification pipeline (§5.5, §5.6, §23).  They
+# are intentionally narrow: snapshots keep public profile evidence with cache
+# metadata, and verifications record domain-control/identity/commerce checks.
+
+
+def set_verification_status(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    verification_status: str,
+    *,
+    last_verified_at: str | None = None,
+) -> None:
+    """Update a catalog agent's verification_status (and optionally last_verified_at)."""
+    fields: dict[str, Any] = {"verification_status": verification_status}
+    if last_verified_at is not None:
+        fields["last_verified_at"] = last_verified_at
+    _update_catalog_agent(conn, catalog_agent_id, **fields)
+
+
+def set_catalog_agent_merchant(conn: sqlite3.Connection, catalog_agent_id: str, merchant_id: str) -> None:
+    """Bind a catalog agent to a merchant (claim/ownership change §6.2)."""
+    _update_catalog_agent(conn, catalog_agent_id, merchant_id=str(merchant_id or ""))
+
+
+# ── agent_profile_snapshots (§5.5) ──────────────────────────────────────────
+
+
+def insert_profile_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    catalog_agent_id: str,
+    profile_type: str,
+    source_url: str,
+    etag: str,
+    last_modified: str,
+    content_hash: str,
+    raw_json: str,
+    fetched_at: str,
+    fresh_until: str,
+    validation_status: str = "valid",
+) -> int:
+    """Insert a new agent_profile_snapshots row (history is append-only)."""
+    cursor = conn.execute(
+        """
+        insert into agent_profile_snapshots(
+            catalog_agent_id, profile_type, source_url, etag, last_modified,
+            content_hash, raw_json, fetched_at, fresh_until, validation_status
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            catalog_agent_id,
+            profile_type,
+            source_url,
+            etag,
+            last_modified,
+            content_hash,
+            raw_json,
+            fetched_at,
+            fresh_until,
+            validation_status,
+        ),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("profile snapshot insert did not return an id")
+    return cursor.lastrowid
+
+
+def latest_profile_snapshot(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    profile_type: str,
+) -> dict[str, Any] | None:
+    """Return the most recent snapshot row for a profile type, or None."""
+    row = conn.execute(
+        """
+        select * from agent_profile_snapshots
+        where catalog_agent_id = ? and profile_type = ?
+        order by snapshot_id desc
+        limit 1
+        """,
+        (catalog_agent_id, profile_type),
+    ).fetchone()
+    return _row_to_dict(row) if row is not None else None
+
+
+def list_profile_snapshots(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select * from agent_profile_snapshots
+        where catalog_agent_id = ?
+        order by snapshot_id
+        """,
+        (catalog_agent_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ── agent_verifications (§5.6) ──────────────────────────────────────────────
+
+
+def insert_verification(
+    conn: sqlite3.Connection,
+    *,
+    catalog_agent_id: str,
+    verification_type: str,
+    result: str,
+    evidence_json: str,
+    checked_at: str,
+    expires_at: str,
+) -> int:
+    """Insert a new agent_verifications row.  Returns the verification id."""
+    cursor = conn.execute(
+        """
+        insert into agent_verifications(
+            catalog_agent_id, verification_type, result, evidence_json,
+            checked_at, expires_at
+        ) values (?, ?, ?, ?, ?, ?)
+        """,
+        (catalog_agent_id, verification_type, result, evidence_json, checked_at, expires_at),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("verification insert did not return an id")
+    return cursor.lastrowid
+
+
+def list_verifications(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select * from agent_verifications
+        where catalog_agent_id = ?
+        order by verification_id
+        """,
+        (catalog_agent_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ── agent_trust_observations (§5.7, private-only) ─────────────────────────────
+# Commercial reputation and protocol trust observations.  PRIVATE-ONLY: never
+# exposed through a public serializer, a search response, or any public API
+# output (§3.4, §5.7).  The Public Catalog only exposes verification status,
+# capability, freshness, and hosting mode.  Observations are stored as
+# independent, kind-tagged records and are never merged into a combined
+# reputation score — commercial reputation and protocol trust stay separate.
+
+TRUST_OBSERVATION_KINDS = frozenset({
+    "protocol_compliance",
+    "timeout_rate",
+    "schema_error_rate",
+    "successful_exchange",
+    "local_asserted_dispute",
+})
+
+
+def insert_trust_observation(
+    conn: sqlite3.Connection,
+    *,
+    catalog_agent_id: str,
+    kind: str,
+    value: float,
+    source: str = "",
+    evidence_ref: str = "",
+    observed_at: str = "",
+    expires_at: str = "",
+) -> int:
+    """Append one private trust observation (§5.7).  Returns the observation id.
+
+    The caller is responsible for kind/value validation (see
+    ``shopping_cli.services.agent_trust_observations``).  ``value`` is a single
+    numeric field — observations are never aggregated into a reputation score.
+    """
+    ts = observed_at or now_iso()
+    cursor = conn.execute(
+        """
+        insert into agent_trust_observations(
+            catalog_agent_id, kind, value, source, evidence_ref, observed_at, expires_at
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (catalog_agent_id, kind, float(value), source, evidence_ref, ts, expires_at),
+    )
+    if cursor.lastrowid is None:
+        raise RuntimeError("trust observation insert did not return an id")
+    return cursor.lastrowid
+
+
+def list_trust_observations(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str = "",
+    kind: str = "",
+) -> list[dict[str, Any]]:
+    """Private read path for §5.7 observations.
+
+    NOT for public use: the results must never reach a public serializer,
+    search response, or any public API output.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if catalog_agent_id:
+        clauses.append("catalog_agent_id = ?")
+        params.append(catalog_agent_id)
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    where = f"where {' and '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"select * from agent_trust_observations {where} order by observed_at, observation_id",
+        params,
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def count_trust_observations(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str = "",
+) -> int:
+    """Total number of stored observations (private aggregate; no content)."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if catalog_agent_id:
+        clauses.append("catalog_agent_id = ?")
+        params.append(catalog_agent_id)
+    where = f"where {' and '.join(clauses)}" if clauses else ""
+    row = conn.execute(
+        f"select count(*) from agent_trust_observations {where}",
+        params,
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def trust_observation_counts_by_kind(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str = "",
+) -> dict[str, int]:
+    """Counts per §5.7 kind — kept separate, never merged into one score."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if catalog_agent_id:
+        clauses.append("catalog_agent_id = ?")
+        params.append(catalog_agent_id)
+    where = f"where {' and '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"select kind, count(*) as n from agent_trust_observations {where} group by kind order by kind",
+        params,
+    ).fetchall()
+    return {str(r["kind"]): int(r["n"]) for r in rows}
+
+
+# ── agent_skills (§5.4) ─────────────────────────────────────────────────────
+
+
+def replace_skills(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    skills: list[dict[str, Any]],
+) -> None:
+    """Atomically replace all skills for a catalog agent (public skills only)."""
+    conn.execute(
+        "delete from agent_skills where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    )
+    for skill in skills:
+        conn.execute(
+            """
+            insert into agent_skills(
+                catalog_agent_id, skill_id, name, description,
+                tags_json, input_modes_json, output_modes_json
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                catalog_agent_id,
+                skill.get("skill_id", ""),
+                skill.get("name", ""),
+                skill.get("description", ""),
+                skill.get("tags_json", "[]"),
+                skill.get("input_modes_json", "[]"),
+                skill.get("output_modes_json", "[]"),
+            ),
+        )
+
+
+def list_skills(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select * from agent_skills
+        where catalog_agent_id = ?
+        order by skill_id
+        """,
+        (catalog_agent_id,),
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+# ── agent_endpoints (profile endpoints) ─────────────────────────────────────
+
+
+def upsert_profile_endpoints(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    endpoints: list[dict[str, Any]],
+) -> None:
+    """Upsert agent_card/ucp_profile endpoints, preserving other endpoint kinds.
+
+    Only ``kind`` in (agent_card, ucp_profile) is managed here so unrelated
+    endpoints (a2a, hosted_gateway) are never deleted by the verifier.
+    """
+    for ep in endpoints:
+        kind = str(ep.get("kind", ""))
+        if kind not in ("agent_card", "ucp_profile"):
+            continue
+        row = conn.execute(
+            "select endpoint_id from agent_endpoints where catalog_agent_id = ? and kind = ?",
+            (catalog_agent_id, kind),
+        ).fetchone()
+        ts = now_iso()
+        if row is None:
+            conn.execute(
+                """
+                insert into agent_endpoints(
+                    catalog_agent_id, kind, url, protocol, protocol_version,
+                    preference, auth_summary_json, status, last_checked_at
+                ) values (?, ?, ?, ?, ?, ?, '{}', 'active', ?)
+                """,
+                (
+                    catalog_agent_id,
+                    kind,
+                    ep.get("url", ""),
+                    ep.get("protocol", ""),
+                    ep.get("protocol_version", ""),
+                    int(ep.get("preference", 0)),
+                    ts,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                update agent_endpoints
+                set url = ?, protocol = ?, protocol_version = ?, preference = ?,
+                    last_checked_at = ?
+                where endpoint_id = ?
+                """,
+                (
+                    ep.get("url", ""),
+                    ep.get("protocol", ""),
+                    ep.get("protocol_version", ""),
+                    int(ep.get("preference", 0)),
+                    ts,
+                    row["endpoint_id"],
+                ),
+            )
+
+
 # ── Audit ───────────────────────────────────────────────────────────────────
 
 
@@ -539,3 +916,47 @@ def append_catalog_audit(
     if cursor.lastrowid is None:
         raise RuntimeError("audit event insert did not return an id")
     return cursor.lastrowid
+
+
+# ── Registration abuse controls (§17.4) ─────────────────────────────────────
+
+CATALOG_REGISTER_WINDOW_SECONDS = 3600
+
+
+def enforce_catalog_register_domain_limit(
+    conn: sqlite3.Connection,
+    canonical_domain: str,
+    limit: int,
+    current: Any = None,
+) -> None:
+    """Raise RateLimitError when *canonical_domain* exceeds its hourly register budget.
+
+    Prevents using the public register route as a large-scale SSRF scanner
+    (§17.4 per-domain limits): the same canonical domain may only trigger a
+    bounded number of registrations (and therefore profile fetches) per hour.
+    """
+    from datetime import datetime
+
+    from shopping_cli.core.errors import RateLimitError
+
+    if limit <= 0:
+        return
+    current = (current or datetime.now()).replace(microsecond=0)
+    epoch_seconds = int(current.timestamp())
+    window_epoch = epoch_seconds - (epoch_seconds % CATALOG_REGISTER_WINDOW_SECONDS)
+    window_start = datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
+    cursor = conn.execute(
+        """
+        insert into agent_catalog_register_limits(canonical_domain, window_start, request_count, updated_at)
+        values (?, ?, 1, ?)
+        on conflict(canonical_domain, window_start) do update set
+            request_count = agent_catalog_register_limits.request_count + 1,
+            updated_at = excluded.updated_at
+        where agent_catalog_register_limits.request_count < ?
+        """,
+        (canonical_domain.lower().rstrip("."), window_start, current.isoformat(), limit),
+    )
+    if cursor.rowcount != 1:
+        raise RateLimitError(
+            f"catalog registration rate limit exceeded for domain {canonical_domain} ({limit}/hour)"
+        )

@@ -1,4 +1,4 @@
-"""Buyer bootstrap idempotency and rate-limit helpers."""
+"""Buyer bootstrap and Agent Catalog write idempotency and rate-limit helpers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from shopping_cli.api.auth import payload_buyer_bootstrap_token
+from shopping_cli.api.auth import (
+    payload_buyer_bootstrap_token,
+    payload_token,
+)
 from shopping_cli.core.errors import IdempotencyConflict, RateLimitError, ValidationError
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import decode_json, encode_json, now_iso
@@ -18,6 +21,17 @@ DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE = 60
 BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = 60
 MAX_IDEMPOTENCY_KEY_LENGTH = 160
 MAX_SQLITE_INTEGER = 2**63 - 1
+
+# Agent Catalog write endpoints (§10.4) — a bounded per-actor budget and a
+# rolling idempotency claim.  These live in dedicated tables so catalog writes
+# never share (or pollute) the buyer bootstrap idempotency ledger.
+CATALOG_WRITE_RATE_LIMIT_WINDOW_SECONDS = 60
+CATALOG_WRITE_ENDPOINTS = frozenset({
+    "/v1/agent-catalog/agents/register",
+    "/v1/agent-catalog/agents/{id}/refresh",
+    "/v1/agent-catalog/agents/{id}/verify",
+    "/v1/agent-catalog/agents/{id}/claim",
+})
 
 
 def idempotency_key_from_payload(payload: dict[str, Any]) -> str:
@@ -100,6 +114,201 @@ def enforce_buyer_bootstrap_rate_limit(
     )
     if cursor.rowcount != 1:
         raise RateLimitError(f"buyer bootstrap rate limit exceeded ({limit}/minute)")
+
+
+# ── Agent Catalog write idempotency & rate limit (§10.4) ─────────────────────
+# The catalog write ledger is generic: the *actor_key* is the digest of the
+# presented API token (admin / merchant / verification worker), falling back to
+# a digest of the canonical domain for the public register route.  claim/replay
+# semantics mirror the buyer bootstrap helpers: an in-flight claim replays as
+# IdempotencyConflict, a completed claim replays the stored response, and a
+# request_hash mismatch is always rejected.
+
+
+def catalog_write_window_start(current: datetime, window_seconds: int = CATALOG_WRITE_RATE_LIMIT_WINDOW_SECONDS) -> str:
+    epoch_seconds = int(current.timestamp())
+    window_epoch = epoch_seconds - (epoch_seconds % window_seconds)
+    return datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
+
+
+def catalog_write_actor_key(payload: dict[str, Any], canonical_domain: str = "") -> str:
+    """Derive the idempotency/rate-limit actor from a request payload.
+
+    The presented API token (admin / merchant / verification worker) is the
+    actor when present.  The public register route may be unauthenticated; its
+    actor is a *constant* anonymous bucket so that (a) reusing an idempotency
+    key with a different request is detected even when the canonical domain
+    differs (the request_hash mismatch is what raises IdempotencyConflict),
+    and (b) all unauthenticated catalog writes share one bounded per-minute
+    budget.  The §17.4 per-domain registration limit independently caps each
+    domain, so the constant bucket adds a global bound without becoming an
+    SSRF amplification vector.
+    """
+    token = payload_token(payload) or payload.get("_auth_token") or ""
+    if token:
+        return token_digest(str(token))
+    return "anon:" + token_digest("catalog-write")
+
+
+def catalog_register_request_hash(payload: dict[str, Any]) -> str:
+    return request_hash(
+        {
+            "domain": str(payload.get("domain") or "").strip(),
+            "agent_card_url": str(payload.get("agent_card_url") or "").strip(),
+            "ucp_profile_url": str(payload.get("ucp_profile_url") or "").strip(),
+            "merchant_id": str(payload.get("merchant_id") or "").strip(),
+        }
+    )
+
+
+def catalog_agent_action_request_hash(payload: dict[str, Any], catalog_agent_id: str) -> str:
+    return request_hash(
+        {
+            "catalog_agent_id": str(catalog_agent_id or "").strip(),
+            "merchant_id": str(payload.get("merchant_id") or "").strip(),
+            "action": str(payload.get("action") or "").strip(),
+        }
+    )
+
+
+def enforce_agent_catalog_rate_limit(
+    conn: Any,
+    actor_key: str,
+    limit: int,
+    current: datetime | None = None,
+) -> None:
+    """Raise RateLimitError when *actor_key* exceeds its per-minute write budget."""
+    if limit <= 0:
+        return
+    current = (current or datetime.now()).replace(microsecond=0)
+    cursor = conn.execute(
+        """
+        insert into agent_catalog_write_rate_limits(actor_key, window_start, request_count, updated_at)
+        values (?, ?, 1, ?)
+        on conflict(actor_key, window_start) do update set
+            request_count = agent_catalog_write_rate_limits.request_count + 1,
+            updated_at = excluded.updated_at
+        where agent_catalog_write_rate_limits.request_count < ?
+        """,
+        (actor_key, catalog_write_window_start(current), current.isoformat(), limit),
+    )
+    if cursor.rowcount != 1:
+        raise RateLimitError(f"agent catalog write rate limit exceeded ({limit}/minute)")
+
+
+def catalog_write_idempotency_row(
+    conn: Any,
+    endpoint: str,
+    actor_key: str,
+    idempotency_key: str,
+) -> Any:
+    return conn.execute(
+        """
+        select endpoint, actor_key, idempotency_key, request_hash, status, response_json
+        from agent_catalog_write_idempotency
+        where endpoint = ? and actor_key = ? and idempotency_key = ?
+        """,
+        (endpoint, actor_key, idempotency_key),
+    ).fetchone()
+
+
+def replay_catalog_write_idempotency(
+    conn: Any,
+    endpoint: str,
+    actor_key: str,
+    idempotency_key: str,
+    request_hash_value: str,
+) -> dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    row = catalog_write_idempotency_row(conn, endpoint, actor_key, idempotency_key)
+    if row is None:
+        return None
+    if str(row["request_hash"]) != request_hash_value:
+        raise IdempotencyConflict("idempotency key was reused with a different request")
+    if row["status"] != "completed":
+        raise IdempotencyConflict("idempotent request is still processing")
+    response = decode_json(row["response_json"], {})
+    if not isinstance(response, dict):
+        response = {"ok": True}
+    result = dict(response)
+    result["idempotent"] = True
+    return result
+
+
+def claim_catalog_write_idempotency(
+    conn: Any,
+    endpoint: str,
+    actor_key: str,
+    idempotency_key: str,
+    request_hash_value: str,
+) -> dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    current = now_iso()
+    try:
+        conn.execute(
+            """
+            insert into agent_catalog_write_idempotency(
+                endpoint, actor_key, idempotency_key, request_hash, status,
+                response_json, created_at, updated_at
+            )
+            values (?, ?, ?, ?, 'processing', '{}', ?, ?)
+            """,
+            (endpoint, actor_key, idempotency_key, request_hash_value, current, current),
+        )
+    except sqlite3.IntegrityError:
+        return replay_catalog_write_idempotency(
+            conn, endpoint, actor_key, idempotency_key, request_hash_value
+        )
+    return None
+
+
+def complete_catalog_write_idempotency(
+    conn: Any,
+    endpoint: str,
+    actor_key: str,
+    idempotency_key: str,
+    request_hash_value: str,
+    response: dict[str, Any],
+) -> None:
+    if not idempotency_key:
+        return
+    stored = dict(response)
+    conn.execute(
+        """
+        update agent_catalog_write_idempotency
+        set status = 'completed', response_json = ?, updated_at = ?
+        where endpoint = ? and actor_key = ? and idempotency_key = ? and request_hash = ?
+        """,
+        (
+            encode_json(stored),
+            now_iso(),
+            endpoint,
+            actor_key,
+            idempotency_key,
+            request_hash_value,
+        ),
+    )
+
+
+def clear_catalog_write_idempotency_claim(
+    conn: Any,
+    endpoint: str,
+    actor_key: str,
+    idempotency_key: str,
+    request_hash_value: str,
+) -> None:
+    if not idempotency_key:
+        return
+    conn.execute(
+        """
+        delete from agent_catalog_write_idempotency
+        where endpoint = ? and actor_key = ? and idempotency_key = ? and request_hash = ?
+          and status = 'processing'
+        """,
+        (endpoint, actor_key, idempotency_key, request_hash_value),
+    )
 
 
 def idempotency_row(

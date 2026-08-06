@@ -225,3 +225,29 @@ def catalog_agent_detail(
         endpoints=endpoints,
         skills=skills,
     )
+
+
+def catalog_agent_write_result(
+    catalog_agent: dict[str, Any],
+    merchant: dict[str, Any] | None = None,
+    capabilities: list[dict[str, Any]] | None = None,
+    endpoints: list[dict[str, Any]] | None = None,
+    skills: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Public detail for write responses (register §10.2 / claim §10.4).
+
+    Extends the §8.2 search-result contract with the canonical identity the
+    caller just acted on (``canonical_domain`` and ``source_type``) so a
+    register/claim response is self-describing.  These are both §3.4
+    MAY-expose fields; nothing private leaks through.
+    """
+    result = catalog_agent_detail(
+        catalog_agent=catalog_agent,
+        merchant=merchant,
+        capabilities=capabilities,
+        endpoints=endpoints,
+        skills=skills,
+    )
+    result["canonical_domain"] = str(catalog_agent.get("canonical_domain") or "")
+    result["source_type"] = str(catalog_agent.get("source_type") or "")
+    return result
