@@ -192,6 +192,35 @@ def compute_content_hash(content: str | bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def compute_etag(content: str | bytes) -> str:
+    """Compute a strong ETag (quoted content hash) for an HTTP response body.
+
+    §18 — server-side generated validator: the same content always yields the
+    same ETag, and the value is opaque to clients (they only echo it back).
+    """
+    return f'"{compute_content_hash(content)}"'
+
+
+def etag_matches(if_none_match: str, etag: str) -> bool:
+    """True when an ``If-None-Match`` header value matches *etag*.
+
+    Handles strong and weak ETags and the ``*`` wildcard.  The header is
+    untrusted request data; every comparison is against the server's own
+    computed *etag*, so a malformed header simply never matches.
+    """
+    expected = etag.strip('"')
+    for raw in if_none_match.split(","):
+        token = raw.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        token = token.strip('"')
+        if token and token == expected:
+            return True
+    return False
+
+
 def snapshot_meta(
     *,
     directive: CacheDirective,

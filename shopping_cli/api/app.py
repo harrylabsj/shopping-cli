@@ -23,6 +23,7 @@ from shopping_cli.api.handlers import audit as audit_handlers
 from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
+from shopping_cli.api.handlers import hosted_publication as hosted_publication_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
@@ -42,13 +43,14 @@ from shopping_cli.core.errors import (
 from shopping_cli.services import tokens as token_service
 
 try:  # pragma: no cover - exercised when optional dependency is installed
-    from fastapi import FastAPI, Header, Request
+    from fastapi import FastAPI, Header, Request, Response
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
     from starlette.exceptions import HTTPException as StarletteHTTPException
 except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fastapi
     FastAPI = None  # type: ignore[misc,assignment]
     Header = None  # type: ignore[assignment]
+    Response = None  # type: ignore[misc,assignment]
     JSONResponse = None  # type: ignore[misc,assignment]
     RequestValidationError = None  # type: ignore[misc,assignment]
     Request = None  # type: ignore[misc,assignment]
@@ -151,6 +153,15 @@ def _idempotency_key_header_default() -> Any:
 
 
 IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
+
+
+def _if_none_match_header_default() -> Any:
+    if Header is None:
+        return ""
+    return Header(default="")
+
+
+IF_NONE_MATCH_HEADER = _if_none_match_header_default()
 
 
 def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
@@ -477,6 +488,51 @@ def _claim_catalog_agent(
     return agent_catalog_handlers.claim_catalog_agent(db_path, catalog_agent_id, payload)
 
 
+# ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────────
+
+
+def _hosted_agent_card_document(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
+    return hosted_publication_handlers.hosted_agent_card(db_path, catalog_agent_id)
+
+
+def _hosted_ucp_profile_document(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
+    return hosted_publication_handlers.hosted_ucp_profile(db_path, catalog_agent_id)
+
+
+def _etag_response(document: dict[str, Any], if_none_match: str) -> Any:
+    """Wrap a hosted A2A document with a §18 server-side ETag.
+
+    Returns a 304 Response when *if_none_match* matches the content hash,
+    otherwise a 200 JSONResponse carrying the document and its ETag header.
+    When the optional FastAPI/Starlette stack is unavailable, returns a
+    ``SimpleNamespace`` stand-in (the same shape ``_json_error_response`` uses)
+    so the route stays testable with the FakeFastAPI harness.
+    """
+    from shopping_cli.discovery.cache import compute_etag, etag_matches
+
+    body = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    etag = compute_etag(body)
+    if if_none_match and etag_matches(if_none_match, etag):
+        if Response is not None:
+            return Response(status_code=304, headers={"ETag": etag})
+        return SimpleNamespace(status_code=304, body=b"", headers={"ETag": etag})
+    if JSONResponse is not None:
+        return JSONResponse(status_code=200, content=document, headers={"ETag": etag})
+    return SimpleNamespace(
+        status_code=200,
+        body=body,
+        headers={"ETag": etag, "content-type": "application/json"},
+    )
+
+
+def _hosted_agent_card_response(db_path: str | Path, catalog_agent_id: str, if_none_match: str) -> Any:
+    return _etag_response(_hosted_agent_card_document(db_path, catalog_agent_id), if_none_match)
+
+
+def _hosted_ucp_profile_response(db_path: str | Path, catalog_agent_id: str, if_none_match: str) -> Any:
+    return _etag_response(_hosted_ucp_profile_document(db_path, catalog_agent_id), if_none_match)
+
+
 def _match_path(template: str, path: str) -> dict[str, str] | None:
     parts = template.split("/")
     regex_parts = []
@@ -792,6 +848,21 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         "/v1/agent-catalog/agents/{catalog_agent_id}/claim",
         lambda db_path, payload, query, catalog_agent_id: _claim_catalog_agent(
             db_path, catalog_agent_id, payload
+        ),
+    ),
+    # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────
+    RouteEntry(
+        {"GET"},
+        "/v1/hosted/agents/{catalog_agent_id}/agent-card.json",
+        lambda db_path, payload, query, catalog_agent_id: _hosted_agent_card_document(
+            db_path, catalog_agent_id
+        ),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/hosted/agents/{catalog_agent_id}/ucp",
+        lambda db_path, payload, query, catalog_agent_id: _hosted_ucp_profile_document(
+            db_path, catalog_agent_id
         ),
     ),
 )
@@ -1480,5 +1551,21 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
             catalog_agent_id,
             api_auth.payload_with_auth(payload, authorization, idempotency_key),
         )
+
+    # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────
+
+    @app.get("/v1/hosted/agents/{catalog_agent_id}/agent-card.json")
+    def hosted_agent_card_route(
+        catalog_agent_id: str,
+        if_none_match: str = IF_NONE_MATCH_HEADER,
+    ) -> Any:
+        return _hosted_agent_card_response(db_path, catalog_agent_id, if_none_match)
+
+    @app.get("/v1/hosted/agents/{catalog_agent_id}/ucp")
+    def hosted_ucp_profile_route(
+        catalog_agent_id: str,
+        if_none_match: str = IF_NONE_MATCH_HEADER,
+    ) -> Any:
+        return _hosted_ucp_profile_response(db_path, catalog_agent_id, if_none_match)
 
     return app
