@@ -16,6 +16,7 @@ from shopping_cli.core.errors import ConflictError, ValidationError
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
 from shopping_cli.db.session import now_iso
 from shopping_cli.services import tokens as token_service
+from shopping_cli.services.catalog_runtime_metrics import record_funnel
 
 
 def create_conversation(
@@ -36,6 +37,10 @@ def create_conversation(
         sku=sku,
         reuse_open=reuse_open,
     )
+    # §24 funnel: a conversation is the buyer↔merchant "connected" event;
+    # a conversation opened with an initial buyer message is also
+    # "negotiation_started" (decision fixed in catalog_runtime_metrics docstring).
+    record_funnel("connected")
     if text:
         append_message(
             conn,
@@ -45,6 +50,7 @@ def create_conversation(
             text,
             structured_payload={"source_id": source_id},
         )
+        record_funnel("negotiation_started")
         conversation = conversation_summary(conn, conversation["id"])
     return conversation
 

@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from shopping_cli.discovery.trust import TrustPolicy
+from shopping_cli.services.catalog_runtime_metrics import record_profile_fetch
 
 # ── Blocked / internal address ranges (§17.1) ─────────────────────────────────
 
@@ -481,6 +482,26 @@ class ProfileFetcher:
             FetchLimitError: Response exceeds size/depth/node limits.
             FetchError: Any other transport error.
         """
+        import time as _time
+
+        start = _time.monotonic()
+        try:
+            result = self._fetch(url, etag=etag, last_modified=last_modified)
+        except FetchError:
+            record_profile_fetch(_time.monotonic() - start, ok=False)
+            raise
+        # 2xx success and 304 not-modified both count as successful fetches.
+        record_profile_fetch(_time.monotonic() - start, ok=result.is_success or result.is_not_modified)
+        return result
+
+    def _fetch(
+        self,
+        url: str,
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> FetchResult:
+        """Uninstrumented fetch implementation (see :meth:`fetch`)."""
         import time as _time
 
         # 1. Validate URL (scheme, port)

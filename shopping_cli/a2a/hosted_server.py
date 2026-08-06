@@ -98,6 +98,7 @@ from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.negotiation import now_rfc3339
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 from shopping_cli.services import negotiation as negotiation_service
+from shopping_cli.services.catalog_runtime_metrics import record_hosted_gateway_request
 
 # JSON-RPC 2.0 standard codes + the A2A/KNP application codes (kiwi errors.ts).
 JSONRPC_PARSE_ERROR = -32700
@@ -780,6 +781,8 @@ def process_jsonrpc_request(
     be an open, write-capable connection (the HTTP layer opens one
     ``db_session`` per request).
     """
+    # §24 hosted_gateway_ratio runtime side: every hosted message/send counts.
+    record_hosted_gateway_request()
     request_id: str | None = None
     try:
         request_id, method, params = _validate_frame(body)
