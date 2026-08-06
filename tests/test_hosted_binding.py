@@ -46,7 +46,7 @@ from shopping_cli.core.conversations import ensure_conversation
 from shopping_cli.core.negotiation import validate_contract
 from shopping_cli.db.session import db_session, now_iso
 
-CAPABILITY = "example.kiwi.shopping.negotiation"
+CAPABILITY = "com.harrylabsj.kiwi.shopping.negotiation"
 EXCHANGE_ID = "ex_01H5V8KXZqJ7Qp3mN2B6A"
 TIMESTAMP = "2026-08-05T12:00:00Z"
 

@@ -53,7 +53,7 @@ A2A_PATH = "/a2a/agents/{catalog_agent_id}"
 MERCHANT_ID = "mrc-host"
 BUYER_ID = "buyer-1"
 SKU = "SKU-001"
-CAPABILITY = "example.kiwi.shopping.negotiation"
+CAPABILITY = "com.harrylabsj.kiwi.shopping.negotiation"
 EXCHANGE_ID = "ex_01H5V8KXZqJ7Qp3mN2B6A"
 TIMESTAMP = "2026-08-05T12:00:00Z"
 
