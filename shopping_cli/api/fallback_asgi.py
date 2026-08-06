@@ -11,6 +11,7 @@ from urllib.parse import parse_qs
 
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.limits import max_request_body_bytes
+from shopping_cli.discovery.cache import compute_etag, etag_matches
 
 
 HandleRequest = Callable[[str | Path, str, str, dict[str, Any] | None, dict[str, Any] | None], tuple[int, dict[str, Any]]]
@@ -136,10 +137,51 @@ class MarketplaceASGIApp:
             payload,
             {key: values[-1] if values else "" for key, values in query.items()},
         )
-        await self._send_json(send, status, response)
+        await self._send_json(
+            send,
+            status,
+            response,
+            if_none_match=headers.get("if-none-match", ""),
+            allow_304=method == "GET",
+        )
 
     @staticmethod
-    async def _send_json(send: Any, status: int, response: dict[str, Any]) -> None:
+    async def _send_json(
+        send: Any,
+        status: int,
+        response: dict[str, Any],
+        *,
+        if_none_match: str = "",
+        allow_304: bool = False,
+    ) -> None:
+        """Serialize *response* with a §18 server-side ETag.
+
+        When the caller allows conditional GET and the client's
+        ``If-None-Match`` matches the computed ETag, a body-less 304 is sent.
+        """
         body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json")]})
+        etag = compute_etag(body)
+        # A conditional GET only revalidates a *successful* representation:
+        # never 304 an error body (e.g. a 404 for If-None-Match: *).
+        if allow_304 and status == 200 and if_none_match and etag_matches(if_none_match, etag):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 304,
+                    "headers": [(b"etag", etag.encode("ascii"))],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"etag", etag.encode("ascii")),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": body})
