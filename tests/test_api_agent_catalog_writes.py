@@ -379,7 +379,7 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
                     {"domain": DOMAIN, "idempotency_key": "pd-2"},
                 )
             self.assertEqual(status2, 429)
-            self.assertIn("registration rate limit", body2["error"])
+            self.assertIn("registration", body2["error"])
 
     def test_register_live_domain_conflicts_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

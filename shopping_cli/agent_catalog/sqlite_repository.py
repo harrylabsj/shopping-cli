@@ -934,29 +934,20 @@ def enforce_catalog_register_domain_limit(
     Prevents using the public register route as a large-scale SSRF scanner
     (§17.4 per-domain limits): the same canonical domain may only trigger a
     bounded number of registrations (and therefore profile fetches) per hour.
+
+    Delegates to the shared fixed-window core (v3.0-P5) — see
+    ``shopping_cli.services.rate_limit`` for the backend abstraction.
     """
-    from datetime import datetime
+    from shopping_cli.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
-    from shopping_cli.core.errors import RateLimitError
-
-    if limit <= 0:
-        return
-    current = (current or datetime.now()).replace(microsecond=0)
-    epoch_seconds = int(current.timestamp())
-    window_epoch = epoch_seconds - (epoch_seconds % CATALOG_REGISTER_WINDOW_SECONDS)
-    window_start = datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
-    cursor = conn.execute(
-        """
-        insert into agent_catalog_register_limits(canonical_domain, window_start, request_count, updated_at)
-        values (?, ?, 1, ?)
-        on conflict(canonical_domain, window_start) do update set
-            request_count = agent_catalog_register_limits.request_count + 1,
-            updated_at = excluded.updated_at
-        where agent_catalog_register_limits.request_count < ?
-        """,
-        (canonical_domain.lower().rstrip("."), window_start, current.isoformat(), limit),
+    backend = SQLiteRateLimitBackend(
+        conn, table="agent_catalog_register_limits", key_column="canonical_domain"
     )
-    if cursor.rowcount != 1:
-        raise RateLimitError(
-            f"catalog registration rate limit exceeded for domain {canonical_domain} ({limit}/hour)"
-        )
+    enforce_rate_limit(
+        backend,
+        key=canonical_domain.lower().rstrip("."),
+        limit=limit,
+        window_seconds=CATALOG_REGISTER_WINDOW_SECONDS,
+        description=f"catalog registration for domain {canonical_domain}",
+        current=current,
+    )

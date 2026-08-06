@@ -177,23 +177,24 @@ def enforce_agent_catalog_rate_limit(
     limit: int,
     current: datetime | None = None,
 ) -> None:
-    """Raise RateLimitError when *actor_key* exceeds its per-minute write budget."""
-    if limit <= 0:
-        return
-    current = (current or datetime.now()).replace(microsecond=0)
-    cursor = conn.execute(
-        """
-        insert into agent_catalog_write_rate_limits(actor_key, window_start, request_count, updated_at)
-        values (?, ?, 1, ?)
-        on conflict(actor_key, window_start) do update set
-            request_count = agent_catalog_write_rate_limits.request_count + 1,
-            updated_at = excluded.updated_at
-        where agent_catalog_write_rate_limits.request_count < ?
-        """,
-        (actor_key, catalog_write_window_start(current), current.isoformat(), limit),
+    """Raise RateLimitError when *actor_key* exceeds its per-minute write budget.
+
+    Delegates to the shared fixed-window core (v3.0-P5) — see
+    ``shopping_cli.services.rate_limit`` for the backend abstraction.
+    """
+    from shopping_cli.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
+
+    backend = SQLiteRateLimitBackend(
+        conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
     )
-    if cursor.rowcount != 1:
-        raise RateLimitError(f"agent catalog write rate limit exceeded ({limit}/minute)")
+    enforce_rate_limit(
+        backend,
+        key=actor_key,
+        limit=limit,
+        window_seconds=CATALOG_WRITE_RATE_LIMIT_WINDOW_SECONDS,
+        description="agent catalog write",
+        current=current,
+    )
 
 
 def catalog_write_idempotency_row(
