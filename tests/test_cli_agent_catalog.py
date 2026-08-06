@@ -752,6 +752,78 @@ def _seed_expired_snapshot(raw: sqlite3.Connection, catalog_agent_id: str) -> No
     raw.commit()
 
 
+class CliAgentCatalogModerationTest(unittest.TestCase):
+    """CLI tests for `shopping-cli agent catalog {suspend,reinstate}` (v3.0 P2)."""
+
+    def run_cli(self, db_file, *args):
+        return run_cli_helper(db_file, *args, db_flag="--data")
+
+    def _init_db(self, db_file: Path) -> None:
+        from shopping_cli.db.session import db_session
+        with db_session(db_file):
+            pass
+
+    def _seed_agent(self, db_file: Path, catalog_agent_id: str = "cagt_mod") -> None:
+        with closing(sqlite3.connect(db_file)) as raw:
+            _seed_catalog_agent(
+                raw,
+                catalog_agent_id,
+                verification_status="discovered",
+                hosting_mode="direct",
+                canonical_domain="merchant.example",
+            )
+
+    def _status(self, db_file: Path, catalog_agent_id: str = "cagt_mod") -> str:
+        with closing(sqlite3.connect(db_file)) as raw:
+            raw.row_factory = sqlite3.Row
+            row = raw.execute(
+                "select verification_status from catalog_agents where catalog_agent_id = ?",
+                (catalog_agent_id,),
+            ).fetchone()
+        return str(row[0])
+
+    def test_suspend_reinstate_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self._init_db(db_file)
+            self._seed_agent(db_file)
+
+            suspend_out = self.run_cli(
+                db_file, "agent", "catalog", "suspend", "cagt_mod", "--reason", "spam agent",
+            )
+            self.assertIn("Verification Status: suspended (was discovered)", suspend_out)
+            self.assertEqual(self._status(db_file), "suspended")
+
+            reinstate_out = self.run_cli(
+                db_file, "agent", "catalog", "reinstate", "cagt_mod", "--reason", "false positive",
+            )
+            self.assertIn("Verification Status: discovered (was suspended)", reinstate_out)
+            self.assertIn("Re-verification required", reinstate_out)
+            self.assertEqual(self._status(db_file), "discovered")
+
+    def test_reinstate_non_suspended_exits_with_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self._init_db(db_file)
+            self._seed_agent(db_file)
+            with self.assertRaises(SystemExit) as ctx:
+                self.run_cli(db_file, "agent", "catalog", "reinstate", "cagt_mod")
+            self.assertIn("reinstate requires SUSPENDED", str(ctx.exception))
+            self.assertEqual(self._status(db_file), "discovered")
+
+    def test_suspend_json_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self._init_db(db_file)
+            self._seed_agent(db_file)
+            output = self.run_cli(
+                db_file, "agent", "catalog", "suspend", "cagt_mod", "--format", "json",
+            )
+            data = json.loads(output)
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["verification_status"], "suspended")
+
+
 class CliAgentCatalogStatsDoctorTest(unittest.TestCase):
     """CLI tests for `shopping-cli agent catalog {stats,doctor}` (§24)."""
 

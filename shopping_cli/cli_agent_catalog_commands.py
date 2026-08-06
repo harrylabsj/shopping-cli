@@ -236,6 +236,43 @@ def cmd_agent_catalog_claim(args: argparse.Namespace) -> None:
     emit({"ok": True, "catalog_agent": result}, args.format)
 
 
+def cmd_agent_catalog_suspend(args: argparse.Namespace) -> None:
+    """Suspend a catalog agent (v3.0 moderation, §10.4 P2)."""
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    reason = str(getattr(args, "reason", "") or "").strip()
+    with db_session(db_path_from_args(args)) as conn:
+        service = VerificationService(conn)
+        try:
+            result = service.suspend(catalog_agent_id, actor=_cli_actor(args), reason=reason)
+        except InvalidStateTransitionError as exc:
+            raise SystemExit(str(exc))
+    if args.format == "text":
+        print(_format_verification_result(result))
+        return
+    emit(_verification_response_json(catalog_agent_id, result), args.format)
+
+
+def cmd_agent_catalog_reinstate(args: argparse.Namespace) -> None:
+    """Reinstate a suspended catalog agent (v3.0 moderation, §10.4 P2).
+
+    Resets the agent to DISCOVERED; re-verification is not automatic — run
+    ``shopping-cli agent catalog verify <id>`` to promote it again.
+    """
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    reason = str(getattr(args, "reason", "") or "").strip()
+    with db_session(db_path_from_args(args)) as conn:
+        service = VerificationService(conn)
+        try:
+            result = service.reinstate(catalog_agent_id, actor=_cli_actor(args), reason=reason)
+        except InvalidStateTransitionError as exc:
+            raise SystemExit(str(exc))
+    if args.format == "text":
+        print(_format_verification_result(result))
+        print("Re-verification required: run `shopping-cli agent catalog verify <id>`")
+        return
+    emit(_verification_response_json(catalog_agent_id, result), args.format)
+
+
 def _format_verification_result(result: Any) -> str:
     lines = [
         f"Catalog Agent: {result.catalog_agent_id}",

@@ -76,7 +76,10 @@ _ALL_TRANSITIONS: dict[str, frozenset[str]] = {
     STALE: frozenset(_LADDER) | {REJECTED, UNREACHABLE, STALE, SUSPENDED},
     UNREACHABLE: frozenset(_LADDER) | {REJECTED, UNREACHABLE, STALE, SUSPENDED},
     REJECTED: frozenset(),
-    SUSPENDED: frozenset(),
+    # The only exit from SUSPENDED is an explicit operator reinstate, which
+    # resets the agent to the DISCOVERED entry point (v3.0 moderation / P2).
+    # Automatic pipelines (refresh / verify / staleness) never leave SUSPENDED.
+    SUSPENDED: frozenset({DISCOVERED}),
 }
 
 

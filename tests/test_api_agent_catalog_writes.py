@@ -101,6 +101,15 @@ def _audit_events(db_file: Path) -> list[tuple[str, str, dict]]:
         return [(r["event"], r["actor"], json.loads(r["details_json"] or "{}")) for r in rows]
 
 
+def _agent_status(db_file: Path, catalog_agent_id: str) -> str:
+    with db_session(db_file) as conn:
+        row = conn.execute(
+            "select verification_status from catalog_agents where catalog_agent_id = ?",
+            (catalog_agent_id,),
+        ).fetchone()
+        return str(row[0]) if row else ""
+
+
 class AgentCatalogWritesApiTest(unittest.TestCase):
     def setUp(self):
         self._env_patcher = patch.dict(
@@ -755,6 +764,129 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body["catalog_agent"]["merchant"]["id"], "mrc-claim")
 
+    # ── v3.0 moderation: suspend / reinstate (admin-only) ─────────────────────
+
+    def test_suspend_requires_admin_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_suspend")
+            # No admin token: moderation must be rejected before any side effect.
+            status, body = self._post(
+                db_file,
+                "/v1/agent-catalog/agents/cagt_suspend/suspend",
+                {"idempotency_key": "suspend-1"},
+            )
+            self.assertEqual(status, 403)
+            self.assertEqual(_agent_status(db_file, "cagt_suspend"), "discovered")
+
+    def test_suspend_ok_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_suspend")
+            status, body = self._post(
+                db_file,
+                "/v1/agent-catalog/agents/cagt_suspend/suspend",
+                {"idempotency_key": "suspend-2", "reason": "spam agent"},
+                token=TEST_ADMIN_TOKEN,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["verification_status"], "suspended")
+            self.assertEqual(body["previous_status"], "discovered")
+            events = [t for t in _audit_events(db_file) if t[0] == "catalog_agent_suspended"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0][1], "admin")
+            self.assertEqual(events[0][2]["reason"], "spam agent")
+
+    def test_reinstate_resets_and_enqueues_verify_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_suspend")
+            self._post(
+                db_file,
+                "/v1/agent-catalog/agents/cagt_suspend/suspend",
+                {"idempotency_key": "suspend-3"},
+                token=TEST_ADMIN_TOKEN,
+            )
+            status, body = self._post(
+                db_file,
+                "/v1/agent-catalog/agents/cagt_suspend/reinstate",
+                {"idempotency_key": "reinstate-1", "reason": "false positive"},
+                token=TEST_ADMIN_TOKEN,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body["verification_status"], "discovered")
+            self.assertEqual(body["previous_status"], "suspended")
+            self.assertEqual(body["verify_enqueued"], True)
+            # The re-verification task was queued with actor admin.
+            self.assertEqual(self._fake_queue.tasks[-1], ("cagt_suspend", "verify", "admin"))
+            events = [t for t in _audit_events(db_file) if t[0] == "catalog_agent_reinstated"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0][2]["previous_status"], "suspended")
+
+    def test_reinstate_requires_suspended_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_active")
+            status, body = self._post(
+                db_file,
+                "/v1/agent-catalog/agents/cagt_active/reinstate",
+                {"idempotency_key": "reinstate-2"},
+                token=TEST_ADMIN_TOKEN,
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(_agent_status(db_file, "cagt_active"), "discovered")
+            # Nothing was enqueued for a failed reinstate.
+            self.assertEqual(self._fake_queue.tasks, [])
+
+    def test_suspend_fastapi(self):
+        from shopping_cli.api import app as app_module
+        if app_module.FastAPI is None:
+            self.skipTest("FastAPI not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_suspend")
+            app = create_app(db_file)
+            result = self._fastapi_post(
+                app,
+                "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
+                {"idempotency_key": "fast-suspend"},
+                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
+                catalog_agent_id="cagt_suspend",
+            )
+            self.assertIsNotNone(result)
+            status, body = result
+            self.assertEqual(status, 200)
+            self.assertEqual(body["verification_status"], "suspended")
+
+    def test_reinstate_fastapi(self):
+        from shopping_cli.api import app as app_module
+        if app_module.FastAPI is None:
+            self.skipTest("FastAPI not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            self._seed_catalog_agent(db_file, "cagt_suspend")
+            app = create_app(db_file)
+            self._fastapi_post(
+                app,
+                "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
+                {"idempotency_key": "fast-suspend-2"},
+                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
+                catalog_agent_id="cagt_suspend",
+            )
+            result = self._fastapi_post(
+                app,
+                "/v1/agent-catalog/agents/{catalog_agent_id}/reinstate",
+                {"idempotency_key": "fast-reinstate"},
+                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
+                catalog_agent_id="cagt_suspend",
+            )
+            self.assertIsNotNone(result)
+            status, body = result
+            self.assertEqual(status, 200)
+            self.assertEqual(body["verification_status"], "discovered")
+
     # ═══════════════════════════════════════════════════════════════════════════
     # 5. Route registry consistency + FastAPI route presence
     # ═══════════════════════════════════════════════════════════════════════════
@@ -765,6 +897,8 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
         self.assertEqual(paths["/v1/agent-catalog/agents/{catalog_agent_id}/refresh"], {"POST"})
         self.assertEqual(paths["/v1/agent-catalog/agents/{catalog_agent_id}/verify"], {"POST"})
         self.assertEqual(paths["/v1/agent-catalog/agents/{catalog_agent_id}/claim"], {"POST"})
+        self.assertEqual(paths["/v1/agent-catalog/agents/{catalog_agent_id}/suspend"], {"POST"})
+        self.assertEqual(paths["/v1/agent-catalog/agents/{catalog_agent_id}/reinstate"], {"POST"})
 
     def test_write_routes_in_agent_catalog_group(self):
         from shopping_cli.api.route_registry import routes_for_group

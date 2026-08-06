@@ -307,17 +307,59 @@ class VerificationService:
             (StageResult("staleness", "stale", target, reason="profile freshness window expired"),),
         )
 
-    def suspend(self, catalog_agent_id: str, *, actor: str = "admin") -> VerificationResult:
-        """Suspend a catalog agent (operator action)."""
+    def suspend(self, catalog_agent_id: str, *, actor: str = "admin", reason: str = "") -> VerificationResult:
+        """Suspend a catalog agent (operator action, v3.0 moderation / P2).
+
+        Idempotent: an already-suspended agent returns unchanged.  The
+        suspension reason is recorded in the §23 audit event.
+        """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         current = agent["verification_status"]
         if current == SUSPENDED:
             return VerificationResult(catalog_agent_id, current, current, ())
         target = self._state_machine.transition(current, SUSPENDED)
         self._apply_status(agent, target)
-        self._write_audit(catalog_agent_id, actor, "catalog_agent_suspended", {"reason": "operator suspension"})
+        self._write_audit(
+            catalog_agent_id,
+            actor,
+            "catalog_agent_suspended",
+            {"reason": reason or "operator suspension"},
+        )
         return VerificationResult(
             catalog_agent_id, current, target, (StageResult("suspend", "suspended", target),)
+        )
+
+    def reinstate(self, catalog_agent_id: str, *, actor: str = "admin", reason: str = "") -> VerificationResult:
+        """Reinstate a suspended catalog agent (operator action, v3.0 P2).
+
+        The only exit from the SUSPENDED terminal state: the agent is reset
+        to the DISCOVERED entry point and must be re-verified before it can
+        be promoted again — the pre-suspension status is never restored
+        automatically.  ``last_verified_at`` is cleared to reflect the reset.
+
+        Fail-closed: agents not in SUSPENDED raise
+        InvalidStateTransitionError (reinstate is a SUSPENDED-only action).
+        """
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
+        current = agent["verification_status"]
+        if current != SUSPENDED:
+            # Explicit check, not the state machine: DISCOVERED → DISCOVERED
+            # is a legal self-transition (re-registration entry), so a plain
+            # transition() call would silently accept a non-suspended agent.
+            raise InvalidStateTransitionError(
+                f"reinstate requires SUSPENDED status, got {current!r}"
+            )
+        target = self._state_machine.transition(current, DISCOVERED)
+        self._apply_status(agent, target)
+        set_verification_status(self._conn, catalog_agent_id, DISCOVERED, last_verified_at="")
+        self._write_audit(
+            catalog_agent_id,
+            actor,
+            "catalog_agent_reinstated",
+            {"reason": reason or "operator reinstate", "previous_status": current},
+        )
+        return VerificationResult(
+            catalog_agent_id, current, target, (StageResult("reinstate", "reinstated", target),)
         )
 
     # ── Granular stage entry points ────────────────────────────────────────

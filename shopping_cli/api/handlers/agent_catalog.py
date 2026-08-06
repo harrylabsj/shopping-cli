@@ -128,6 +128,8 @@ REGISTER_ENDPOINT = "/v1/agent-catalog/agents/register"
 REFRESH_ENDPOINT = "/v1/agent-catalog/agents/{id}/refresh"
 VERIFY_ENDPOINT = "/v1/agent-catalog/agents/{id}/verify"
 CLAIM_ENDPOINT = "/v1/agent-catalog/agents/{id}/claim"
+SUSPEND_ENDPOINT = "/v1/agent-catalog/agents/{id}/suspend"
+REINSTATE_ENDPOINT = "/v1/agent-catalog/agents/{id}/reinstate"
 
 # In-process bounded verification queue (§25 Phase 2), one per db_path.  Tests
 # patch ``_verification_queue`` so no worker thread ever touches the wire.
@@ -500,3 +502,123 @@ def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dic
                 conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash
             )
             raise
+
+
+def _moderation_action(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    payload: dict[str, Any],
+    *,
+    endpoint: str,
+    action: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Shared v3.0 moderation write path: suspend / reinstate.
+
+    Both actions are admin-only (marketplace moderation, §10.4 P2): the
+    payload must carry a valid admin bootstrap token, which also resolves
+    the audit actor.  Idempotency and per-actor rate limits mirror the
+    other catalog write routes (§17.4).
+    """
+    catalog_agent_id = str(catalog_agent_id).strip()
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
+
+    with db_session(db_path) as conn:
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, endpoint, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, actor_key, _catalog_write_rate_limit_per_minute()
+        )
+        replayed = api_idempotency.claim_catalog_write_idempotency(
+            conn, endpoint, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
+        try:
+            # Admin-only: moderation must never be driven by a merchant owner
+            # or the verification worker (raises AuthError → 401/403).
+            api_auth.require_admin_token(payload)
+            require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
+            service = _verification_service(db_path, conn)
+            result = getattr(service, action)(catalog_agent_id, actor="admin", reason=reason)
+            response: dict[str, Any] = {
+                "ok": True,
+                "catalog_agent_id": catalog_agent_id,
+                "previous_status": result.previous_status,
+                "verification_status": result.status,
+                "stages": [
+                    {
+                        "stage": stage.stage,
+                        "outcome": stage.outcome,
+                        "target_status": stage.target_status,
+                        "reason": stage.reason,
+                    }
+                    for stage in result.stages
+                ],
+                "idempotent": False,
+            }
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, endpoint, actor_key, idempotency_key, request_hash, response
+            )
+            return response
+        except Exception:
+            api_idempotency.clear_catalog_write_idempotency_claim(
+                conn, endpoint, actor_key, idempotency_key, request_hash
+            )
+            raise
+
+
+def _payload_reason(payload: dict[str, Any]) -> str:
+    """Optional operator reason from the request body (recorded in §23 audit)."""
+    return str((payload or {}).get("reason") or "").strip()
+
+
+def suspend_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/suspend (v3.0 moderation, §10.4 P2).
+
+    Suspends an agent (admin-only, idempotent).  A suspended agent keeps its
+    catalog row but is excluded from verification promotion; the only way
+    back is an explicit admin reinstate.
+    """
+    return _moderation_action(
+        db_path,
+        catalog_agent_id,
+        payload,
+        endpoint=SUSPEND_ENDPOINT,
+        action="suspend",
+        reason=_payload_reason(payload),
+    )
+
+
+def reinstate_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/reinstate (v3.0 moderation, §10.4 P2).
+
+    Admin-only reinstate: resets a suspended agent to DISCOVERED and
+    enqueues one verification task (kind="verify") so the re-verification
+    starts immediately — the pre-suspension status is never restored
+    automatically.  The enqueued task id is returned as ``verify_task_id``.
+    """
+    response = _moderation_action(
+        db_path,
+        catalog_agent_id,
+        payload,
+        endpoint=REINSTATE_ENDPOINT,
+        action="reinstate",
+        reason=_payload_reason(payload),
+    )
+    # Auto-queue one verification run (idempotent replays return early inside
+    # _moderation_action, so this only runs on the fresh reinstate path).
+    if response.get("verification_status") == "discovered":
+        enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="verify", actor="admin")
+        response["verify_enqueued"] = True
+        response["verify_task_id"] = getattr(enqueued, "task_id", "")
+    return response
