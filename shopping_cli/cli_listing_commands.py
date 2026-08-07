@@ -11,27 +11,51 @@
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any
 
 from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.core.catalog import require_merchant
 from shopping_cli.db.session import db_session
-from shopping_cli.kiwi_catalog.publisher import KiwiCatalogPublisher, PublishError
+from shopping_cli.kiwi_catalog.publisher import (
+    KiwiCatalogPublisher,
+    PublishError,
+    resolve_merchant_agent_id,
+)
 from shopping_cli.listings.projection import list_publishable_listings, project_product_listing
 
+_OWNER_TOKEN_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 
-def _publisher_from_args(args: argparse.Namespace) -> KiwiCatalogPublisher:
+
+def _publisher_from_args(
+    args: argparse.Namespace, *, resolve_owner: bool = True
+) -> KiwiCatalogPublisher:
     base_url = str(args.kiwi_catalog_url or "").strip()
     if not base_url:
         raise PublishError("--kiwi-catalog-url is required")
-    secret = str(args.owner_token_secret or "").strip()
+    secret = (
+        str(args.owner_token_secret or "").strip()
+        or os.environ.get(_OWNER_TOKEN_SECRET_ENV, "").strip()
+    )
     if not secret:
-        raise PublishError("--owner-token-secret is required")
+        raise PublishError(
+            f"--owner-token-secret is required (or set {_OWNER_TOKEN_SECRET_ENV})"
+        )
+    merchant_id = str(args.merchant or "").strip()
+    if not merchant_id:
+        # 单 merchant 构造（owner_token 按 merchant 派生）：无 --merchant 时
+        # 一切请求都会被服务端拒绝，直接 fail-closed 报错。
+        raise PublishError("--merchant is required (publisher is single-merchant by construction)")
+    owner_agent_id = str(args.owner_agent_id or "").strip()
+    if not owner_agent_id and resolve_owner:
+        # 缺省回退：查 kiwi-catalog 该 merchant 的 catalog agent（与 help
+        # 文案一致；与 kiwi merchant publish Step 1 同端点）。
+        owner_agent_id = resolve_merchant_agent_id(base_url, merchant_id)
     return KiwiCatalogPublisher(
         base_url=base_url,
         owner_token_secret=secret,
-        merchant_id=str(args.merchant).strip(),
-        owner_agent_id=str(args.owner_agent_id or "").strip(),
+        merchant_id=merchant_id,
+        owner_agent_id=owner_agent_id,
     )
 
 
@@ -86,7 +110,8 @@ def cmd_listing_publish_listings(args: argparse.Namespace) -> None:
 def cmd_listing_withdraw(args: argparse.Namespace) -> None:
     """手动下架一条已发布 listing。"""
     db_path = db_path_from_args(args)
-    publisher = _publisher_from_args(args)
+    # withdraw 只需 owner_token（由 merchant_id 派生），不需要 owner agent。
+    publisher = _publisher_from_args(args, resolve_owner=False)
     listing_id = str(args.listing_id or "").strip()
     if not listing_id:
         raise PublishError("listing_id is required")

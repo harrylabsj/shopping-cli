@@ -11,12 +11,15 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import hmac
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 from shopping_cli.db.session import open_connection
 from shopping_cli.kiwi_catalog.publisher import (
@@ -24,6 +27,7 @@ from shopping_cli.kiwi_catalog.publisher import (
     PublishError,
     owner_token,
     projection_digest,
+    resolve_merchant_agent_id,
 )
 from shopping_cli.listings.projection import project_product_listing
 
@@ -58,6 +62,9 @@ class FakeCatalogServer:
         self.requests: list[dict] = []
         self.next_listing_id = 0
         self.fail_next_publish = False
+        self.merchant_agents: list[dict] = [
+            {"catalog_agent_id": "cagt_resolved_001", "display_name": "Resolved"},
+        ]
 
     def fetch(self, method: str, url: str, body: bytes | None, headers: dict) -> tuple[int, bytes]:
         self.requests.append(
@@ -81,6 +88,11 @@ class FakeCatalogServer:
                         "listing": {"listing_id": f"lst_fake_{self.next_listing_id}"},
                     }
                 ).encode(),
+            )
+        if "/v1/agent-catalog/merchants/" in url and "/agents" in url:
+            return (
+                200,
+                json.dumps({"ok": True, "results": self.merchant_agents, "next_cursor": ""}).encode(),
             )
         if "/withdraw" in url:
             return (200, json.dumps({"ok": True}).encode())
@@ -165,12 +177,108 @@ class KiwiCatalogPublisherTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(state, "WITHDRAWN")
 
+    def test_withdrawn_reactivates_same_content_republishes(self) -> None:
+        """WITHDRAWN 后同内容 reactivate：digest 相同也必须重发（恢复发布）。"""
+        _seed_product(self.conn, "SKU-001")
+        projection = project_product_listing(self.conn, "SKU-001", merchant_id=MERCHANT)
+        self.publisher.publish_listing(self.conn, projection, source_key="SKU-001")
+        # 停用 → reconcile withdraw（镜像 WITHDRAWN）
+        self.conn.execute("update products set active = 0 where sku = 'SKU-001'")
+        self.conn.commit()
+        self.publisher.reconcile(self.conn, active_skus=set())
+        requests_before = len(self.server.requests)
+        # 恢复：同内容重新激活 → 必须重发 publish（服务端 update_listing 重置 ACTIVE）
+        self.conn.execute("update products set active = 1 where sku = 'SKU-001'")
+        self.conn.commit()
+        reactivated = project_product_listing(self.conn, "SKU-001", merchant_id=MERCHANT)
+        self.assertEqual(projection_digest(reactivated), projection_digest(projection))
+        outcome = self.publisher.publish_listing(self.conn, reactivated, source_key="SKU-001")
+        self.assertFalse(outcome["skipped"], "WITHDRAWN 后同内容必须重发")
+        self.assertEqual(len(self.server.requests), requests_before + 1)
+        self.assertTrue(self.server.requests[-1]["url"].endswith("/v1/listings/publish"))
+        with open_connection(self.db_path) as conn:
+            state = conn.execute(
+                "select publication_state from listing_publications where source_key = 'SKU-001'"
+            ).fetchone()[0]
+        self.assertEqual(state, "ACTIVE")
+
+    def test_resolve_merchant_agent_id_returns_first_agent(self) -> None:
+        agent_id = resolve_merchant_agent_id(
+            "http://127.0.0.1:8600", MERCHANT, fetch=self.server.fetch
+        )
+        self.assertEqual(agent_id, "cagt_resolved_001")
+
+    def test_resolve_merchant_agent_id_no_agent_raises(self) -> None:
+        self.server.merchant_agents = []
+        with self.assertRaises(PublishError) as ctx:
+            resolve_merchant_agent_id(
+                "http://127.0.0.1:8600", MERCHANT, fetch=self.server.fetch
+            )
+        self.assertIn("no catalog agent", str(ctx.exception))
+        self.assertIn("--owner-agent-id", str(ctx.exception))
+
+    def test_resolve_merchant_agent_id_empty_merchant_raises(self) -> None:
+        with self.assertRaises(PublishError):
+            resolve_merchant_agent_id("http://127.0.0.1:8600", "", fetch=self.server.fetch)
+
     def test_http_failure_fails_closed(self) -> None:
         _seed_product(self.conn, "SKU-001")
         projection = project_product_listing(self.conn, "SKU-001", merchant_id=MERCHANT)
         self.server.fail_next_publish = True
         with self.assertRaises(PublishError):
             self.publisher.publish_listing(self.conn, projection, source_key="SKU-001")
+
+
+class ListingCliPublisherArgsTest(unittest.TestCase):
+    """publish-listings 缺省路径：--merchant 必填、--owner-agent-id 回退解析。"""
+
+    def _args(self, **overrides: Any) -> argparse.Namespace:
+        base = {
+            "kiwi_catalog_url": "http://127.0.0.1:8600",
+            "owner_token_secret": SECRET,
+            "merchant": MERCHANT,
+            "owner_agent_id": "",
+        }
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_default_owner_agent_resolves_from_catalog(self) -> None:
+        from shopping_cli.cli_listing_commands import _publisher_from_args
+
+        with mock.patch(
+            "shopping_cli.cli_listing_commands.resolve_merchant_agent_id",
+            return_value="cagt_resolved_001",
+        ) as resolve:
+            publisher = _publisher_from_args(self._args())
+        resolve.assert_called_once_with("http://127.0.0.1:8600", MERCHANT)
+        self.assertEqual(publisher.owner_agent_id, "cagt_resolved_001")
+
+    def test_explicit_owner_agent_skips_lookup(self) -> None:
+        from shopping_cli.cli_listing_commands import _publisher_from_args
+
+        with mock.patch(
+            "shopping_cli.cli_listing_commands.resolve_merchant_agent_id",
+            return_value="should-not-be-used",
+        ) as resolve:
+            publisher = _publisher_from_args(self._args(owner_agent_id=AGENT))
+        resolve.assert_not_called()
+        self.assertEqual(publisher.owner_agent_id, AGENT)
+
+    def test_merchant_required(self) -> None:
+        from shopping_cli.cli_listing_commands import _publisher_from_args
+
+        with self.assertRaises(PublishError) as ctx:
+            _publisher_from_args(self._args(merchant=""))
+        self.assertIn("--merchant is required", str(ctx.exception))
+
+    def test_withdraw_skips_owner_resolution(self) -> None:
+        from shopping_cli.cli_listing_commands import _publisher_from_args
+
+        with mock.patch(
+            "shopping_cli.cli_listing_commands.resolve_merchant_agent_id"
+        ) as resolve:
+            _publisher_from_args(self._args(), resolve_owner=False)
+        resolve.assert_not_called()
 
 
 if __name__ == "__main__":
