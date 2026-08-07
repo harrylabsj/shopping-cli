@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 18
 
 
 @dataclass(frozen=True)
@@ -492,6 +492,47 @@ def migration_016_product_source_column(conn: sqlite3.Connection) -> None:
         )
 
 
+def migration_017_product_provenance(conn: sqlite3.Connection) -> None:
+    """products per-field provenance 列（shopping-cli v0.3 §5；评审 P2）。
+
+    source_revision / observed_at / fresh_until：权威源版本、观察时间、事实
+    TTL。幂等 ALTER（pragma table_info 检查，参照 v16 模式）；fresh 路径由
+    models.py SCHEMA 创建，旧库在此补列。
+    """
+    cols = [row[1] for row in conn.execute("pragma table_info(products)").fetchall()]
+    for name, ddl in (
+        ("source_revision", "text not null default ''"),
+        ("observed_at", "text not null default ''"),
+        ("fresh_until", "text not null default ''"),
+    ):
+        if name not in cols:
+            conn.execute(f"alter table products add column {name} {ddl}")
+
+
+def migration_018_listing_publications(conn: sqlite3.Connection) -> None:
+    """本地发布镜像表（shopping-cli v0.3 DoD #4/#5）。
+
+    listing_publications 记录已发布到 kiwi-catalog 的 projection：digest 去重
+    （同内容不重复发布）、products.active=0 → withdraw 的 reconcile 锚点。
+    """
+    conn.execute(
+        """
+        create table if not exists listing_publications (
+            id integer primary key autoincrement,
+            listing_id text not null,
+            merchant_id text not null,
+            source_key text not null,
+            source_revision text not null default '',
+            digest text not null,
+            publication_state text not null default 'ACTIVE',
+            published_at text not null,
+            updated_at text not null,
+            unique (merchant_id, source_key)
+        )
+        """
+    )
+
+
 def migration_015_verification_queue_tasks(conn: sqlite3.Connection) -> None:
     """Add the persistent verification queue ledger (v3.0-P4, §25 Phase 2).
 
@@ -524,6 +565,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(14, "a2a_inbound_idempotency", migration_014_a2a_inbound_idempotency),
     Migration(15, "verification_queue_tasks", migration_015_verification_queue_tasks),
     Migration(16, "product_source_column", migration_016_product_source_column),
+    Migration(17, "product_provenance", migration_017_product_provenance),
+    Migration(18, "listing_publications", migration_018_listing_publications),
 )
 
 

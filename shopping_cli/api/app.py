@@ -25,6 +25,7 @@ from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
 from shopping_cli.api.handlers import hosted_a2a as hosted_a2a_handlers
 from shopping_cli.api.handlers import hosted_publication as hosted_publication_handlers
+from shopping_cli.api.handlers import listings_projection as listings_projection_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
@@ -227,6 +228,14 @@ def _update_product(db_path: str | Path, sku: str, payload: dict[str, Any]) -> d
 
 def _get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
     return catalog_handlers.get_product(db_path, sku)
+
+
+def _list_listing_projections(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
+    return listings_projection_handlers.list_listing_projections(db_path, query)
+
+
+def _get_listing_projection(db_path: str | Path, sku: str) -> dict[str, Any]:
+    return listings_projection_handlers.get_listing_projection(db_path, sku)
 
 
 def _search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
@@ -659,6 +668,16 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)
     ),
     RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query)),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/listings/projections",
+        lambda db_path, payload, query, **kw: _list_listing_projections(db_path, query or {}),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/listings/{sku}/projection",
+        lambda db_path, payload, query, sku: _get_listing_projection(db_path, sku),
+    ),
     RouteEntry({"GET"}, "/search/merchants", lambda db_path, payload, query, **kw: _search_merchants(db_path, query)),
     RouteEntry(
         {"POST"}, "/channels/messages", lambda db_path, payload, query, **kw: _ingest_channel_message(db_path, payload)
@@ -1198,6 +1217,14 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _update_product(db_path, sku, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/v1/merchant/listings/projections")
+    def merchant_listing_projections(merchant_id: str = "") -> dict[str, Any]:
+        return _list_listing_projections(db_path, {"merchant_id": merchant_id})
+
+    @app.get("/v1/merchant/listings/{sku}/projection")
+    def merchant_listing_projection(sku: str) -> dict[str, Any]:
+        return _get_listing_projection(db_path, sku)
 
     @app.get("/search/products")
     def search_products(

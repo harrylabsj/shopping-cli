@@ -84,6 +84,9 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/v1/hosted/agents/{catalog_agent_id}/ucp": {"agent_catalog", "marketplace"},
     # ── Hosted A2A JSON-RPC endpoint v2.4-W3 ──────────────────────────────────
     "/a2a/agents/{catalog_agent_id}": {"agent_catalog", "marketplace", "a2a"},
+    # ── Listing projections（shopping-cli v0.3 §14；只读，Merchant Kiwi 兼容）──
+    "/v1/merchant/listings/projections": {"marketplace"},
+    "/v1/merchant/listings/{sku}/projection": {"marketplace"},
 }
 
 
