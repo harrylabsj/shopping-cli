@@ -255,3 +255,7 @@ python3 scripts/shopping.py --db ./shopping-cli.sqlite legacy import --from-json
 ```
 
 Only merchants and products are imported. Legacy transaction data is ignored by design. Re-running the same import skips existing merchants by id and products by sku, then reports skipped counts instead of failing on duplicate rows. The default text output reports imported merchant/product counts; `--format json` keeps the structured import result.
+
+## License
+
+[Apache License 2.0](LICENSE) — 协议契约与参考实现同许可（与 Kiwi、kiwi-catalog 一致）。
