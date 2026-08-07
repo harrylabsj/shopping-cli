@@ -162,7 +162,7 @@ Version strings are taken verbatim from the stored endpoint metadata.
 
 An array of **fully-qualified** capability identifiers.  When the capability
 has a non-empty namespace, the element is `namespace:capability_id` (e.g.
-`com.shopping.agent.capability:catalog`).  When the namespace is empty, the
+`com.harrylabsj.shopping.capability:catalog`).  When the namespace is empty, the
 element is the bare `capability_id` (e.g. `consultation`).
 
 Short names are internal query aliases only and MUST NOT appear in the
