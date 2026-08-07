@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from shopping_cli.agent_catalog.sqlite_repository import upsert_catalog_agent
-from shopping_cli.api.app import create_app
+from shopping_cli.api.app import create_app, create_catalog_app
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.route_registry import route_info
 from shopping_cli.core import catalog
@@ -229,7 +229,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
 
@@ -239,30 +239,13 @@ class AgentCatalogApiTest(unittest.TestCase):
         self.assertEqual(len(body["results"]), 2)
         self.assertIsNone(body["next_cursor"])
 
-    def test_list_agents_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_merchant(db_file)
-            self._seed_catalog_agents(db_file)
-            app = create_app(db_file)
-
-            status, body = self._fastapi_call(app, "/v1/agent-catalog/agents")
-
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertIsInstance(body["results"], list)
-        self.assertEqual(len(body["results"]), 2)
 
     def test_list_agents_pagination_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents", query_string="limit=1"
@@ -276,7 +259,7 @@ class AgentCatalogApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents", query_string="limit=abc"
@@ -289,7 +272,7 @@ class AgentCatalogApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             # Don't seed any agents
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
 
@@ -300,7 +283,7 @@ class AgentCatalogApiTest(unittest.TestCase):
     def test_list_agents_method_not_allowed_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "POST", "/v1/agent-catalog/agents")
 
@@ -316,7 +299,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_001")
 
@@ -325,61 +308,24 @@ class AgentCatalogApiTest(unittest.TestCase):
         self.assertIn("catalog_agent", body)
         self.assertEqual(body["catalog_agent"]["catalog_agent_id"], "cagt_001")
 
-    def test_get_agent_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_merchant(db_file)
-            self._seed_catalog_agents(db_file)
-            app = create_app(db_file)
-
-            status, body = self._fastapi_call(
-                app, "/v1/agent-catalog/agents/{catalog_agent_id}", catalog_agent_id="cagt_001"
-            )
-
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["catalog_agent"]["catalog_agent_id"], "cagt_001")
 
     def test_get_agent_404_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_nonexistent")
 
         self.assertEqual(status, 404)
         self.assertFalse(body["ok"])
 
-    def test_get_agent_404_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            app = create_app(db_file)
-
-            status, body = self._fastapi_call(
-                app, "/v1/agent-catalog/agents/{catalog_agent_id}", catalog_agent_id="cagt_nonexistent"
-            )
-
-        self.assertEqual(status, 404)
-        self.assertFalse(body["ok"])
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 3. GET /v1/agent-catalog/agents/search
-    # ═══════════════════════════════════════════════════════════════════════════
 
     def test_search_agents_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/search")
 
@@ -388,29 +334,13 @@ class AgentCatalogApiTest(unittest.TestCase):
         self.assertIsInstance(body["results"], list)
         self.assertEqual(len(body["results"]), 2)
 
-    def test_search_agents_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_merchant(db_file)
-            self._seed_catalog_agents(db_file)
-            app = create_app(db_file)
-
-            status, body = self._fastapi_call(app, "/v1/agent-catalog/agents/search")
-
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertIsInstance(body["results"], list)
 
     def test_search_agents_with_q_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents/search", query_string="q=Alpha"
@@ -426,7 +356,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents/search", query_string="hosting_mode=direct"
@@ -441,7 +371,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents/search",
@@ -455,7 +385,7 @@ class AgentCatalogApiTest(unittest.TestCase):
     def test_search_agents_no_results_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents/search", query_string="q=nosuchagent"
@@ -467,7 +397,7 @@ class AgentCatalogApiTest(unittest.TestCase):
     def test_search_agents_invalid_limit_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/agents/search", query_string="limit=bad"
@@ -485,7 +415,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/merchants/mrc_seed/agents"
@@ -496,31 +426,11 @@ class AgentCatalogApiTest(unittest.TestCase):
         self.assertIsInstance(body["results"], list)
         self.assertEqual(len(body["results"]), 2)
 
-    def test_list_merchant_agents_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_merchant(db_file)
-            self._seed_catalog_agents(db_file)
-            app = create_app(db_file)
-
-            status, body = self._fastapi_call(
-                app,
-                "/v1/agent-catalog/merchants/{merchant_id}/agents",
-                merchant_id="mrc_seed",
-            )
-
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertEqual(len(body["results"]), 2)
 
     def test_list_merchant_agents_unknown_merchant_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/merchants/unknown_merchant/agents"
@@ -536,7 +446,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/merchants/mrc_seed/agents",
@@ -605,7 +515,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
 
@@ -619,7 +529,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_001")
 
@@ -633,7 +543,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/search")
 
@@ -647,7 +557,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/merchants/mrc_seed/agents"
@@ -667,7 +577,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
 
@@ -690,7 +600,7 @@ class AgentCatalogApiTest(unittest.TestCase):
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_merchant(db_file)
             self._seed_catalog_agents(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_001")
 
@@ -701,26 +611,36 @@ class AgentCatalogApiTest(unittest.TestCase):
         self.assertIn("verification", agent)
         self.assertIn("hosting", agent)
 
-    def test_fastapi_app_registers_agent_catalog_routes(self):
-        """Verify the create_app factory exposes all 4 agent catalog paths."""
+    def test_marketplace_app_removes_agent_catalog_routes_mvp8(self):
+        """MVP #8（v0.3 §12）：主 API 不再承担 Agent Catalog 面。
+
+        - FastAPI 分支：注册后移除 /v1/agent-catalog/* 路由；
+        - fallback 分支：路由视图过滤；请求返回 404；
+        - 共享路由（/v1/hosted/*、/a2a/*）保留。
+        """
         from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
 
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             app = create_app(db_file)
 
-            route_paths = {
-                route.path for route in getattr(app, "routes", []) if hasattr(route, "path")
-            }
-            for path in (
-                "/v1/agent-catalog/agents",
-                "/v1/agent-catalog/agents/search",
-                "/v1/agent-catalog/agents/{catalog_agent_id}",
-                "/v1/agent-catalog/merchants/{merchant_id}/agents",
-            ):
-                self.assertIn(path, route_paths, f"FastAPI missing route: {path}")
+            if app_module.FastAPI is not None:
+                route_paths = {
+                    route.path for route in getattr(app, "routes", []) if hasattr(route, "path")
+                }
+                for path in (
+                    "/v1/agent-catalog/agents",
+                    "/v1/agent-catalog/agents/search",
+                    "/v1/agent-catalog/agents/{catalog_agent_id}",
+                    "/v1/agent-catalog/agents/register",
+                ):
+                    self.assertNotIn(path, route_paths, f"主 API 不应暴露 Agent Catalog 路由: {path}")
+                # 共享路由保留
+                self.assertIn("/v1/hosted/agents/{catalog_agent_id}/agent-card.json", route_paths)
+                self.assertIn("/a2a/agents/{catalog_agent_id}", route_paths)
+
+            status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
+            self.assertEqual(status, 404, "主 API fallback 不应路由 agent-catalog 请求")
 
 
 class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
@@ -844,7 +764,7 @@ class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents")
 
@@ -855,7 +775,7 @@ class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_001")
 
@@ -866,7 +786,7 @@ class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/search")
 
@@ -877,7 +797,7 @@ class AgentCatalogTrustObservationPrivacyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed(db_file)
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
 
             status, body = self._request(
                 app, "GET", "/v1/agent-catalog/merchants/mrc_seed/agents"

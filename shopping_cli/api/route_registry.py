@@ -126,3 +126,17 @@ def catalog_route_info() -> list[RouteInfo]:
         if route.path == "/health"
         or ("agent_catalog" in route.groups and not route.path.startswith("/a2a/"))
     ]
+
+
+def marketplace_route_info() -> list[RouteInfo]:
+    """主 marketplace API 的路由视图（shopping-cli v0.3 MVP #8）。
+
+    排除纯 Agent Catalog 面（/v1/agent-catalog/*——职责已迁移到独立
+    kiwi-catalog 服务）；**保留**双组共享路由（/v1/hosted/* Agent Card/UCP
+    发布面、/a2a/* A2A 入站——merchant 运行时的对外面）。
+    """
+    return [
+        route
+        for route in route_info()
+        if not route.path.startswith("/v1/agent-catalog/")
+    ]

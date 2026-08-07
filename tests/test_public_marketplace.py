@@ -13,7 +13,7 @@ from unittest.mock import patch
 from shopping_cli.api.app import create_app
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.handlers import human_review as human_review_handlers
-from shopping_cli.api.route_registry import route_info
+from shopping_cli.api.route_registry import marketplace_route_info, route_info
 from shopping_cli.core import catalog
 from shopping_cli.core.conversations import conversation_summary
 from shopping_cli.core.errors import AuthError, ConflictError
@@ -1140,7 +1140,8 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(merchants, [])
 
     def test_route_metadata_matches_fastapi_and_fallback_apps(self):
-        expected = {route.path: set(route.methods) for route in route_info()}
+        # MVP #8（v0.3 §12）：主 API 视图排除纯 Agent Catalog 面（/v1/agent-catalog/*）
+        expected = {route.path: set(route.methods) for route in marketplace_route_info()}
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             with patch("shopping_cli.api.app.FastAPI", None):

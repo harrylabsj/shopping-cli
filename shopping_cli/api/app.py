@@ -1050,8 +1050,17 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
 
 
 def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
+    # MVP #8（v0.3 §12）：主 API 不再承担 Agent Catalog 面——排除
+    # /v1/agent-catalog/*（职责在独立 kiwi-catalog 服务）；共享路由保留。
+    from shopping_cli.api.route_registry import marketplace_route_info
+
+    routes = marketplace_route_info()
     if FastAPI is None:
-        return MarketplaceASGIApp(db_path)
+        return MarketplaceASGIApp(
+            db_path,
+            route_provider=lambda: routes,
+            route_resolver=lambda method, path: resolve_route(method, path, routes=routes),
+        )
 
     app = FastAPI(
         title="shopping-cli Marketplace API",
@@ -1745,4 +1754,18 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
             body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         )
 
+    # MVP #8（v0.3 §12）：主 API 不再承担 Agent Catalog 面——注册后移除
+    # /v1/agent-catalog/* 路由（catalog 面由 create_catalog_app 独立服务承担；
+    # /v1/hosted/* 与 /a2a/* 共享路由保留）。
+    # FakeFastAPI harness（无 router 属性）与真实 FastAPI 双兼容。
+    if getattr(app, "routes", None) is not None:
+        filtered_routes = [
+            route
+            for route in app.routes
+            if not str(getattr(route, "path", "")).startswith("/v1/agent-catalog/")
+        ]
+        if hasattr(app, "router"):
+            app.router.routes = filtered_routes
+        else:
+            app.routes = filtered_routes
     return app
