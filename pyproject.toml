@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "psutil>=5.9",
 ]
+license = {file = "LICENSE"}
 
 [project.scripts]
 shopping-cli = "shopping_cli.cli:main"

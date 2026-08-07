@@ -3,7 +3,7 @@ name: shopping-cli
 description: Standalone local commerce consultation runtime. Use when merchants need to publish shop profiles, products, stock, and delivery rules, run resident merchant agents, or review flagged consultations; use when buyers need to search nearby products, ask merchant agents stock/price/delivery questions, summarize replies, or record purchase intent as conversation context only.
 version: 2.0.0
 author: harrylabsj
-license: MIT
+license: Apache-2.0
 metadata:
   author: harrylabsj
   hermes:

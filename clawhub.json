@@ -11,6 +11,6 @@
     "inventory"
   ],
   "author": "harrylabsj",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": "https://github.com/harrylabsj/shopping-cli"
 }
