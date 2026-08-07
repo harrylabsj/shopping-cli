@@ -39,6 +39,8 @@ SCHEMA = [
         stock integer not null,
         delivery_attributes_json text not null default '[]',
         active integer not null default 1,
+        source text not null default 'local'
+            check(source in ('local','erp')),
         created_at text not null,
         updated_at text not null,
         foreign key (merchant_id) references merchants(id)

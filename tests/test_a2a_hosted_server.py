@@ -1076,7 +1076,7 @@ class A2AMigrationTest(_HostedA2aTestCase):
             }
             user_version = conn.execute("pragma user_version").fetchone()[0]
 
-        self.assertEqual(user_version, 15)
+        self.assertEqual(user_version, 16)
         self.assertEqual(
             columns,
             {"sender_identity", "message_id", "digest", "status", "response_json", "created_at", "updated_at"},

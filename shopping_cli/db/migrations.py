@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 
 
 @dataclass(frozen=True)
@@ -477,6 +477,21 @@ _VERIFICATION_QUEUE_RECOVERY_INDEX_DDL = """
 """
 
 
+def migration_016_product_source_column(conn: sqlite3.Connection) -> None:
+    """products.source —— 数据来源标注（shopping-cli data hub v0.2.1 §5）。
+
+    local = 本地录入（LOCAL_AUTHORITATIVE）；erp = ERP 同步缓存
+    （UPSTREAM_PROXY）。ERP 同步只覆盖 source='erp' 的行；本地手改行
+    （source='local'）与 ERP 冲突时跳过并报错（绝不静默合并冲突权威源）。
+    """
+    cols = [row[1] for row in conn.execute("pragma table_info(products)").fetchall()]
+    if "source" not in cols:
+        conn.execute(
+            "alter table products add column source text not null default 'local'"
+            " check(source in ('local','erp'))"
+        )
+
+
 def migration_015_verification_queue_tasks(conn: sqlite3.Connection) -> None:
     """Add the persistent verification queue ledger (v3.0-P4, §25 Phase 2).
 
@@ -508,6 +523,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(13, "agent_trust_observations", migration_013_agent_trust_observations),
     Migration(14, "a2a_inbound_idempotency", migration_014_a2a_inbound_idempotency),
     Migration(15, "verification_queue_tasks", migration_015_verification_queue_tasks),
+    Migration(16, "product_source_column", migration_016_product_source_column),
 )
 
 
