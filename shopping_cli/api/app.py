@@ -23,6 +23,7 @@ from shopping_cli.api.handlers import audit as audit_handlers
 from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
+from shopping_cli.api.handlers import erp as erp_handlers
 from shopping_cli.api.handlers import hosted_a2a as hosted_a2a_handlers
 from shopping_cli.api.handlers import hosted_publication as hosted_publication_handlers
 from shopping_cli.api.handlers import listings_projection as listings_projection_handlers
@@ -232,6 +233,10 @@ def _get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
 
 def _list_listing_projections(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
     return listings_projection_handlers.list_listing_projections(db_path, query)
+
+
+def _sync_erp(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return erp_handlers.sync_erp(db_path, payload)
 
 
 def _get_listing_projection(db_path: str | Path, sku: str) -> dict[str, Any]:
@@ -677,6 +682,11 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"GET"},
         "/v1/merchant/listings/{sku}/projection",
         lambda db_path, payload, query, sku: _get_listing_projection(db_path, sku),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/erp/sync",
+        lambda db_path, payload, query, **kw: _sync_erp(db_path, payload),
     ),
     RouteEntry({"GET"}, "/search/merchants", lambda db_path, payload, query, **kw: _search_merchants(db_path, query)),
     RouteEntry(
@@ -1234,6 +1244,13 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     @app.get("/v1/merchant/listings/{sku}/projection")
     def merchant_listing_projection(sku: str) -> dict[str, Any]:
         return _get_listing_projection(db_path, sku)
+
+    @app.post("/v1/merchant/erp/sync")
+    def merchant_erp_sync(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _sync_erp(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/search/products")
     def search_products(

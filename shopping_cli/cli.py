@@ -84,6 +84,7 @@ from shopping_cli.cli_conversation_commands import (
     cmd_conversation_show,
     emit_conversation_table,
 )
+from shopping_cli.cli_erp_commands import cmd_erp_sync
 from shopping_cli.cli_listing_commands import (
     cmd_listing_projections_list,
     cmd_listing_publish_listings,
@@ -1017,6 +1018,18 @@ def build_parser() -> argparse.ArgumentParser:
     api_serve.add_argument("--host", default="127.0.0.1")
     api_serve.add_argument("--port", type=tcp_port, default=8765)
     api_serve.set_defaults(func=cmd_api_serve)
+
+    # ── erp（shopping-cli v0.3 §3/#3：外部数据接入）──────────────────────────
+    erp = subparsers.add_parser("erp", help="External ERP product data source")
+    erp_sub = erp.add_subparsers(dest="erp_command", required=True)
+    erp_sync = erp_sub.add_parser("sync", help="Sync ERP products into the local store (push-first, manual)")
+    erp_sync.add_argument("--base-url", default="", dest="base_url", help="ERP base URL (or SHOPPING_ERP_BASE_URL)")
+    erp_sync.add_argument("--auth-token", default="", dest="auth_token", help="ERP bearer token (or SHOPPING_ERP_AUTH_TOKEN)")
+    erp_sync.add_argument("--default-merchant", default="", dest="default_merchant", help="Merchant for ERP products without merchant_id (or SHOPPING_ERP_DEFAULT_MERCHANT)")
+    erp_sync.add_argument("--page-size", type=int, default=100, dest="page_size", help="ERP page size (1-500)")
+    erp_sync.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (1-60)")
+    erp_sync.add_argument("--format", choices=["text", "json"], default="text")
+    erp_sync.set_defaults(func=cmd_erp_sync)
 
     # ── listings（shopping-cli v0.3 §14-§16：PublicListingProjection + 发布）───
     listings = subparsers.add_parser("listings", help="Product-first listing projection and publication")
