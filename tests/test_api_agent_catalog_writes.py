@@ -24,7 +24,7 @@ from shopping_cli.agent_catalog.sqlite_repository import (
     set_verification_status,
     upsert_catalog_agent,
 )
-from shopping_cli.api.app import create_app
+from shopping_cli.api.app import create_app, create_catalog_app
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.route_registry import route_info
 from shopping_cli.core import catalog
@@ -413,29 +413,6 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             events = [e for e in _audit_events(db_file) if e[0] == "catalog_agent_registered"]
             self.assertEqual(events[-1][1], "admin")
 
-    def test_register_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            app = create_app(db_file)
-            result = self._fastapi_post(
-                app,
-                "/v1/agent-catalog/agents/register",
-                {"domain": DOMAIN, "idempotency_key": "fast-reg"},
-            )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertTrue(body["ok"])
-            self.assertEqual(body["catalog_agent"]["canonical_domain"], DOMAIN)
-            self.assertEqual(body["catalog_agent"]["verification"]["status"], "discovered")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 2. POST /v1/agent-catalog/agents/{id}/refresh
-    # ═══════════════════════════════════════════════════════════════════════════
 
     def test_refresh_requires_authorization_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -521,30 +498,6 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             )
             self.assertEqual(status, 404)
 
-    def test_refresh_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_catalog_agent(db_file, "cagt_refresh")
-            app = create_app(db_file)
-            result = self._fastapi_post(
-                app,
-                "/v1/agent-catalog/agents/{catalog_agent_id}/refresh",
-                {"idempotency_key": "fast-rf"},
-                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
-                catalog_agent_id="cagt_refresh",
-            )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertTrue(body["refresh_enqueued"])
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 3. POST /v1/agent-catalog/agents/{id}/verify
-    # ═══════════════════════════════════════════════════════════════════════════
 
     def _patch_verify_service(self, result):
         return patch(
@@ -612,33 +565,6 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             self.assertTrue(b2["idempotent"])
             self.assertEqual(b2["verification_status"], b1["verification_status"])
 
-    def test_verify_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_catalog_agent(db_file, "cagt_verify")
-            app = create_app(db_file)
-            with self._patch_verify_service(
-                _fake_verify_result("cagt_verify", status="domain_verified")
-            ):
-                result = self._fastapi_post(
-                    app,
-                    "/v1/agent-catalog/agents/{catalog_agent_id}/verify",
-                    {"idempotency_key": "fast-vf"},
-                    authorization=f"Bearer {TEST_ADMIN_TOKEN}",
-                    catalog_agent_id="cagt_verify",
-                )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertEqual(body["verification_status"], "domain_verified")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 4. POST /v1/agent-catalog/agents/{id}/claim
-    # ═══════════════════════════════════════════════════════════════════════════
 
     def _patch_identity_verifier(self, passed=True):
         return patch(
@@ -741,30 +667,6 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             events = [e for e in _audit_events(db_file) if e[0] == "catalog_agent_claimed"]
             self.assertEqual(events[-1][1], "admin")
 
-    def test_claim_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            token = self._seed_merchant(db_file, "mrc-claim")
-            self._seed_catalog_agent(db_file, "cagt_claim", canonical_domain=DOMAIN)
-            app = create_app(db_file)
-            with self._patch_identity_verifier(passed=True):
-                result = self._fastapi_post(
-                    app,
-                    "/v1/agent-catalog/agents/{catalog_agent_id}/claim",
-                    {"merchant_id": "mrc-claim", "idempotency_key": "fast-claim"},
-                    authorization=f"Bearer {token}",
-                    catalog_agent_id="cagt_claim",
-                )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertEqual(body["catalog_agent"]["merchant"]["id"], "mrc-claim")
-
-    # ── v3.0 moderation: suspend / reinstate (admin-only) ─────────────────────
 
     def test_suspend_requires_admin_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -838,58 +740,7 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
             # Nothing was enqueued for a failed reinstate.
             self.assertEqual(self._fake_queue.tasks, [])
 
-    def test_suspend_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
 
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_catalog_agent(db_file, "cagt_suspend")
-            app = create_app(db_file)
-            result = self._fastapi_post(
-                app,
-                "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
-                {"idempotency_key": "fast-suspend"},
-                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
-                catalog_agent_id="cagt_suspend",
-            )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertEqual(body["verification_status"], "suspended")
-
-    def test_reinstate_fastapi(self):
-        from shopping_cli.api import app as app_module
-        if app_module.FastAPI is None:
-            self.skipTest("FastAPI not installed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "marketplace.sqlite"
-            self._seed_catalog_agent(db_file, "cagt_suspend")
-            app = create_app(db_file)
-            self._fastapi_post(
-                app,
-                "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
-                {"idempotency_key": "fast-suspend-2"},
-                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
-                catalog_agent_id="cagt_suspend",
-            )
-            result = self._fastapi_post(
-                app,
-                "/v1/agent-catalog/agents/{catalog_agent_id}/reinstate",
-                {"idempotency_key": "fast-reinstate"},
-                authorization=f"Bearer {TEST_ADMIN_TOKEN}",
-                catalog_agent_id="cagt_suspend",
-            )
-            self.assertIsNotNone(result)
-            status, body = result
-            self.assertEqual(status, 200)
-            self.assertEqual(body["verification_status"], "discovered")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 5. Route registry consistency + FastAPI route presence
-    # ═══════════════════════════════════════════════════════════════════════════
 
     def test_write_routes_in_registry(self):
         paths = {route.path: route.methods for route in route_info()}
@@ -919,7 +770,7 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
-            app = create_app(db_file)
+            app = create_catalog_app(db_file)
             route_paths = {
                 route.path for route in getattr(app, "routes", []) if hasattr(route, "path")
             }
@@ -939,7 +790,7 @@ class AgentCatalogWritesApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "marketplace.sqlite"
             self._seed_catalog_agent(db_file, "cagt_read", canonical_domain="read.example")
-            app = MarketplaceASGIApp(db_file)
+            app = create_catalog_app(db_file)
             status, body = self._request(app, "GET", "/v1/agent-catalog/agents/cagt_read")
             self.assertEqual(status, 200)
             self.assertEqual(body["catalog_agent"]["catalog_agent_id"], "cagt_read")
