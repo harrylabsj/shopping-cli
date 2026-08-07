@@ -42,6 +42,11 @@ class ErpSyncConfig:
     page_size: int = 100
     # ERP 响应中的商品无 merchant_id 时使用的默认归属商家。
     default_merchant_id: str = ""
+    # 授权边界（跨租户防护）：非空时，本同步只允许写入该 merchant 名下的行；
+    # feed 自带的 merchant_id 与 default_merchant_id 都必须等于它，否则跳过并记
+    # 入 errors（fail-closed，绝不静默改写其他商户的数据）。merchant-token 调用
+    # 者由 API handler 强制设为 actor merchant；admin/CLI 留空 = 不受限。
+    allowed_merchant_id: str = ""
 
 
 @dataclass
@@ -130,7 +135,7 @@ def _parse_erp_product(raw: Any, index: int) -> dict[str, Any]:
         raise ErpSourceError(f"erp product at index {index} is missing sku")
     if not isinstance(title, str) or not title.strip():
         raise ErpSourceError(f"erp product at index {index} is missing title")
-    if not isinstance(price, (int, float)) or not price >= 0:
+    if isinstance(price, bool) or not isinstance(price, (int, float)) or not price >= 0:
         raise ErpSourceError(f"erp product at index {index} has invalid price")
     if not isinstance(stock, int) or stock < 0:
         raise ErpSourceError(f"erp product at index {index} has invalid stock")
@@ -187,6 +192,14 @@ def sync_erp_products(
             merchant_id = product["merchant_id"] or config.default_merchant_id
             if not merchant_id:
                 report.errors.append(f"sku {sku}: no merchant_id (and no default_merchant_id)")
+                continue
+            # 跨租户防护：merchant-token 调用者只允许写入自己名下的行。
+            if config.allowed_merchant_id and merchant_id != config.allowed_merchant_id:
+                report.errors.append(
+                    f"sku {sku}: merchant_id {merchant_id!r} does not match actor "
+                    f"merchant {config.allowed_merchant_id!r}; skipped"
+                )
+                report.skipped += 1
                 continue
             # 权威冲突：本地手改行不得被 ERP 静默覆盖。
             existing = conn.execute(

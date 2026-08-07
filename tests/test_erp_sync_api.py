@@ -80,6 +80,21 @@ class ErpSyncCliTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_cli(self.db_file, "erp", "sync", "--format", "json")
 
+    def test_cli_sync_unknown_default_merchant_fails_cleanly(self) -> None:
+        """default_merchant 不存在：干净报错而非裸 sqlite IntegrityError 栈。"""
+        with mock.patch(
+            "shopping_cli.data_sources.erp_source._default_fetch", side_effect=_fake_fetch
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(
+                    self.db_file,
+                    "erp", "sync",
+                    "--base-url", "https://erp.example",
+                    "--default-merchant", "ghost-merchant",
+                    "--format", "json",
+                )
+        self.assertIn("ghost-merchant", str(ctx.exception))
+
 
 class ErpSyncApiTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -178,6 +193,115 @@ class ErpSyncApiTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertFalse(body["ok"])
         self.assertIn("error", body)
+
+    def test_sync_merchant_rejects_foreign_default_merchant(self) -> None:
+        """跨租户防护：merchant token 调用者不得把数据写进其他商户命名空间。"""
+        app = create_app(self.db_file)
+        status, body = self._post(
+            app,
+            "/v1/merchant/erp/sync",
+            {
+                "base_url": "https://erp.example",
+                "merchant_id": "mrc-erp",
+                "merchant_token": self.token,
+                "default_merchant_id": "merchant-B",
+            },
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("own merchant", body.get("error", ""))
+
+    def test_sync_merchant_skips_other_merchants_feed_items(self) -> None:
+        """feed 自带其他商户 merchant_id 的行：跳过 + 记 errors，不改动对方行。"""
+        with db_session(self.db_file) as conn:
+            catalog.create_merchant(
+                conn,
+                merchant_id="merchant-B",
+                name="Other Merchant",
+                city="Hangzhou",
+                service_area="Xihu",
+                tags=[],
+                contact="b@example.com",
+                automation_boundaries="full-auto",
+            )
+            catalog.create_product(conn, "merchant-B", "ERP-B-001", "B original", 1.0, 5)
+
+        feed = {
+            "results": [
+                {
+                    "sku": "ERP-B-001",
+                    "title": "B hijacked",
+                    "price": 99.0,
+                    "stock": 1,
+                    "merchant_id": "merchant-B",
+                },
+                {"sku": "ERP-A-001", "title": "A item", "price": 42.0, "stock": 7},
+            ]
+        }
+
+        def feed_fetch(url: str, auth_token: str = "", timeout_seconds: int = 15) -> tuple[int, bytes]:
+            return (200, json.dumps(feed).encode())
+
+        app = create_app(self.db_file)
+        with mock.patch(
+            "shopping_cli.data_sources.erp_source._default_fetch", side_effect=feed_fetch
+        ):
+            status, body = self._post(
+                app,
+                "/v1/merchant/erp/sync",
+                {
+                    "base_url": "https://erp.example",
+                    "merchant_id": "mrc-erp",
+                    "merchant_token": self.token,
+                },
+            )
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])  # 越界行记入 errors → fail-closed 报告
+        self.assertTrue(
+            any("merchant-B" in error and "does not match" in error for error in body["errors"]),
+            body["errors"],
+        )
+        with open_connection(self.db_file) as conn:
+            b_row = conn.execute(
+                "select title, price from products where sku = 'ERP-B-001'"
+            ).fetchone()
+            self.assertEqual(b_row["title"], "B original")  # 未被改写
+            self.assertEqual(b_row["price"], 1.0)
+            a_row = conn.execute(
+                "select merchant_id from products where sku = 'ERP-A-001'"
+            ).fetchone()
+            self.assertEqual(a_row["merchant_id"], "mrc-erp")  # 无 feed merchant_id → 落自己名下
+
+    def test_sync_admin_unknown_default_merchant_rejected(self) -> None:
+        """default_merchant_id 不存在：4xx 而非 FK IntegrityError 500。"""
+        app = create_app(self.db_file)
+        with mock.patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
+            status, body = self._post(
+                app,
+                "/v1/merchant/erp/sync",
+                {
+                    "base_url": "https://erp.example",
+                    "admin_token": "admin-secret",
+                    "default_merchant_id": "ghost-merchant",
+                },
+            )
+        self.assertEqual(status, 404, body)
+        self.assertIn("ghost-merchant", body.get("error", ""))
+
+    def test_sync_invalid_timeout_returns_400(self) -> None:
+        """timeout_seconds 非数字：ValidationError 400，不落 500。"""
+        app = create_app(self.db_file)
+        status, body = self._post(
+            app,
+            "/v1/merchant/erp/sync",
+            {
+                "base_url": "https://erp.example",
+                "merchant_id": "mrc-erp",
+                "merchant_token": self.token,
+                "timeout_seconds": "abc",
+            },
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("timeout_seconds", body.get("error", ""))
 
     def test_route_registered_in_both_stacks(self) -> None:
         from shopping_cli.api import app as app_module

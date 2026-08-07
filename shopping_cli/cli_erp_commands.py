@@ -11,6 +11,7 @@ import argparse
 import os
 
 from shopping_cli.cli_common import db_path_from_args, emit
+from shopping_cli.core.catalog import require_merchant
 from shopping_cli.data_sources.erp_source import ErpSyncConfig, ErpSourceError, sync_erp_products
 from shopping_cli.db.session import db_session
 
@@ -47,6 +48,9 @@ def cmd_erp_sync(args: argparse.Namespace) -> None:
     except ErpSourceError as exc:
         raise SystemExit(str(exc)) from exc
     with db_session(db_path) as conn:
+        if config.default_merchant_id:
+            # FK 防护：默认归属必须真实存在（否则裸 sqlite3.IntegrityError 栈）。
+            require_merchant(conn, config.default_merchant_id)
         report = sync_erp_products(conn, config)
     emit(report.as_dict(), args.format)
     if report.errors or report.conflicts:

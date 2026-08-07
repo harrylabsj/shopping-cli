@@ -67,6 +67,93 @@ def projection_digest(projection: dict[str, Any]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _http_request(
+    base_url: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: int = 15,
+    fetch: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """对 kiwi-catalog 的通用 JSON 请求（fail-closed：非 2xx / 非 JSON → PublishError）。
+
+    ``fetch`` 可注入（测试）：``fetch(method, url, body, headers) -> (status, bytes)``。
+    """
+    url = f"{base_url}{path}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+
+    def _default() -> tuple[int, bytes]:
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                return (response.status, response.read())
+        except urllib.error.HTTPError as exc:
+            return (exc.code, exc.read())
+        except Exception as exc:
+            raise PublishError(f"kiwi-catalog request failed for {url}: {exc}") from exc
+
+    if fetch is not None:
+        try:
+            status, raw = fetch(method, url, body, headers)
+        except Exception as exc:
+            raise PublishError(f"kiwi-catalog request failed for {url}: {exc}") from exc
+    else:
+        status, raw = _default()
+
+    if status >= 400:
+        try:
+            detail = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            detail = {}
+        raise PublishError(
+            f"kiwi-catalog returned HTTP {status} for {method} {path}: {detail.get('error', raw[:200])}"
+        )
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise PublishError(f"kiwi-catalog response for {url} is not valid JSON") from exc
+
+
+def resolve_merchant_agent_id(
+    base_url: str,
+    merchant_id: str,
+    *,
+    timeout_seconds: int = 15,
+    fetch: Callable[..., Any] | None = None,
+) -> str:
+    """查 kiwi-catalog 该 merchant 的 catalog agent（publish-listings 的
+    ``--owner-agent-id`` 缺省回退；与 kiwi merchant publish Step 1 同端点）。
+
+    GET {base}/v1/agent-catalog/merchants/{merchant_id}/agents，取首个
+    catalog_agent_id；请求失败或无 agent → PublishError（fail-closed，
+    报错给出可执行提示而非空串进 wire）。
+    """
+    if not merchant_id:
+        raise PublishError("--merchant is required to resolve the default owner agent")
+    body = _http_request(
+        base_url,
+        "GET",
+        f"/v1/agent-catalog/merchants/{urllib.parse.quote(merchant_id)}/agents",
+        timeout_seconds=timeout_seconds,
+        fetch=fetch,
+    )
+    results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(results, list) or not results:
+        raise PublishError(
+            f"kiwi-catalog has no catalog agent for merchant {merchant_id!r}; "
+            "run `kiwi merchant publish` first, or pass --owner-agent-id explicitly"
+        )
+    first = results[0]
+    agent_id = str(first.get("catalog_agent_id") or "").strip() if isinstance(first, dict) else ""
+    if not agent_id:
+        raise PublishError("kiwi-catalog merchant agent lookup returned an empty catalog_agent_id")
+    return agent_id
+
+
 class KiwiCatalogPublisher:
     def __init__(
         self,
@@ -91,42 +178,14 @@ class KiwiCatalogPublisher:
         self._fetch = fetch  # 注入式（测试）；None = urllib
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
-        headers = {"Accept": "application/json"}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-
-        def _default() -> tuple[int, bytes]:
-            request = urllib.request.Request(url, data=body, headers=headers, method=method)
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    return (response.status, response.read())
-            except urllib.error.HTTPError as exc:
-                return (exc.code, exc.read())
-            except Exception as exc:
-                raise PublishError(f"kiwi-catalog request failed for {url}: {exc}") from exc
-
-        if self._fetch is not None:
-            try:
-                status, raw = self._fetch(method, url, body, headers)
-            except Exception as exc:
-                raise PublishError(f"kiwi-catalog request failed for {url}: {exc}") from exc
-        else:
-            status, raw = _default()
-
-        if status >= 400:
-            try:
-                detail = json.loads(raw.decode("utf-8")) if raw else {}
-            except Exception:
-                detail = {}
-            raise PublishError(
-                f"kiwi-catalog returned HTTP {status} for {method} {path}: {detail.get('error', raw[:200])}"
-            )
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except Exception as exc:
-            raise PublishError(f"kiwi-catalog response for {url} is not valid JSON") from exc
+        return _http_request(
+            self.base_url,
+            method,
+            path,
+            payload,
+            timeout_seconds=self.timeout_seconds,
+            fetch=self._fetch,
+        )
 
     def publish_listing(
         self,
@@ -141,11 +200,18 @@ class KiwiCatalogPublisher:
         """
         digest = projection_digest(projection)
         existing = conn.execute(
-            "select listing_id, digest from listing_publications"
+            "select listing_id, digest, publication_state from listing_publications"
             " where merchant_id = ? and source_key = ?",
             (self.merchant_id, source_key),
         ).fetchone()
-        if existing is not None and existing["digest"] == digest:
+        # 去重仅对 ACTIVE 生效：WITHDRAWN 后同内容 reactivate 必须重发
+        # （服务端 update_listing 会把 listing 重置为 ACTIVE），否则镜像
+        # 永久停留在下架态、buyer 搜不到（历史教训：digest 去重吞掉恢复路径）。
+        if (
+            existing is not None
+            and existing["publication_state"] == "ACTIVE"
+            and existing["digest"] == digest
+        ):
             return {"listing_id": existing["listing_id"], "created": False, "skipped": True}
 
         wire = strip_provenance(projection)
