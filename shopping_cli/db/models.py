@@ -41,6 +41,13 @@ SCHEMA = [
         active integer not null default 1,
         source text not null default 'local'
             check(source in ('local','erp')),
+        -- v17 — per-field provenance（shopping-cli v0.3 §5）：
+        -- source_revision = 权威源版本（ERP 同步批次/etag）；observed_at =
+        -- 观察时间；fresh_until = 该事实的 TTL 上限（过期后 projection 标注
+        -- stale，权威值仍经 Direct A2A/适配器读取）。
+        source_revision text not null default '',
+        observed_at text not null default '',
+        fresh_until text not null default '',
         created_at text not null,
         updated_at text not null,
         foreign key (merchant_id) references merchants(id)

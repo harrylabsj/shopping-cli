@@ -152,6 +152,24 @@ class ErpDataSourceTest(unittest.TestCase):
                 self.conn, ErpSyncConfig(base_url="ftp://erp.example"), fetch=fake_fetch([PAGE1])
             )
 
+    def test_sync_backfills_provenance_columns_v17(self) -> None:
+        fetch = fake_fetch([PAGE1])
+        sync_erp_products(
+            self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),
+            fetch=fetch,
+        )
+        row = self.conn.execute(
+            "select source, source_revision, observed_at, fresh_until from products where sku = 'SKU-001'"
+        ).fetchone()
+        self.assertEqual(row["source"], "erp")
+        self.assertTrue(row["source_revision"].startswith("erp-sync:"))
+        self.assertTrue(row["observed_at"])
+        # fresh_until 在未来（默认 TTL 24h）
+        from datetime import datetime
+
+        fresh = datetime.fromisoformat(row["fresh_until"])
+        self.assertGreater(fresh, datetime.fromisoformat(row["observed_at"]))
+
 
 if __name__ == "__main__":
     unittest.main()

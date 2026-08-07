@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlite3
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 SOURCE_LOCAL = "local"
@@ -197,13 +197,20 @@ def sync_erp_products(
                 report.skipped += 1
                 continue
 
+            # v17 provenance 回填（shopping-cli v0.3 §5）：source_revision =
+            # 同步批次时间戳（ERP 无版本号时）；observed_at = 同步时间；
+            # fresh_until = now + ERP 同步 TTL（默认 24h，可经 env 覆盖）。
+            from shopping_cli.db.provenance import erp_fresh_ttl_seconds
+
+            revision = f"erp-sync:{now_ts}"
             conn.execute(
                 """
                 insert into products(
                     sku, merchant_id, title, description, category, tags_json,
                     price, currency, stock, delivery_attributes_json, active,
-                    source, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, '[]', ?, ?, ?, '[]', 1, ?, ?, ?)
+                    source, source_revision, observed_at, fresh_until,
+                    created_at, updated_at
+                ) values (?, ?, ?, ?, ?, '[]', ?, ?, ?, '[]', 1, ?, ?, ?, ?, ?, ?)
                 on conflict(sku) do update set
                     merchant_id=excluded.merchant_id,
                     title=excluded.title,
@@ -213,6 +220,9 @@ def sync_erp_products(
                     currency=excluded.currency,
                     stock=excluded.stock,
                     source=excluded.source,
+                    source_revision=excluded.source_revision,
+                    observed_at=excluded.observed_at,
+                    fresh_until=excluded.fresh_until,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -225,6 +235,9 @@ def sync_erp_products(
                     product["currency"],
                     product["stock"],
                     SOURCE_ERP,
+                    revision,
+                    now_ts,
+                    (datetime.fromisoformat(now_ts) + timedelta(seconds=erp_fresh_ttl_seconds())).isoformat(),
                     now_ts,
                     now_ts,
                 ),

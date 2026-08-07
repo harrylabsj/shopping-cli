@@ -84,6 +84,11 @@ from shopping_cli.cli_conversation_commands import (
     cmd_conversation_show,
     emit_conversation_table,
 )
+from shopping_cli.cli_listing_commands import (
+    cmd_listing_projections_list,
+    cmd_listing_publish_listings,
+    cmd_listing_withdraw,
+)
 from shopping_cli.cli_llm_commands import cmd_llm_run
 from shopping_cli.config import ConfigError, DEFAULT_DB_PATH, validate_production_config
 from shopping_cli.core.catalog import require_merchant
@@ -1012,6 +1017,29 @@ def build_parser() -> argparse.ArgumentParser:
     api_serve.add_argument("--host", default="127.0.0.1")
     api_serve.add_argument("--port", type=tcp_port, default=8765)
     api_serve.set_defaults(func=cmd_api_serve)
+
+    # ── listings（shopping-cli v0.3 §14-§16：PublicListingProjection + 发布）───
+    listings = subparsers.add_parser("listings", help="Product-first listing projection and publication")
+    listings_sub = listings.add_subparsers(dest="listings_command", required=True)
+    listings_proj = listings_sub.add_parser("projections", help="Preview publishable projections (public-only)")
+    listings_proj.add_argument("--merchant", default="", help="Filter by merchant id")
+    listings_proj.add_argument("--format", choices=["text", "json"], default="text")
+    listings_proj.set_defaults(func=cmd_listing_projections_list)
+    listings_publish = listings_sub.add_parser("publish-listings", help="Publish projections to kiwi-catalog (push-first)")
+    listings_publish.add_argument("--merchant", default="", help="Merchant id (projection owner)")
+    listings_publish.add_argument("--kiwi-catalog-url", default="", dest="kiwi_catalog_url", help="kiwi-catalog base URL (e.g. http://127.0.0.1:8600)")
+    listings_publish.add_argument("--owner-token-secret", default="", dest="owner_token_secret", help="KIWI_CATALOG_OWNER_TOKEN_SECRET value")
+    listings_publish.add_argument("--owner-agent-id", default="", dest="owner_agent_id", help="Catalog agent id owning the listings (缺省取 merchant 的 catalog agent)")
+    listings_publish.add_argument("--format", choices=["text", "json"], default="text")
+    listings_publish.set_defaults(func=cmd_listing_publish_listings)
+    listings_withdraw = listings_sub.add_parser("withdraw", help="Withdraw one published listing")
+    listings_withdraw.add_argument("listing_id", help="kiwi-catalog listing id (lst_...)")
+    listings_withdraw.add_argument("--merchant", default="", help="Merchant id (projection owner)")
+    listings_withdraw.add_argument("--kiwi-catalog-url", default="", dest="kiwi_catalog_url")
+    listings_withdraw.add_argument("--owner-token-secret", default="", dest="owner_token_secret")
+    listings_withdraw.add_argument("--owner-agent-id", default="", dest="owner_agent_id")
+    listings_withdraw.add_argument("--format", choices=["text", "json"], default="text")
+    listings_withdraw.set_defaults(func=cmd_listing_withdraw)
     return parser
 
 

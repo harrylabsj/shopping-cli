@@ -134,7 +134,14 @@ pack = subprocess.run(
     text=True,
     stdout=subprocess.PIPE,
 )
-pack_files = {entry["path"] for entry in json.loads(pack.stdout)[0]["files"]}
+# npm >= 11 的 --json 输出是对象（{"<name>": {...}}）；旧版是数组 [ {...} ]
+pack_data = json.loads(pack.stdout)
+if isinstance(pack_data, list):
+    pack_files = {entry["path"] for entry in pack_data[0]["files"]}
+else:
+    pack_files = set()
+    for pkg in pack_data.values():
+        pack_files.update(entry["path"] for entry in pkg.get("files", []))
 for path in pack_files:
     assert "__pycache__" not in path, path
     assert not path.endswith((".pyc", ".pyo", ".pyd")), path
