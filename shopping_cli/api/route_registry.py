@@ -87,6 +87,8 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     # ── Listing projections（shopping-cli v0.3 §14；只读，Merchant Kiwi 兼容）──
     "/v1/merchant/listings/projections": {"marketplace"},
     "/v1/merchant/listings/{sku}/projection": {"marketplace"},
+    # ── ERP 同步（v0.3 §3/#3；写面，merchant/admin token）─────────────────────
+    "/v1/merchant/erp/sync": {"merchants"},
 }
 
 
