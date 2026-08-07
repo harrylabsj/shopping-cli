@@ -218,7 +218,7 @@ class AgentCatalogSchemaTest(unittest.TestCase):
             with db_session(db_file) as conn:
                 user_version = conn.execute("pragma user_version").fetchone()[0]
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 15)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 16)
 
 
 class AgentCatalogCheckConstraintsTest(unittest.TestCase):
@@ -716,7 +716,7 @@ class AgentCatalogMigrationV12ToV13Test(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertEqual(user_version, 15)
+            self.assertEqual(user_version, 16)
             self.assertEqual(columns, _AGENT_TRUST_OBSERVATIONS_COLUMNS)
             self.assertIn("idx_agent_trust_observations_catalog_agent", indexes)
 
