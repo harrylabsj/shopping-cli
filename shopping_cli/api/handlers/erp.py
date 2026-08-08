@@ -8,12 +8,14 @@ conflicts/errors；网络/结构错误 fail-closed 返回 200+ok:false 信封）
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from shopping_cli.api import auth as api_auth
 from shopping_cli.core.catalog import require_merchant
-from shopping_cli.core.errors import PermissionDenied, ValidationError
+from shopping_cli.core.errors import PermissionDenied, RateLimitError, ValidationError
 from shopping_cli.data_sources.erp_source import (
     ErpSourceError,
     ErpSyncConfig,
@@ -21,6 +23,27 @@ from shopping_cli.data_sources.erp_source import (
 )
 from shopping_cli.db.session import db_session
 from shopping_cli.services import tokens as token_service
+
+# per-merchant 同步限流：每次同步含无界网络拉取（有分页上限兜底），并发
+# 同步还会竞争同一批行（last-write-wins）。进程内固定窗口即可——单进程
+# 部署（FastAPI threadpool + fallback ASGI 同一进程）。
+_ERP_SYNC_RATE_LIMIT_PER_MINUTE = 3
+_ERP_SYNC_WINDOW_SECONDS = 60
+_erp_sync_lock = threading.Lock()
+_erp_sync_buckets: dict[str, tuple[float, int]] = {}
+
+
+def _enforce_erp_sync_rate_limit(actor_key: str) -> None:
+    now = time.monotonic()
+    with _erp_sync_lock:
+        window_start, count = _erp_sync_buckets.get(actor_key, (0.0, 0))
+        if now - window_start >= _ERP_SYNC_WINDOW_SECONDS:
+            window_start, count = now, 0
+        if count >= _ERP_SYNC_RATE_LIMIT_PER_MINUTE:
+            raise RateLimitError(
+                f"erp sync rate limit exceeded ({_ERP_SYNC_RATE_LIMIT_PER_MINUTE}/minute)"
+            )
+        _erp_sync_buckets[actor_key] = (window_start, count + 1)
 
 
 def _bounded_int(payload: dict[str, Any], key: str, default: int, lo: int, hi: int) -> int:
@@ -78,6 +101,9 @@ def sync_erp(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 )
             default_merchant_id = merchant_id
             allowed_merchant_id = merchant_id
+
+        # per-actor 限流：每个 merchant/admin 每分钟最多 3 次同步。
+        _enforce_erp_sync_rate_limit(actor)
 
         config = ErpSyncConfig(
             base_url=base_url,

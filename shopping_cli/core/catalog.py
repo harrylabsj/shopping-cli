@@ -8,6 +8,7 @@ import sqlite3
 from typing import Any, Mapping
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.db.session import decode_json, encode_json, now_iso
@@ -154,6 +155,15 @@ def _whole_int(value: Any, message: str) -> int:
 # safe_non_negative_int / safe_non_negative_float are imported from core.limits
 
 
+def _audit_catalog(conn: sqlite3.Connection, merchant_id: str, event: str, details: dict) -> None:
+    """catalog 写操作审计（conversation_id=''——非会话域事件）。
+
+    actor 用 merchant_id：审计"哪个商家发生了什么数据变更"（此前 catalog
+    写操作完全无痕）。
+    """
+    append_audit_event(conn, "", str(merchant_id or "system"), event, details)
+
+
 def create_merchant(
     conn: sqlite3.Connection,
     merchant_id: str,
@@ -213,6 +223,7 @@ def create_merchant(
         radius_km=delivery_radius_km,
     )
     sync_merchant_search_index(conn, merchant_id=merchant_id)
+    _audit_catalog(conn, merchant_id, "merchant_created", {"merchant_id": merchant_id})
     return merchant_summary(conn, merchant_id)
 
 
@@ -287,6 +298,7 @@ def update_merchant(
     if merchant_search_fields_changed:
         sync_product_search_index(conn, merchant_id=merchant_id)
     sync_merchant_search_index(conn, merchant_id=merchant_id)
+    _audit_catalog(conn, merchant_id, "merchant_updated", {"merchant_id": merchant_id})
     return merchant_summary(conn, merchant_id)
 
 
@@ -332,6 +344,7 @@ def upsert_delivery_rule(
         """,
         (merchant_id, service_area, fee, currency, eta_minutes, radius_km, notes, now, now),
     )
+    _audit_catalog(conn, merchant_id, "delivery_rule_updated", {"merchant_id": merchant_id})
     return delivery_rule(conn, merchant_id)
 
 
@@ -395,6 +408,7 @@ def create_product(
     except sqlite3.IntegrityError as exc:
         raise ConflictError(f"Product already exists: {sku}") from exc
     sync_product_search_index(conn, sku=sku)
+    _audit_catalog(conn, merchant_id, "product_created", {"sku": sku, "merchant_id": merchant_id})
     return product_summary(conn, sku)
 
 
@@ -461,6 +475,7 @@ def update_product(
         values.append(sku)
         conn.execute(f"update products set {', '.join(updates)} where sku = ?", values)
         sync_product_search_index(conn, sku=sku)
+        _audit_catalog(conn, merchant_id, "product_updated", {"sku": sku, "merchant_id": merchant_id})
     return product_summary(conn, sku)
 
 
@@ -478,6 +493,7 @@ def set_stock(conn: sqlite3.Connection, sku: str, stock: int, merchant_id: str =
         (int(stock), now_iso(), sku),
     )
     sync_product_search_index(conn, sku=sku)
+    _audit_catalog(conn, merchant_id, "product_stock_updated", {"sku": sku, "stock": int(stock)})
     return product_summary(conn, sku)
 
 

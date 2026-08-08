@@ -109,7 +109,7 @@ class ErpDataSourceTest(unittest.TestCase):
                values ('SKU-001','merchant-1','Local Title','','','[]',55.0,'CNY',1,'[]',1,'local','t','t')"""
         )
         fetch = fake_fetch([PAGE1])
-        report = sync_erp_products(self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="m"), fetch=fetch)
+        report = sync_erp_products(self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"), fetch=fetch)
         self.assertEqual(report.skipped, 1)
         self.assertEqual(len(report.conflicts), 1)
         self.assertEqual(report.conflicts[0]["sku"], "SKU-001")
@@ -118,6 +118,22 @@ class ErpDataSourceTest(unittest.TestCase):
         self.assertEqual(row[0], "Local Title")
         self.assertEqual(row[1], 55.0)
         self.assertEqual(row[2], "local")
+
+    def test_cross_merchant_sku_refuses_reassignment(self) -> None:
+        """SKU 已属于其他 merchant 的行不能被 feed 改划归属（admin/CLI 路径也拦）。"""
+        self.conn.execute(
+            """insert into products(sku, merchant_id, title, description, category, tags_json,
+               price, currency, stock, delivery_attributes_json, active, source, created_at, updated_at)
+               values ('SKU-001','merchant-1','Other Tenant','','','[]',55.0,'CNY',1,'[]',1,'local','t','t')"""
+        )
+        fetch = fake_fetch([PAGE1])
+        report = sync_erp_products(self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-2"), fetch=fetch)
+        self.assertEqual(report.skipped, 1)
+        self.assertIn("already owned by another merchant", report.errors[0])
+        self.assertEqual(report.conflicts, [])
+        row = self.conn.execute("select merchant_id, source from products where sku='SKU-001'").fetchone()
+        self.assertEqual(row[0], "merchant-1")
+        self.assertEqual(row[1], "local")
 
     def test_network_failure_fail_closed(self) -> None:
         def boom(_url: str) -> tuple[int, bytes]:

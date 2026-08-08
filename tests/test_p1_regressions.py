@@ -814,6 +814,26 @@ class P1RegressionTest(unittest.TestCase):
             self.assertEqual(product_merchant["name"], "西湖龙井茶庄")
             self.assertEqual(summary["product"]["price"], 88)
 
+    def test_catalog_writes_are_audited(self):
+        """catalog 写操作（merchant/product/stock/policy/delivery）记入审计。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-a", "西湖龙井茶庄", city="杭州")
+                create_product(conn, "seller-a", "tea-a", "西湖龙井礼盒", 88, 5)
+                create_policy(conn, "seller-a", "returns", "退换政策")
+            with db_session(db_file) as conn:
+                events = [
+                    row["event"]
+                    for row in conn.execute(
+                        "select event from audit_events where conversation_id = '' order by id"
+                    ).fetchall()
+                ]
+            self.assertIn("merchant_created", events)
+            self.assertIn("product_created", events)
+            self.assertIn("policy_created", events)
+            self.assertIn("delivery_rule_updated", events)
+
     def test_merchant_bootstrap_replays_without_client_idempotency_key(self):
         """Replay works even when the client does not supply an Idempotency-Key."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -582,15 +582,64 @@ class PublicMarketplaceTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertTrue(replayed["idempotent"])
 
+                # alice 的第 2 个新请求（新 idempotency key）超出其 1/min 预算
                 status, limited = self.request(
+                    app,
+                    "POST",
+                    "/buyer/ask",
+                    {"buyer_id": "alice", "text": "another", "idempotency_key": "rate-alice-2"},
+                )
+                self.assertEqual(status, 429)
+                self.assertIn("rate limit", limited["error"])
+
+                # bob 有独立预算——共享 bootstrap token 下买家互不拖累（buyer 维度）
+                status, bob_ok = self.request(
                     app,
                     "POST",
                     "/buyer/ask",
                     {"buyer_id": "bob", "text": "longjing", "idempotency_key": "rate-bob-1"},
                 )
+                self.assertEqual(status, 200)
+                self.assertFalse(bob_ok["idempotent"])
 
-            self.assertEqual(status, 429)
-            self.assertIn("rate limit", limited["error"])
+    def test_idempotency_keys_are_scoped_per_buyer(self) -> None:
+        """同 idempotency key 不同 buyer 不冲突——键空间按 buyer 隔离（v3.0）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+
+            shared_key = "shared-key-across-buyers"
+            status, first = self.request(
+                app,
+                "POST",
+                "/buyer/ask",
+                {"buyer_id": "alice", "text": "longjing", "idempotency_key": shared_key},
+            )
+            self.assertEqual(status, 200)
+            self.assertFalse(first["idempotent"])
+
+            # bob 用同一个 key 不同内容——旧实现会 IdempotencyConflict
+            status, second = self.request(
+                app,
+                "POST",
+                "/buyer/ask",
+                {"buyer_id": "bob", "text": "different request", "idempotency_key": shared_key},
+            )
+            self.assertEqual(status, 200)
+            self.assertFalse(second["idempotent"])
+            self.assertEqual(second["buyer_id"], "bob")
+
+            # alice 原请求回放仍幂等（同 buyer 同 key 同内容）
+            status, replayed = self.request(
+                app,
+                "POST",
+                "/buyer/ask",
+                {"buyer_id": "alice", "text": "longjing", "idempotency_key": shared_key},
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(replayed["idempotent"])
 
     def test_fastapi_auth_errors_are_mapped_to_403_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4425,7 +4474,10 @@ class PublicMarketplaceTest(unittest.TestCase):
                 ).fetchall()
             finally:
                 conn.close()
-            self.assertEqual([row[1] for row in rows], ["agent_token_issued", "agent_token_rotated", "agent_token_revoked"])
+            # catalog 写操作审计（v3.0）也落在 conversation_id='' 域——这里只
+            # 断言 agent token 生命周期事件按序记录且无 secrets。
+            token_events = [row[1] for row in rows if row[1].startswith("agent_token_")]
+            self.assertEqual(token_events, ["agent_token_issued", "agent_token_rotated", "agent_token_revoked"])
             self.assertTrue(all(row[0] == "seller-a" for row in rows))
             serialized = json.dumps([json.loads(row[2]) for row in rows], sort_keys=True)
             self.assertNotIn(old_token, serialized)

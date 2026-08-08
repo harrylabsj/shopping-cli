@@ -37,10 +37,11 @@ def _buyer_bootstrap_rate_limit_per_minute() -> int:
     )
 
 
-def _enforce_buyer_bootstrap_rate_limit(conn: Any, bootstrap_token_hash: str) -> None:
+def _enforce_buyer_bootstrap_rate_limit(conn: Any, bootstrap_token_hash: str, buyer_id: str) -> None:
     api_idempotency.enforce_buyer_bootstrap_rate_limit(
         conn,
         bootstrap_token_hash,
+        buyer_id,
         _buyer_bootstrap_rate_limit_per_minute(),
     )
 
@@ -50,6 +51,7 @@ def _replay_idempotency(
     payload: dict[str, Any],
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash: str,
 ) -> dict[str, Any] | None:
@@ -58,6 +60,7 @@ def _replay_idempotency(
         payload,
         endpoint,
         bootstrap_token_hash,
+        buyer_id,
         idempotency_key,
         request_hash,
         _ensure_buyer_token,
@@ -69,6 +72,7 @@ def _claim_idempotency(
     payload: dict[str, Any],
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash: str,
 ) -> dict[str, Any] | None:
@@ -77,6 +81,7 @@ def _claim_idempotency(
         payload,
         endpoint,
         bootstrap_token_hash,
+        buyer_id,
         idempotency_key,
         request_hash,
         _ensure_buyer_token,
@@ -87,6 +92,7 @@ def _complete_idempotency(
     conn: Any,
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash: str,
     response: dict[str, Any],
@@ -95,6 +101,7 @@ def _complete_idempotency(
         conn,
         endpoint,
         bootstrap_token_hash,
+        buyer_id,
         idempotency_key,
         request_hash,
         response,
@@ -136,17 +143,19 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             payload,
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash,
         )
         if replayed is not None:
             return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
+        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash, buyer_id)
         replayed = _claim_idempotency(
             conn,
             payload,
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash,
         )
@@ -182,12 +191,12 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 else:
                     result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
             result["idempotent"] = False
-            _complete_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
+            _complete_idempotency(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash, result)
             return result
         except KeyError as exc:
             raise ValidationError(f"missing required field: {exc.args[0]}") from exc
         except Exception:
-            _clear_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
+            _clear_idempotency_claim(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash)
             raise
 
 
@@ -227,17 +236,19 @@ def create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[st
             payload,
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash,
         )
         if replayed is not None:
             return replayed
-        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash)
+        _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash, buyer_id)
         replayed = _claim_idempotency(
             conn,
             payload,
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash,
         )
@@ -271,10 +282,10 @@ def create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[st
                 "buyer_token": buyer_token,
                 "idempotent": False,
             }
-            _complete_idempotency(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash, result)
+            _complete_idempotency(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash, result)
             return result
         except KeyError as exc:
             raise ValidationError(f"missing required field: {exc.args[0]}") from exc
         except Exception:
-            _clear_idempotency_claim(conn, endpoint, bootstrap_token_hash, idempotency_key, request_hash)
+            _clear_idempotency_claim(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash)
             raise

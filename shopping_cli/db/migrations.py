@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 
 @dataclass(frozen=True)
@@ -303,6 +303,70 @@ def migration_019_remove_catalog_subsystem_tables(conn: sqlite3.Connection) -> N
         conn.execute(f"drop table if exists {table}")
 
 
+def migration_020_buyer_ledger_buyer_dimension(conn: sqlite3.Connection) -> None:
+    """v3.0 安全加固：buyer 幂等/限流账本加 buyer_id 维度。
+
+    共享 bootstrap token 是全站唯一的——此前 (token_hash, idempotency_key)
+    的键空间让一个客户端可以耗尽所有人的限流预算、抢占他人的幂等键。
+    旧行 buyer_id 回填 ''（历史数据，不影响新写入）。
+    """
+    conn.execute(
+        """
+        create table buyer_request_idempotency_v20 (
+            endpoint text not null,
+            token_hash text not null,
+            buyer_id text not null,
+            idempotency_key text not null,
+            request_hash text not null,
+            status text not null,
+            response_json text not null default '{}',
+            conversation_id text not null default '',
+            message_id integer not null default 0,
+            created_at text not null,
+            updated_at text not null,
+            primary key (endpoint, token_hash, buyer_id, idempotency_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        insert into buyer_request_idempotency_v20(
+            endpoint, token_hash, buyer_id, idempotency_key, request_hash,
+            status, response_json, conversation_id, message_id, created_at, updated_at
+        )
+        select endpoint, token_hash, '', idempotency_key, request_hash,
+               status, response_json, conversation_id, message_id, created_at, updated_at
+        from buyer_request_idempotency
+        """
+    )
+    conn.execute("drop table buyer_request_idempotency")
+    conn.execute("alter table buyer_request_idempotency_v20 rename to buyer_request_idempotency")
+
+    conn.execute(
+        """
+        create table buyer_bootstrap_rate_limits_v20 (
+            token_hash text not null,
+            buyer_id text not null,
+            window_start text not null,
+            request_count integer not null default 0,
+            updated_at text not null,
+            primary key (token_hash, buyer_id, window_start)
+        )
+        """
+    )
+    conn.execute(
+        """
+        insert into buyer_bootstrap_rate_limits_v20(
+            token_hash, buyer_id, window_start, request_count, updated_at
+        )
+        select token_hash, '', window_start, request_count, updated_at
+        from buyer_bootstrap_rate_limits
+        """
+    )
+    conn.execute("drop table buyer_bootstrap_rate_limits")
+    conn.execute("alter table buyer_bootstrap_rate_limits_v20 rename to buyer_bootstrap_rate_limits")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -316,6 +380,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(16, "product_source_column", migration_016_product_source_column),
     Migration(17, "product_provenance", migration_017_product_provenance),
     Migration(19, "remove_catalog_subsystem_tables", migration_019_remove_catalog_subsystem_tables),
+    Migration(20, "buyer_ledger_buyer_dimension", migration_020_buyer_ledger_buyer_dimension),
 )
 
 

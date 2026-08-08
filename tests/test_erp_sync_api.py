@@ -37,6 +37,9 @@ class ErpSyncCliTest(unittest.TestCase):
         )
         self.resolver.start()
         self.addCleanup(self.resolver.stop)
+        # per-merchant 同步限流 bucket 是进程内共享的——每个测试重置。
+        from shopping_cli.api.handlers.erp import _erp_sync_buckets
+        _erp_sync_buckets.clear()
         self.tmp = tempfile.mkdtemp()
         self.db_file = Path(self.tmp) / "shop.sqlite"
         with db_session(self.db_file) as conn:
@@ -110,6 +113,9 @@ class ErpSyncApiTest(unittest.TestCase):
         )
         self.resolver.start()
         self.addCleanup(self.resolver.stop)
+        # per-merchant 同步限流 bucket 是进程内共享的——每个测试重置。
+        from shopping_cli.api.handlers.erp import _erp_sync_buckets
+        _erp_sync_buckets.clear()
         self.tmp = tempfile.mkdtemp()
         self.db_file = Path(self.tmp) / "marketplace.sqlite"
         with db_session(self.db_file) as conn:

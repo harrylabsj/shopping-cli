@@ -90,22 +90,25 @@ def rate_limit_window_start(current: datetime) -> str:
 def enforce_buyer_bootstrap_rate_limit(
     conn: Any,
     bootstrap_token_hash: str,
+    buyer_id: str,
     limit: int,
     current: datetime | None = None,
 ) -> None:
+    """按 (token_hash, buyer_id, window) 计数的限流——共享 bootstrap token
+    下各买家预算隔离（否则一个客户端可耗尽全站预算）。"""
     if limit <= 0:
         return
     current = (current or datetime.now()).replace(microsecond=0)
     cursor = conn.execute(
         """
-        insert into buyer_bootstrap_rate_limits(token_hash, window_start, request_count, updated_at)
-        values (?, ?, 1, ?)
-        on conflict(token_hash, window_start) do update set
+        insert into buyer_bootstrap_rate_limits(token_hash, buyer_id, window_start, request_count, updated_at)
+        values (?, ?, ?, 1, ?)
+        on conflict(token_hash, buyer_id, window_start) do update set
             request_count = buyer_bootstrap_rate_limits.request_count + 1,
             updated_at = excluded.updated_at
         where buyer_bootstrap_rate_limits.request_count < ?
         """,
-        (bootstrap_token_hash, rate_limit_window_start(current), current.isoformat(), limit),
+        (bootstrap_token_hash, buyer_id, rate_limit_window_start(current), current.isoformat(), limit),
     )
     if cursor.rowcount != 1:
         raise RateLimitError(f"buyer bootstrap rate limit exceeded ({limit}/minute)")
@@ -115,16 +118,17 @@ def idempotency_row(
     conn: Any,
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
 ) -> Any:
     return conn.execute(
         """
-        select endpoint, token_hash, idempotency_key, request_hash, status, response_json,
-               buyer_id, conversation_id, message_id
+        select endpoint, token_hash, buyer_id, idempotency_key, request_hash, status,
+               response_json, conversation_id, message_id
         from buyer_request_idempotency
-        where endpoint = ? and token_hash = ? and idempotency_key = ?
+        where endpoint = ? and token_hash = ? and buyer_id = ? and idempotency_key = ?
         """,
-        (endpoint, bootstrap_token_hash, idempotency_key),
+        (endpoint, bootstrap_token_hash, buyer_id, idempotency_key),
     ).fetchone()
 
 
@@ -158,13 +162,14 @@ def replay_buyer_idempotency(
     payload: dict[str, Any],
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash_value: str,
     ensure_buyer_token: Any,
 ) -> dict[str, Any] | None:
     if not idempotency_key:
         return None
-    row = idempotency_row(conn, endpoint, bootstrap_token_hash, idempotency_key)
+    row = idempotency_row(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key)
     if row is None:
         return None
     if str(row["request_hash"]) != request_hash_value:
@@ -179,6 +184,7 @@ def claim_buyer_idempotency(
     payload: dict[str, Any],
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash_value: str,
     ensure_buyer_token: Any,
@@ -190,12 +196,12 @@ def claim_buyer_idempotency(
         conn.execute(
             """
             insert into buyer_request_idempotency(
-                endpoint, token_hash, idempotency_key, request_hash, status,
+                endpoint, token_hash, buyer_id, idempotency_key, request_hash, status,
                 response_json, created_at, updated_at
             )
-            values (?, ?, ?, ?, 'processing', '{}', ?, ?)
+            values (?, ?, ?, ?, ?, 'processing', '{}', ?, ?)
             """,
-            (endpoint, bootstrap_token_hash, idempotency_key, request_hash_value, current, current),
+            (endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash_value, current, current),
         )
     except sqlite3.IntegrityError:
         return replay_buyer_idempotency(
@@ -203,6 +209,7 @@ def claim_buyer_idempotency(
             payload,
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash_value,
             ensure_buyer_token,
@@ -214,6 +221,7 @@ def complete_buyer_idempotency(
     conn: Any,
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash_value: str,
     response: dict[str, Any],
@@ -230,20 +238,20 @@ def complete_buyer_idempotency(
         update buyer_request_idempotency
         set status = 'completed',
             response_json = ?,
-            buyer_id = ?,
             conversation_id = ?,
             message_id = ?,
             updated_at = ?
-        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ?
+        where endpoint = ? and token_hash = ? and buyer_id = ? and idempotency_key = ?
+          and request_hash = ?
         """,
         (
             encode_json(stored_response),
-            str(stored_response.get("buyer_id") or (conversation or {}).get("buyer_id") or ""),
             str((conversation or {}).get("id") or ""),
             non_negative_whole_int((message or {}).get("id"), "message_id"),
             now_iso(),
             endpoint,
             bootstrap_token_hash,
+            buyer_id,
             idempotency_key,
             request_hash_value,
         ),
@@ -254,6 +262,7 @@ def clear_buyer_idempotency_claim(
     conn: Any,
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash_value: str,
 ) -> None:
@@ -262,7 +271,8 @@ def clear_buyer_idempotency_claim(
     conn.execute(
         """
         delete from buyer_request_idempotency
-        where endpoint = ? and token_hash = ? and idempotency_key = ? and request_hash = ? and status = 'processing'
+        where endpoint = ? and token_hash = ? and buyer_id = ? and idempotency_key = ?
+          and request_hash = ? and status = 'processing'
         """,
-        (endpoint, bootstrap_token_hash, idempotency_key, request_hash_value),
+        (endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash_value),
     )

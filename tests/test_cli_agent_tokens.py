@@ -125,7 +125,10 @@ class CliAgentTokenLifecycleTest(unittest.TestCase):
                 ).fetchall()
             finally:
                 conn.close()
-            self.assertEqual([row[1] for row in rows], ["agent_token_issued", "agent_token_rotated", "agent_token_revoked"])
+            # catalog 写操作审计（v3.0）也落在 conversation_id='' 域——这里只
+            # 断言 agent token 生命周期事件按序记录且无 secrets。
+            token_events = [row[1] for row in rows if row[1].startswith("agent_token_")]
+            self.assertEqual(token_events, ["agent_token_issued", "agent_token_rotated", "agent_token_revoked"])
             self.assertTrue(all(row[0] == "seller-a" for row in rows))
             serialized = json.dumps([json.loads(row[2]) for row in rows], sort_keys=True)
             self.assertNotIn(old_token, serialized)

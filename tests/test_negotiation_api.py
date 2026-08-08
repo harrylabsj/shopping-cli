@@ -678,12 +678,13 @@ class NegotiationApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(payload["process"]["status"], "processed")
-        # completed claims are not retryable through complete again
+        # completed claims are not retryable through complete again——
+        # 已 settle 的 claim 再操作返回 409（不再静默报成功）
         status, payload = self.call(
             "POST", "/negotiation/claims/fail", {"message_id": self.buyer_message_id}, token=self.merchant_token
         )
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["process"]["status"], "processed")
+        self.assertEqual(status, 409)
+        self.assertIn("claim already settled", payload["error"])
 
     def test_fail_then_abandon(self):
         self.claim(self.merchant_token)

@@ -18,6 +18,7 @@ from typing import Any
 
 from shopping_cli.core.catalog import fts_query, fts_search_document, parse_tags, require_merchant, tokenize
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_text, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
@@ -85,6 +86,7 @@ def create_policy(
     except sqlite3.IntegrityError as exc:
         raise ConflictError(f"Policy already exists: {merchant_id}/{code}") from exc
     sync_policy_search_index(conn, merchant_id)
+    append_audit_event(conn, "", merchant_id, "policy_created", {"merchant_id": merchant_id, "code": code})
     return policy_summary(conn, merchant_id, code)
 
 
@@ -142,6 +144,7 @@ def update_policy(
             values,
         )
         sync_policy_search_index(conn, merchant_id)
+        append_audit_event(conn, "", merchant_id, "policy_updated", {"merchant_id": merchant_id, "code": code})
     return policy_summary(conn, merchant_id, code)
 
 

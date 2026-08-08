@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Any
 
 from shopping_cli.core.catalog import product_summary, public_product_summary, require_merchant, require_product
@@ -80,6 +81,13 @@ def ensure_conversation(
                 (conversation_id, buyer_id, merchant_id, sku, reuse_key, now, now),
             )
             break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            # WAL 单写者：并发长事务（如 ERP 同步）持锁时 busy_timeout 超时。
+            # 短退避重试，避免并发建会话裸 500。
+            time.sleep(0.05)
+            continue
         except sqlite3.IntegrityError as exc:
             existing = conn.execute(
                 """
