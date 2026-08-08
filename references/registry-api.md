@@ -25,6 +25,7 @@ MVP routes:
 - `GET /merchants/{merchant_id}/private-config`
 - `POST /merchants/{merchant_id}/token/rotate`
 - `POST /merchants/{merchant_id}/token/revoke`
+- `POST /merchants/{merchant_id}/token/recover`
 - `POST /products`
 - `GET /products/{sku}`
 - `PATCH /products/{sku}`
