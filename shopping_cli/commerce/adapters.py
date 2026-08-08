@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -32,6 +33,19 @@ def _now_iso() -> str:
 def _minor_from_yuan(price: float) -> int:
     """元 → minor（两位小数；kiwi 侧 data-source.ts 的 元→minor 约定）。"""
     return int(round(price * 100))
+
+
+def _lead_days_from_eta(conn: sqlite3.Connection, merchant_id: str) -> int:
+    """从 delivery_rules.eta_minutes 派生 lead_days（products 无该列——
+    此前恒 0 是谎报）。eta 向上取整为天；无配送规则 → 0。"""
+    row = conn.execute(
+        "select eta_minutes from delivery_rules where merchant_id = ?",
+        (merchant_id,),
+    ).fetchone()
+    eta_minutes = int(row["eta_minutes"] or 0) if row is not None else 0
+    if eta_minutes <= 0:
+        return 0
+    return max(1, math.ceil(eta_minutes / 1440))
 
 
 class LocalCommerceDataSource:
@@ -117,7 +131,7 @@ class LocalCommerceDataSource:
         if row is None:
             return None
         return CommerceField(
-            value={"lead_days": row.get("delivery_lead_days", 0)},
+            value={"lead_days": _lead_days_from_eta(self._conn, str(row["merchant_id"]))},
             authority_source=SOURCE_LOCAL,
             source_revision=row["source_revision"],
             observed_at=row["observed_at"],
@@ -239,7 +253,7 @@ class ErpCommerceDataSource:
         if row is None:
             return None
         return CommerceField(
-            value={"lead_days": row.get("delivery_lead_days", 0)},
+            value={"lead_days": _lead_days_from_eta(self._conn, str(row["merchant_id"]))},
             authority_source=AUTHORITY_ERP,
             source_revision=row["source_revision"],
             observed_at=row["observed_at"],

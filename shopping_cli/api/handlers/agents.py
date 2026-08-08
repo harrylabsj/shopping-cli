@@ -170,6 +170,22 @@ def claim_message(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any
         require_agent_conversation(conn, merchant_id, conversation_id)
         message_id = positive_whole_int(require_field(payload, "message_id"), "message_id")
         require_message_in_conversation(conn, conversation_id, message_id)
+        # 回合/乱序防护（与 negotiation claim 一致）：只能 claim 处于
+        # waiting_merchant 且是**最新**买家消息——否则回答会落在旧问题上，
+        # 更新的买家消息还会被再次派发（跨消息跳答）。
+        conversation = conversation_summary(conn, conversation_id)
+        if str(conversation["status"] or "") != "waiting_merchant":
+            raise ConflictError(
+                f"Conversation {conversation_id} is not waiting for the merchant agent "
+                f"(status={conversation['status']!r})"
+            )
+        latest_row = conn.execute(
+            "select id from messages where conversation_id = ? and sender = 'buyer' "
+            "order by id desc limit 1",
+            (conversation_id,),
+        ).fetchone()
+        if latest_row is None or int(latest_row["id"]) != message_id:
+            raise ConflictError(f"Message {message_id} is not the latest buyer message")
         claim = claim_agent_message(
             conn,
             agent_id,

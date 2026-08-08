@@ -184,7 +184,10 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
                 next_actor=next_actor,
                 sender=actor,
                 expected_status="human_required",
-                reject_if_unresolved=(status == "closed"),
+                # 非 human_required 目标态必须无未决 flag（防并发 add_flag
+                # 竞态把会话带 flag 推进到 waiting_buyer/closed）；human_required
+                # 时剩余未决 flag 是正常状态，不能 reject。
+                reject_if_unresolved=(status != "human_required"),
                 now=now,
             )
         append_audit_event(
@@ -261,7 +264,10 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
                 next_actor=next_actor,
                 sender=actor,
                 expected_status="human_required",
-                reject_if_unresolved=(status == "closed"),
+                # 非 human_required 目标态必须无未决 flag（防并发 add_flag
+                # 竞态把会话带 flag 推进到 waiting_buyer/closed）；human_required
+                # 时剩余未决 flag 是正常状态，不能 reject。
+                reject_if_unresolved=(status != "human_required"),
                 now=now,
             )
         append_audit_event(

@@ -351,11 +351,25 @@ def sync_erp_products(
                 )
                 report.skipped += 1
                 continue
-            # 权威冲突：本地手改行不得被 ERP 静默覆盖。
+            # 归属冲突：SKU 已属于其他 merchant 的行绝不能被 feed 改划归属
+            # （admin/CLI 不受限路径 allowed_merchant_id="" 也拦——跨租户
+            # 数据移动是静默覆盖，fail-closed）。探测按 (merchant_id, sku)
+            # 作用域——不把其他租户的 SKU 存在性/来源暴露给调用方。
             existing = conn.execute(
-                "select source from products where sku = ?", (sku,)
+                "select source, merchant_id from products where sku = ? and merchant_id = ?",
+                (sku, merchant_id),
             ).fetchone()
-            if existing is not None and existing[0] == SOURCE_LOCAL:
+            if existing is None:
+                other = conn.execute(
+                    "select 1 from products where sku = ?", (sku,)
+                ).fetchone()
+                if other is not None:
+                    report.errors.append(
+                        f"sku {sku}: already owned by another merchant; refusing to reassign"
+                    )
+                    report.skipped += 1
+                    continue
+            elif existing[0] == SOURCE_LOCAL:
                 report.conflicts.append({"sku": sku, "reason": "local authoritative row"})
                 report.skipped += 1
                 continue

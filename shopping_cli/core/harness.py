@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
-from shopping_cli.core.errors import NotFoundError
+from shopping_cli.core.errors import ConflictError, NotFoundError
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 from shopping_cli.core.limits import safe_non_negative_int as _safe_non_negative_int
 
@@ -208,14 +208,17 @@ def complete_agent_message(conn: sqlite3.Connection, agent_id: str, message_id: 
         (PROCESSED_STATUS, now, now, agent_id, message_id, PROCESSING_STATUS),
     )
     process = agent_message_process_summary(conn, agent_id, message_id)
-    if cursor.rowcount == 1:
-        append_audit_event(
-            conn,
-            process["conversation_id"],
-            agent_id,
-            "agent_message_processed",
-            {"message_id": message_id, "idempotency_key": process["idempotency_key"], "attempts": process["attempts"]},
+    if cursor.rowcount != 1:
+        raise ConflictError(
+            f"claim already settled (status={process['status']!r})"
         )
+    append_audit_event(
+        conn,
+        process["conversation_id"],
+        agent_id,
+        "agent_message_processed",
+        {"message_id": message_id, "idempotency_key": process["idempotency_key"], "attempts": process["attempts"]},
+    )
     return process
 
 
@@ -236,14 +239,17 @@ def abandon_agent_message(
         (ABANDONED_STATUS, error, now, agent_id, message_id, PROCESSING_STATUS),
     )
     process = agent_message_process_summary(conn, agent_id, message_id)
-    if cursor.rowcount == 1:
-        append_audit_event(
-            conn,
-            process["conversation_id"],
-            agent_id,
-            "agent_message_abandoned",
-            {"message_id": message_id, "idempotency_key": process["idempotency_key"], "error": error, "reason": reason},
+    if cursor.rowcount != 1:
+        raise ConflictError(
+            f"claim already settled (status={process['status']!r})"
         )
+    append_audit_event(
+        conn,
+        process["conversation_id"],
+        agent_id,
+        "agent_message_abandoned",
+        {"message_id": message_id, "idempotency_key": process["idempotency_key"], "error": error, "reason": reason},
+    )
     return process
 
 
@@ -252,25 +258,43 @@ def abandon_stale_agent_messages(
     agent_id: str,
     stale_after_seconds: Any = 300,
     now: str | datetime | None = None,
+    conversation_id: str = "",
 ) -> list[dict[str, Any]]:
     current = datetime.fromisoformat(now) if isinstance(now, str) else now or datetime.fromisoformat(now_iso())
     ttl_seconds = _safe_positive_int(stale_after_seconds, 300)
     if ttl_seconds > MAX_STALE_TTL_SECONDS:
         ttl_seconds = 300
     cutoff = current - timedelta(seconds=ttl_seconds)
-    rows = conn.execute(
-        """
-        select message_id from agent_message_processes
-        where agent_id = ? and status = ? and updated_at < ?
-        order by updated_at, message_id
-        """,
-        (agent_id, PROCESSING_STATUS, cutoff.isoformat(timespec="seconds")),
-    ).fetchall()
+    if conversation_id:
+        rows = conn.execute(
+            """
+            select p.message_id from agent_message_processes p
+            join messages m on m.id = p.message_id
+            where p.agent_id = ? and p.status = ? and p.updated_at < ?
+              and m.conversation_id = ?
+            order by p.updated_at, p.message_id
+            """,
+            (agent_id, PROCESSING_STATUS, cutoff.isoformat(timespec="seconds"), conversation_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            select message_id from agent_message_processes
+            where agent_id = ? and status = ? and updated_at < ?
+            order by updated_at, message_id
+            """,
+            (agent_id, PROCESSING_STATUS, cutoff.isoformat(timespec="seconds")),
+        ).fetchall()
     abandoned: list[dict[str, Any]] = []
     for row in rows:
         message_id = int(row["message_id"])
         error = f"stale processing claim abandoned after {ttl_seconds} seconds"
-        abandoned_process = abandon_agent_message(conn, agent_id, message_id, error, reason="stale_processing_claim")
+        try:
+            abandoned_process = abandon_agent_message(
+                conn, agent_id, message_id, error, reason="stale_processing_claim"
+            )
+        except ConflictError:
+            continue  # 并发已 settle——sweep 跳过，不中断
         abandoned.append(abandoned_process)
     return abandoned
 
@@ -286,14 +310,17 @@ def fail_agent_message(conn: sqlite3.Connection, agent_id: str, message_id: int,
         (FAILED_STATUS, error, now, agent_id, message_id, PROCESSING_STATUS),
     )
     process = agent_message_process_summary(conn, agent_id, message_id)
-    if cursor.rowcount == 1:
-        append_audit_event(
-            conn,
-            process["conversation_id"],
-            agent_id,
-            "agent_message_failed",
-            {"message_id": message_id, "idempotency_key": process["idempotency_key"], "attempts": process["attempts"], "error": error},
+    if cursor.rowcount != 1:
+        raise ConflictError(
+            f"claim already settled (status={process['status']!r})"
         )
+    append_audit_event(
+        conn,
+        process["conversation_id"],
+        agent_id,
+        "agent_message_failed",
+        {"message_id": message_id, "idempotency_key": process["idempotency_key"], "attempts": process["attempts"], "error": error},
+    )
     return process
 
 

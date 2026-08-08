@@ -195,25 +195,26 @@ SCHEMA = [
     create table if not exists buyer_request_idempotency (
         endpoint text not null,
         token_hash text not null,
+        buyer_id text not null,
         idempotency_key text not null,
         request_hash text not null,
         status text not null,
         response_json text not null default '{}',
-        buyer_id text not null default '',
         conversation_id text not null default '',
         message_id integer not null default 0,
         created_at text not null,
         updated_at text not null,
-        primary key (endpoint, token_hash, idempotency_key)
+        primary key (endpoint, token_hash, buyer_id, idempotency_key)
     )
     """,
     """
     create table if not exists buyer_bootstrap_rate_limits (
         token_hash text not null,
+        buyer_id text not null,
         window_start text not null,
         request_count integer not null default 0,
         updated_at text not null,
-        primary key (token_hash, window_start)
+        primary key (token_hash, buyer_id, window_start)
     )
     """,
     """

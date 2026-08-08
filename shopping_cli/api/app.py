@@ -8,6 +8,7 @@ not been installed yet.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,8 @@ from shopping_cli.core.errors import (
     ValidationError,
 )
 from shopping_cli.services import tokens as token_service
+
+logger = logging.getLogger("shopping-cli")
 
 try:  # pragma: no cover - exercised when optional dependency is installed
     from fastapi import FastAPI, Header, Request, Response
@@ -791,6 +794,7 @@ def handle_request(
     except ShoppingCliError as exc:
         return 400, {"ok": False, "error": str(exc)}
     except Exception:
+        logger.exception("unhandled error handling %s %s", method, path)
         return 500, {"ok": False, "error": "internal server error"}
 
 
@@ -861,8 +865,10 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     if RequestValidationError is not None:  # pragma: no cover - exercised with fastapi installed
 
         @app.exception_handler(RequestValidationError)
-        def request_validation_error_handler(_request: Any, exc: Exception) -> Any:
-            return _json_error_response(400, str(exc))
+        def request_validation_error_handler(request: Any, exc: Exception) -> Any:
+            # 不回显 str(exc)：包含 schema 内部结构并回显调用方输入。
+            logger.warning("request validation failed on %s: %s", getattr(request, "url", "?"), exc)
+            return _json_error_response(400, "invalid request body")
 
     if StarletteHTTPException is not None:  # pragma: no cover - exercised with fastapi installed
 
@@ -873,7 +879,8 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
             return _json_error_response(status, message)
 
     @app.exception_handler(Exception)
-    def unexpected_error_handler(_request: Any, _exc: Exception) -> Any:
+    def unexpected_error_handler(request: Any, exc: Exception) -> Any:
+        logger.exception("unhandled error on %s %s", getattr(request, "method", "?"), getattr(request, "url", "?"))
         return _json_error_response(500, "internal server error")
 
     @app.get("/health")

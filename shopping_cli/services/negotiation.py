@@ -328,14 +328,29 @@ def heartbeat_claims(
         )
         refreshed = cursor.rowcount
     else:
-        cursor = conn.execute(
-            """
-            update agent_message_processes
-            set updated_at = ?
-            where agent_id = ? and status = ?
-            """,
-            (now, actor.agent_id, "processing"),
-        )
+        # buyer 批量心跳必须限定在其 token 绑定的会话内——buyer agent id 是
+        # 按 buyer 恒定的，A 会话 token 不应能续命 B 会话的 claim（否则
+        # 崩溃的 claim 被永久续命、永不回收）。
+        if actor.role == "buyer" and actor.conversation_id:
+            cursor = conn.execute(
+                """
+                update agent_message_processes
+                set updated_at = ?
+                where agent_id = ? and status = ? and message_id in (
+                    select id from messages where conversation_id = ?
+                )
+                """,
+                (now, actor.agent_id, "processing", actor.conversation_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                update agent_message_processes
+                set updated_at = ?
+                where agent_id = ? and status = ?
+                """,
+                (now, actor.agent_id, "processing"),
+            )
         refreshed = cursor.rowcount
     append_audit_event(
         conn,
@@ -360,7 +375,13 @@ def abandon_stale_claims(conn: sqlite3.Connection, actor: NegotiationActor, ttl_
     stale_processing_claim and stays reclaimable.
     """
     ttl = _strict_ttl_seconds(ttl_seconds)
-    abandoned = abandon_stale_agent_messages(conn, actor.agent_id, ttl)
+    # buyer 的 abandon 同样限定在其绑定会话内（与 heartbeat 一致）。
+    abandoned = abandon_stale_agent_messages(
+        conn,
+        actor.agent_id,
+        ttl,
+        conversation_id=actor.conversation_id if actor.role == "buyer" else "",
+    )
     return {
         "abandoned": len(abandoned),
         "message_ids": [int(process["message_id"]) for process in abandoned],

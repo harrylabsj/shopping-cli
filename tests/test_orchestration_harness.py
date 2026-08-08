@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from shopping_cli.agents import buyer_cli, merchant_agent
 from shopping_cli.core import conversations, harness
+from shopping_cli.core.errors import ConflictError
 from shopping_cli.core.catalog import create_merchant, create_product
 from shopping_cli.core.conversations import conversation_summary, next_conversation_id
 from shopping_cli.core.harness import abandon_agent_message, abandon_stale_agent_messages, claim_agent_message, complete_agent_message, fail_agent_message
@@ -263,7 +264,7 @@ class OrchestrationHarnessTest(unittest.TestCase):
                 events = conversation_summary(conn, "CONV-0001")["audit_events"]
                 self.assertTrue(any(event["event"] == "agent_message_abandoned" for event in events))
 
-    def test_completed_or_failed_claims_are_not_rewritten_by_invalid_transitions(self):
+    def test_completed_or_failed_claims_reject_invalid_transitions(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             self.seed_conversation(db_file)
@@ -271,14 +272,16 @@ class OrchestrationHarnessTest(unittest.TestCase):
             with db_session(db_file) as conn:
                 claim_agent_message(conn, "merchant-agent", "CONV-0001", 1, "merchant-agent:1")
                 fail_agent_message(conn, "merchant-agent", 1, "temporary failure")
-                complete_after_failed = complete_agent_message(conn, "merchant-agent", 1)
+                # 已 settle（failed）的 claim 再 complete → ConflictError（不再静默）
+                with self.assertRaises(ConflictError):
+                    complete_agent_message(conn, "merchant-agent", 1)
                 retry = claim_agent_message(conn, "merchant-agent", "CONV-0001", 1, "merchant-agent:1")
                 complete_agent_message(conn, "merchant-agent", 1)
-                failed_after_processed = fail_agent_message(conn, "merchant-agent", 1, "late failure")
+                # 已 processed 的 claim 再 fail → ConflictError
+                with self.assertRaises(ConflictError):
+                    fail_agent_message(conn, "merchant-agent", 1, "late failure")
 
-                self.assertEqual(complete_after_failed["status"], "failed")
                 self.assertTrue(retry["claimed"])
-                self.assertEqual(failed_after_processed["status"], "processed")
 
                 process = conn.execute(
                     """
