@@ -16,10 +16,18 @@ from shopping_cli.listings.projection import list_publishable_listings
 
 
 def cmd_listing_projections_list(args: argparse.Namespace) -> None:
-    """预览可发布投影（只读；public-only，provenance 标注可见）。"""
+    """预览可发布投影（只读；public-only，provenance 标注可见）。
+
+    --format json 输出 ``{"ok": true, "results": [...]}`` 结构（kiwi
+    merchant publish 的发布编排读取此结构——v3.0 发布面剥离后 kiwi 直连
+    catalog，投影读取取代被移除的 publish-listings 命令）。
+    """
     db_path = db_path_from_args(args)
     with db_session(db_path) as conn:
         projections = list_publishable_listings(conn, merchant_id=str(args.merchant or "").strip())
+        if args.format == "json":
+            emit({"ok": True, "results": projections}, args.format)
+            return
         if not projections:
             emit("没有可发布的商品投影。", args.format)
             return
