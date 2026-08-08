@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -11,7 +12,38 @@ from urllib.parse import parse_qs
 
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.limits import max_request_body_bytes
-from shopping_cli.discovery.cache import compute_etag, etag_matches
+
+
+def compute_etag(content: str | bytes) -> str:
+    """Compute a strong ETag (quoted content hash) for an HTTP response body.
+
+    Same semantics as the discovery cache module used before v3.0 (the Agent
+    Catalog subsystem moved to the standalone kiwi-catalog service): the same
+    content always yields the same ETag, and the value is opaque to clients.
+    """
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    return f'"{hashlib.sha256(content).hexdigest()}"'
+
+
+def etag_matches(if_none_match: str, etag: str) -> bool:
+    """True when an ``If-None-Match`` header value matches *etag*.
+
+    Handles strong and weak ETags and the ``*`` wildcard.  The header is
+    untrusted request data; every comparison is against the server's own
+    computed *etag*, so a malformed header simply never matches.
+    """
+    expected = etag.strip('"')
+    for raw in if_none_match.split(","):
+        token = raw.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:].strip()
+        token = token.strip('"')
+        if token and token == expected:
+            return True
+    return False
 
 
 HandleRequest = Callable[[str | Path, str, str, dict[str, Any] | None, dict[str, Any] | None], tuple[int, dict[str, Any]]]

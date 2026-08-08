@@ -290,7 +290,7 @@ class DbSessionTest(unittest.TestCase):
 
             self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 18)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 19)
 
             # The installed index enforces uniqueness for new open reuse rows.
             with self.assertRaises(sqlite3.IntegrityError) as raised:
@@ -312,6 +312,35 @@ class DbSessionTest(unittest.TestCase):
             with db_session(db_file) as conn:
                 again = conn.execute("pragma user_version").fetchone()[0]
             self.assertEqual(again, CURRENT_SCHEMA_VERSION)
+
+    def test_v18_legacy_database_drops_catalog_tables_on_upgrade(self):
+        """A v3.0 upgrade of a pre-existing v18 database removes the Agent
+        Catalog / A2A / kiwi-catalog era tables while keeping core tables."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "legacy-v18.sqlite"
+            conn = sqlite3.connect(db_file)
+            try:
+                # 只预置 catalog-era 残留表（含用户数据）；核心表由 init_db
+                # 的 SCHEMA 全量重建（IF NOT EXISTS）。
+                conn.execute("create table catalog_agents (catalog_agent_id text primary key)")
+                conn.execute("create table listing_publications (listing_id text primary key)")
+                conn.execute("pragma user_version = 18")
+                conn.commit()
+            finally:
+                conn.close()
+
+            with db_session(db_file) as conn:
+                tables = {
+                    row[0]
+                    for row in conn.execute("select name from sqlite_master where type = 'table'")
+                }
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+
+            self.assertNotIn("catalog_agents", tables)
+            self.assertNotIn("listing_publications", tables)
+            self.assertIn("moderation_flags", tables)
+            self.assertIn("conversations", tables)
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ import sys
 from typing import Any
 
 from shopping_cli import VERSION
-from shopping_cli.adapters.shopping_legacy import import_json_store
 from shopping_cli.api.app import create_app
 from shopping_cli.cli_common import (
     db_path_from_args,
@@ -21,23 +20,6 @@ from shopping_cli.cli_common import (
     positive_int_at_most,
     positive_seconds,
     tcp_port,
-)
-from shopping_cli.cli_adapter_commands import (
-    cmd_adapter_doctor,
-    cmd_adapter_inspect,
-    cmd_adapter_install_command,
-)
-from shopping_cli.cli_agent_catalog_commands import (
-    cmd_agent_catalog_claim,
-    cmd_agent_catalog_doctor,
-    cmd_agent_catalog_get,
-    cmd_agent_catalog_refresh,
-    cmd_agent_catalog_register,
-    cmd_agent_catalog_reinstate,
-    cmd_agent_catalog_search,
-    cmd_agent_catalog_stats,
-    cmd_agent_catalog_suspend,
-    cmd_agent_catalog_verify,
 )
 from shopping_cli.cli_agent_commands import (
     cmd_agent_heartbeat,
@@ -85,12 +67,7 @@ from shopping_cli.cli_conversation_commands import (
     emit_conversation_table,
 )
 from shopping_cli.cli_erp_commands import cmd_erp_sync
-from shopping_cli.cli_listing_commands import (
-    cmd_listing_projections_list,
-    cmd_listing_publish_listings,
-    cmd_listing_withdraw,
-)
-from shopping_cli.cli_llm_commands import cmd_llm_run
+from shopping_cli.cli_listing_commands import cmd_listing_projections_list
 from shopping_cli.config import ConfigError, DEFAULT_DB_PATH, validate_production_config
 from shopping_cli.core.catalog import require_merchant
 from shopping_cli.core.conversations import merchant_conversations
@@ -103,12 +80,6 @@ from shopping_cli.core.conversations import (
 from shopping_cli.core.errors import ShoppingCliError
 from shopping_cli.core.harness import append_audit_event, next_actor_for_status
 from shopping_cli.db.session import db_session
-from shopping_cli.llm.runner import (
-    MAX_LLM_PROVIDER_RETRIES,
-    MAX_LLM_PROVIDER_RETRY_DELAY_SECONDS,
-    MAX_LLM_TOOL_CALL_BUDGET,
-    MAX_LLM_TOOL_LOOP_STEPS,
-)
 from shopping_cli.services import audit as audit_service
 from shopping_cli.services import human_review as human_review_service
 from shopping_cli.services import tokens as token_service
@@ -425,25 +396,6 @@ def cmd_audit_events(args: argparse.Namespace) -> None:
             )
         return
     emit({"ok": True, "merchant_id": args.merchant, "events": events}, args.format)
-
-
-def cmd_legacy_import(args: argparse.Namespace) -> None:
-    with db_session(db_path_from_args(args)) as conn:
-        result = import_json_store(conn, args.from_json)
-    if args.format == "text":
-        imported = result.get("imported") or {}
-        skipped = result.get("skipped") or {}
-        print("Legacy import complete.")
-        print(f"Merchants: {int(imported.get('merchants') or 0)}")
-        print(f"Products: {int(imported.get('products') or 0)}")
-        skipped_merchants = int(skipped.get("merchants") or 0)
-        skipped_products = int(skipped.get("products") or 0)
-        if skipped_merchants:
-            print(f"Skipped merchants: {skipped_merchants}")
-        if skipped_products:
-            print(f"Skipped products: {skipped_products}")
-        return
-    emit(result, args.format)
 
 
 def cmd_api_routes(args: argparse.Namespace) -> None:
@@ -849,76 +801,6 @@ def build_parser() -> argparse.ArgumentParser:
     agent_revoke_token.add_argument("--format", choices=["text", "json"], default="text")
     agent_revoke_token.set_defaults(func=cmd_agent_revoke_token)
 
-    # ── agent catalog ─────────────────────────────────────────────────────────
-    agent_catalog = agent_sub.add_parser("catalog", help="Search and inspect Commerce Agent Catalog entries")
-    agent_catalog_sub = agent_catalog.add_subparsers(dest="agent_catalog_command", required=True)
-    agent_catalog_search = agent_catalog_sub.add_parser("search", help="Search catalog agents")
-    agent_catalog_search.add_argument("--q", default="", help="Free-text search across display name and merchant name")
-    agent_catalog_search.add_argument("--category", default="", help="Filter by agent category")
-    agent_catalog_search.add_argument("--skill", default="", help="Filter by skill id or name")
-    agent_catalog_search.add_argument("--capability", default="", help="Filter by fully-qualified capability identifier")
-    agent_catalog_search.add_argument("--protocol", default="", help="Filter by protocol (e.g. a2a, ucp)")
-    agent_catalog_search.add_argument("--hosting-mode", default="", dest="hosting_mode", help="Filter by hosting mode (hosted, direct)")
-    agent_catalog_search.add_argument("--verification-status", default="", dest="verification_status", help="Filter by verification status")
-    agent_catalog_search.add_argument("--verified-after", default="", dest="verified_after", help="Only agents verified after this ISO-8601 timestamp")
-    agent_catalog_search.add_argument("--limit", type=positive_int, default=20, help="Max results (1-100)")
-    agent_catalog_search.add_argument("--cursor", default="", help="Pagination cursor from a previous search")
-    agent_catalog_search.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_search.set_defaults(func=cmd_agent_catalog_search)
-    agent_catalog_get = agent_catalog_sub.add_parser("get", help="Show one catalog agent by id")
-    agent_catalog_get.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_get.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_get.set_defaults(func=cmd_agent_catalog_get)
-    agent_catalog_register = agent_catalog_sub.add_parser("register", help="Register a self_registered catalog agent (§10.2)")
-    agent_catalog_register.add_argument("--domain", required=True, help="Canonical bare domain (e.g. merchant.example)")
-    agent_catalog_register.add_argument("--agent-card-url", default="", dest="agent_card_url", help="Optional public Agent Card URL")
-    agent_catalog_register.add_argument("--ucp-profile-url", default="", dest="ucp_profile_url", help="Optional public UCP Profile URL")
-    agent_catalog_register.add_argument("--merchant-id", default="", dest="merchant_id", help="Optional merchant binding")
-    agent_catalog_register.add_argument("--admin-token", default="", dest="admin_token", help="Admin token for audit actor resolution")
-    agent_catalog_register.add_argument("--merchant-token", default="", dest="merchant_token", help="Merchant token for audit actor resolution")
-    agent_catalog_register.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_register.set_defaults(func=cmd_agent_catalog_register)
-    agent_catalog_verify = agent_catalog_sub.add_parser("verify", help="Run the §6 verification ladder synchronously (§10.3)")
-    agent_catalog_verify.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_verify.add_argument("--force", action="store_true", help="Re-verify even when the profile cache is fresh")
-    agent_catalog_verify.add_argument("--admin-token", default="", dest="admin_token")
-    agent_catalog_verify.add_argument("--merchant-token", default="", dest="merchant_token")
-    agent_catalog_verify.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_verify.set_defaults(func=cmd_agent_catalog_verify)
-    agent_catalog_refresh = agent_catalog_sub.add_parser("refresh", help="Re-fetch profiles and re-run the full ladder (§10.3)")
-    agent_catalog_refresh.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_refresh.add_argument("--admin-token", default="", dest="admin_token")
-    agent_catalog_refresh.add_argument("--merchant-token", default="", dest="merchant_token")
-    agent_catalog_refresh.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_refresh.set_defaults(func=cmd_agent_catalog_refresh)
-    agent_catalog_claim = agent_catalog_sub.add_parser("claim", help="Claim ownership of a catalog agent (§10.4, §6.2)")
-    agent_catalog_claim.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_claim.add_argument("--merchant-id", required=True, dest="merchant_id", help="Merchant to claim the agent for")
-    agent_catalog_claim.add_argument("--admin-token", default="", dest="admin_token")
-    agent_catalog_claim.add_argument("--merchant-token", default="", dest="merchant_token")
-    agent_catalog_claim.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_claim.set_defaults(func=cmd_agent_catalog_claim)
-    agent_catalog_suspend = agent_catalog_sub.add_parser("suspend", help="Suspend a catalog agent (v3.0 moderation, §10.4 P2)")
-    agent_catalog_suspend.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_suspend.add_argument("--reason", default="", help="Optional suspension reason (recorded in §23 audit)")
-    agent_catalog_suspend.add_argument("--admin-token", default="", dest="admin_token")
-    agent_catalog_suspend.add_argument("--merchant-token", default="", dest="merchant_token")
-    agent_catalog_suspend.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_suspend.set_defaults(func=cmd_agent_catalog_suspend)
-    agent_catalog_reinstate = agent_catalog_sub.add_parser("reinstate", help="Reinstate a suspended catalog agent (v3.0 moderation, §10.4 P2)")
-    agent_catalog_reinstate.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
-    agent_catalog_reinstate.add_argument("--reason", default="", help="Optional reinstate reason (recorded in §23 audit)")
-    agent_catalog_reinstate.add_argument("--admin-token", default="", dest="admin_token")
-    agent_catalog_reinstate.add_argument("--merchant-token", default="", dest="merchant_token")
-    agent_catalog_reinstate.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_reinstate.set_defaults(func=cmd_agent_catalog_reinstate)
-    agent_catalog_stats = agent_catalog_sub.add_parser("stats", help="Local catalog metrics (§24)")
-    agent_catalog_stats.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_stats.set_defaults(func=cmd_agent_catalog_stats)
-    agent_catalog_doctor = agent_catalog_sub.add_parser("doctor", help="Local catalog health check (§24); exits 1 on issues")
-    agent_catalog_doctor.add_argument("--format", choices=["text", "json"], default="text")
-    agent_catalog_doctor.set_defaults(func=cmd_agent_catalog_doctor)
-
     human_review_cli = subparsers.add_parser("human-review", help="Review flagged conversations")
     human_review_sub = human_review_cli.add_subparsers(dest="human_review_command", required=True)
     human_review_queue = human_review_sub.add_parser("queue", help="List unresolved human-review flags")
@@ -952,63 +834,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit_events.add_argument("--format", choices=["text", "json"], default="text")
     audit_events.set_defaults(func=cmd_audit_events)
 
-    llm = subparsers.add_parser("llm", help="Run optional LLM marketplace tool loops")
-    llm_sub = llm.add_subparsers(dest="llm_command", required=True)
-    llm_run = llm_sub.add_parser("run", help="Run one scoped LLM marketplace tool loop")
-    llm_run.add_argument("--role", choices=["buyer", "merchant"], default="buyer")
-    llm_run.add_argument("--actor", required=True)
-    llm_run.add_argument("--text", required=True)
-    llm_run.add_argument("--conversation", default="")
-    llm_run.add_argument("--source-id", default="")
-    llm_run.add_argument("--host", default="shopping-cli")
-    llm_run.add_argument("--session-id", default="")
-    llm_run.add_argument("--api-url", default="", help="Run LLM tools through the marketplace API instead of direct SQLite")
-    llm_run.add_argument("--auth-token", default="", help="Bearer token for --api-url")
-    llm_run.add_argument(
-        "--token-scope",
-        choices=["buyer", "buyer_cli", "merchant", "merchant_agent", "local_trusted", "operator"],
-        default="",
-    )
-    llm_run.add_argument("--max-steps", type=positive_int_at_most(MAX_LLM_TOOL_LOOP_STEPS), default=4)
-    llm_run.add_argument("--max-tool-calls", type=non_negative_int_at_most(MAX_LLM_TOOL_CALL_BUDGET), default=None)
-    llm_run.add_argument("--provider-retries", type=non_negative_int_at_most(MAX_LLM_PROVIDER_RETRIES), default=0)
-    llm_run.add_argument(
-        "--provider-retry-delay-seconds",
-        type=non_negative_float_at_most(MAX_LLM_PROVIDER_RETRY_DELAY_SECONDS),
-        default=0.0,
-    )
-    llm_run.add_argument("--format", choices=["text", "json"], default="text")
-    llm_run.set_defaults(func=cmd_llm_run)
-
-    adapter = subparsers.add_parser("adapter", help="Inspect optional OpenClaw/Hermes adapters")
-    adapter_sub = adapter.add_subparsers(dest="adapter_command", required=True)
-    adapter_inspect = adapter_sub.add_parser("inspect", help="Inspect host adapter paths and commands")
-    adapter_inspect.add_argument("--host", required=True, choices=["openclaw", "hermes"])
-    adapter_inspect.add_argument("--project-root", default="")
-    adapter_inspect.add_argument("--skill-root", default="")
-    adapter_inspect.add_argument("--format", choices=["text", "json"], default="text")
-    adapter_inspect.set_defaults(func=cmd_adapter_inspect)
-    adapter_doctor = adapter_sub.add_parser("doctor", help="Report host adapter setup issues")
-    adapter_doctor.add_argument("--host", required=True, choices=["openclaw", "hermes"])
-    adapter_doctor.add_argument("--project-root", default="")
-    adapter_doctor.add_argument("--skill-root", default="")
-    adapter_doctor.add_argument("--format", choices=["text", "json"], default="text")
-    adapter_doctor.set_defaults(func=cmd_adapter_doctor)
-    adapter_install = adapter_sub.add_parser("install-command", help="Print the adapter install command")
-    adapter_install.add_argument("--host", required=True, choices=["openclaw", "hermes"])
-    adapter_install.add_argument("--project-root", default="")
-    adapter_install.add_argument("--dry-run", action="store_true")
-    adapter_install.add_argument("--force", action="store_true")
-    adapter_install.add_argument("--format", choices=["text", "json"], default="text")
-    adapter_install.set_defaults(func=cmd_adapter_install_command)
-
-    legacy = subparsers.add_parser("legacy", help="Import existing Shopping catalog data")
-    legacy_sub = legacy.add_subparsers(dest="legacy_command", required=True)
-    legacy_import = legacy_sub.add_parser("import", help="Import merchants and products from a legacy JSON store")
-    legacy_import.add_argument("--from-json", required=True)
-    legacy_import.add_argument("--format", choices=["text", "json"], default="text")
-    legacy_import.set_defaults(func=cmd_legacy_import)
-
     api = subparsers.add_parser("api", help="Inspect or run the marketplace API")
     api_sub = api.add_subparsers(dest="api_command", required=True)
     api_routes = api_sub.add_parser("routes", help="List marketplace API routes")
@@ -1031,28 +856,13 @@ def build_parser() -> argparse.ArgumentParser:
     erp_sync.add_argument("--format", choices=["text", "json"], default="text")
     erp_sync.set_defaults(func=cmd_erp_sync)
 
-    # ── listings（shopping-cli v0.3 §14-§16：PublicListingProjection + 发布）───
-    listings = subparsers.add_parser("listings", help="Product-first listing projection and publication")
+    # ── listings（shopping-cli v0.3 §14：PublicListingProjection 只读预览）───
+    listings = subparsers.add_parser("listings", help="Product-first listing projections (read-only preview)")
     listings_sub = listings.add_subparsers(dest="listings_command", required=True)
     listings_proj = listings_sub.add_parser("projections", help="Preview publishable projections (public-only)")
     listings_proj.add_argument("--merchant", default="", help="Filter by merchant id")
     listings_proj.add_argument("--format", choices=["text", "json"], default="text")
     listings_proj.set_defaults(func=cmd_listing_projections_list)
-    listings_publish = listings_sub.add_parser("publish-listings", help="Publish projections to kiwi-catalog (push-first)")
-    listings_publish.add_argument("--merchant", required=True, help="Merchant id (projection owner; 单 merchant 构造，必填)")
-    listings_publish.add_argument("--kiwi-catalog-url", default="", dest="kiwi_catalog_url", help="kiwi-catalog base URL (e.g. http://127.0.0.1:8600)")
-    listings_publish.add_argument("--owner-token-secret", default="", dest="owner_token_secret", help="KIWI_CATALOG_OWNER_TOKEN_SECRET value (或同名校验 env)")
-    listings_publish.add_argument("--owner-agent-id", default="", dest="owner_agent_id", help="Catalog agent id owning the listings (缺省取 merchant 的 catalog agent)")
-    listings_publish.add_argument("--format", choices=["text", "json"], default="text")
-    listings_publish.set_defaults(func=cmd_listing_publish_listings)
-    listings_withdraw = listings_sub.add_parser("withdraw", help="Withdraw one published listing")
-    listings_withdraw.add_argument("listing_id", help="kiwi-catalog listing id (lst_...)")
-    listings_withdraw.add_argument("--merchant", required=True, help="Merchant id (projection owner; 必填)")
-    listings_withdraw.add_argument("--kiwi-catalog-url", default="", dest="kiwi_catalog_url")
-    listings_withdraw.add_argument("--owner-token-secret", default="", dest="owner_token_secret")
-    listings_withdraw.add_argument("--owner-agent-id", default="", dest="owner_agent_id")
-    listings_withdraw.add_argument("--format", choices=["text", "json"], default="text")
-    listings_withdraw.set_defaults(func=cmd_listing_withdraw)
     return parser
 
 

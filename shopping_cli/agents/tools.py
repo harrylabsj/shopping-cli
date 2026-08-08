@@ -172,47 +172,6 @@ def record_heartbeat(
             replied_count,
         ),
     )
-    # ── Hosted → Catalog projection (§25 Phase 1) ──────────────────
-    # On first heartbeat, auto-register the hosted agent in the catalog.
-    # Ensures the catalog stays in sync without a separate registration step.
-    catalog_exists = conn.execute(
-        "select 1 from catalog_agents where hosted_runtime_agent_id = ? limit 1",
-        (agent_id,),
-    ).fetchone()
-    if was_new and catalog_exists is None:
-        try:
-            from shopping_cli.services.agent_catalog import ensure_hosted_catalog_agent as _ensure
-            merchant_name_row = conn.execute(
-                "select name from merchants where id = ?", (merchant_id,)
-            ).fetchone()
-            merchant_name = str(merchant_name_row["name"]) if merchant_name_row else merchant_id
-            _ensure(
-                conn,
-                agent_id=agent_id,
-                merchant_id=merchant_id,
-                merchant_name=merchant_name,
-                runtime_capabilities=capabilities,
-            )
-        except Exception as exc:
-            # Catalog registration is best-effort on heartbeat; a failure here
-            # must not break the heartbeat path.  The catalog entry can be
-            # created on the next heartbeat or via explicit registration.
-            # Never swallow silently — record the failure in the audit trail.
-            try:
-                from shopping_cli.agent_catalog.sqlite_repository import append_catalog_audit
-                append_catalog_audit(
-                    conn,
-                    catalog_agent_id="",
-                    actor="system",
-                    event="catalog_agent_registration_failed",
-                    details={
-                        "agent_id": agent_id,
-                        "merchant_id": merchant_id,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-            except Exception:
-                pass
     return {
         "id": agent_id,
         "type": "merchant",

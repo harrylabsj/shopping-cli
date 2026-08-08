@@ -1,6 +1,6 @@
 {
   "name": "shopping-cli",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Standalone SQLite-backed local commerce AI consultation marketplace runtime.",
   "files": [
     "agents/openai.yaml",
@@ -24,9 +24,7 @@
     "scripts/verify.sh",
     "buyer-demo.json",
     "clawhub.json",
-    "hermes-buyer.json",
     "marketplace.example.env",
-    "openclaw-seller.json",
     "pyproject.toml",
     "seller-demo.json",
     "SKILL.md"

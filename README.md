@@ -111,20 +111,6 @@ python3 scripts/shopping.py --db ./shopping-cli.sqlite channel ingest \
 The buyer id is always derived as `<channel>:<external-user>` for public channel ingress. Channel names are trimmed and lower-cased before buyer ids, metadata, and idempotency keys are written. Message payloads preserve `source_id`, `channel`, `external_user_id`, and optional `external_message_id`. When `external_message_id` is provided, retries with the same normalized `(channel, external_user_id, external_message_id)` return the original message or original no-match result instead of appending a duplicate or creating a later conversation from an old webhook retry. A stale `processing` ingress row older than five minutes is treated as abandoned so webhook delivery can recover after an interrupted attempt.
 The default `channel ingest` text output summarizes the derived buyer, idempotency state, conversation, message, routing status, and selected product; `--format json` preserves the full adapter payload.
 
-## Host Adapter Diagnostics
-
-OpenClaw and Hermes remain optional hosts. Use `adapter` diagnostics to inspect local setup before running demos:
-
-```bash
-python3 scripts/shopping.py adapter inspect --host openclaw --format json
-python3 scripts/shopping.py adapter doctor --host hermes --format json
-python3 scripts/shopping.py adapter install-command --host openclaw --dry-run --format json
-```
-
-`inspect` reports host command availability, project root validity, skill root status, symlink target, stale skill detection, DB path, and whether API bootstrap tokens are configured. `doctor` turns broken setup checks into actionable issues and reports missing API bootstrap tokens as warnings so local-only CLI usage is not blocked. Their default text output is meant for quick human setup checks, while `--format json` remains the stable adapter/script contract. `install-command` prints the install command without executing it.
-
-The API-backed host adapter E2E test proves the intended production boundary: Hermes creates the buyer consultation through the Marketplace API, OpenClaw runs the merchant agent through API-backed tools, and `shopping-cli` owns all commerce state, tokens, conversation routing, and audit events.
-
 ## Conversation CLI
 
 The raw conversation lifecycle is available without the API server:
@@ -208,7 +194,7 @@ python3 scripts/shopping.py --db ./shopping-cli.sqlite api routes
 python3 scripts/shopping.py --db ./shopping-cli.sqlite api routes --format json
 ```
 
-The default text output lists `METHOD /path` rows for quick inspection. The JSON output keeps a backward-compatible `routes` path list and also includes `route_details` with the HTTP methods available on each path. The local API covers catalog, search, conversations, message append/close, agent token issuance/listing/rotation/revocation, agent heartbeats, agent message claim/complete/fail/abandon, LLM tool-call audit records, merchant audit-event queries, and human-review queue/detail/resolve operations. In environments without FastAPI installed, `create_app()` still returns a lightweight ASGI app for local tests and demos.
+The default text output lists `METHOD /path` rows for quick inspection. The JSON output keeps a backward-compatible `routes` path list and also includes `route_details` with the HTTP methods available on each path. The local API covers catalog, search, conversations, message append/close, agent token issuance/listing/rotation/revocation, agent heartbeats, agent message claim/complete/fail/abandon, merchant audit-event queries, and human-review queue/detail/resolve operations. In environments without FastAPI installed, `create_app()` still returns a lightweight ASGI app for local tests and demos.
 
 External channel adapters can use `POST /channels/messages` with `channel`, `external_user_id`, `text`, and optional `conversation_id`, `city`, `area`, and `external_message_id`. API channel ingress requires `SHOPPING_CHANNEL_TOKENS` such as `telegram:secret,whatsapp:secret2`, or a global `SHOPPING_CHANNEL_TOKEN`; pass the matching token as `channel_token` or as a Bearer token. The optional `external_message_id` is an idempotency key for webhook retry safety, `channel` is normalized the same way as the CLI ingress path, and stale in-flight ingress claims are recoverable after five minutes.
 
@@ -231,30 +217,6 @@ shopping-cli is the authoritative Commerce Gateway for the frozen `shopping.nego
 - Frozen schemas ship in `shopping_cli/contracts/shopping.negotiation/0.1/` and cross-language fixtures in `fixtures/negotiation/` (validated by `tests/test_negotiation_contracts.py`), so the runtime never depends on a sibling Kiwi checkout.
 
 See `references/negotiation-api.md` for the full endpoint contract, policy-gate order, Kiwi integration flow, and known limitations.
-
-## Optional LLM Tool Loop
-
-`llm run` exposes the guarded OpenAI-compatible tool loop for local demos and host adapters:
-
-```bash
-export SHOPPING_LLM_API_KEY=...
-export SHOPPING_LLM_MODEL=gpt-4.1-mini
-python3 scripts/shopping.py --db ./shopping-cli.sqlite llm run --role buyer --actor alice --text "Find longjing near Hangzhou" --max-tool-calls 4 --provider-retries 1 --format json
-python3 scripts/shopping.py --db ./shopping-cli.sqlite llm run --role buyer --actor alice --conversation CONV-0001 --text "Continue this consultation" --max-tool-calls 4 --format json
-python3 scripts/shopping.py llm run --role buyer --actor alice --api-url http://127.0.0.1:8765 --auth-token "$SHOPPING_BUYER_TOKEN" --conversation CONV-0001 --text "Continue through API" --format json
-```
-
-Set `SHOPPING_LLM_BASE_URL`, `SHOPPING_LLM_MODEL`, `SHOPPING_LLM_TIMEOUT_SECONDS`, and `SHOPPING_LLM_MAX_TOKENS` to target another OpenAI-compatible provider. Add `--conversation` to inject owned conversation context into the prompt; buyer actors must own the buyer side and merchant actors must own the merchant side unless using a privileged local/operator scope. Add `--api-url --auth-token` to route LLM tools through the Marketplace API and its Bearer-token authorization boundary instead of direct SQLite access. API-backed LLM tool calls record `llm_tool_call` audit events with host, session, actor, token scope, tool, status, and error details. The default text output prints the final answer and a compact tool-result summary; `--format json` preserves the full messages and tool results. The runner enforces scoped marketplace tools, bounded provider retries, `max_steps`, and `max_tool_calls`; tool or provider failures return deterministic fallback content for human review.
-
-## Legacy Import
-
-Existing Shopping JSON catalogs can be imported:
-
-```bash
-python3 scripts/shopping.py --db ./shopping-cli.sqlite legacy import --from-json ./shopping.json --format json
-```
-
-Only merchants and products are imported. Legacy transaction data is ignored by design. Re-running the same import skips existing merchants by id and products by sku, then reports skipped counts instead of failing on duplicate rows. The default text output reports imported merchant/product counts; `--format json` keeps the structured import result.
 
 ## License
 

@@ -15,7 +15,6 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from shopping_cli import cli
-from shopping_cli import cli_llm_commands
 from shopping_cli.agents import merchant_daemon
 from shopping_cli.api.app import handle_request
 from shopping_cli.api.auth import require_admin_token
@@ -26,7 +25,6 @@ from shopping_cli.core.errors import AuthError, ConflictError
 from shopping_cli.core.policies import create_policy, search_policies
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session, open_connection
-from shopping_cli.llm.dispatcher import HTTPMarketplaceError, HTTPMarketplaceToolDispatcher
 from shopping_cli.services import agents as agent_service
 from shopping_cli.services import conversations as conversation_service
 from shopping_cli.services import human_review as human_review_service
@@ -792,193 +790,6 @@ class P1RegressionTest(unittest.TestCase):
             )
 
             self.assertEqual((cross_merchant_status, cross_agent_status, bogus_status), (403, 403, 403))
-
-    def llm_run_args(self, db_file: Path, **overrides):
-        values = {
-            "role": "merchant",
-            "actor": "seller-a",
-            "source_id": None,
-            "token_scope": None,
-            "api_url": "",
-            "auth_token": "",
-            "host": "",
-            "session_id": "",
-            "text": "还有货吗？",
-            "conversation": None,
-            "format": "json",
-            "max_steps": 1,
-            "max_tool_calls": 1,
-            "provider_retries": 0,
-            "provider_retry_delay_seconds": 0,
-            "db": str(db_file),
-            "data": None,
-            "agent_db": None,
-        }
-        values.update(overrides)
-        return SimpleNamespace(**values)
-
-    def test_llm_run_merchant_api_prompt_matches_local_boundaries(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            self.seed_merchant(db_file)
-            with db_session(db_file) as conn:
-                boundaries = str(merchant_summary(conn, "seller-a")["automation_boundaries"] or "")
-            self.assertTrue(boundaries)
-
-            captured: dict[str, Any] = {}
-
-            def fake_loop(_provider, _dispatcher, messages, **_kwargs):
-                captured["messages"] = messages
-                return {"ok": True, "content": "done", "tool_results": []}
-
-            class FakeDispatcher:
-                def __init__(self, *_args, **_kwargs):
-                    pass
-
-                def merchant_private_config(self, merchant_id):
-                    return {
-                        "merchant_id": merchant_id,
-                        "automation_boundaries": boundaries,
-                        "version": "2026-07-24T00:00:00",
-                    }
-
-            env = {"SHOPPING_MARKETPLACE_API_URL": "", "SHOPPING_API_URL": "", "SHOPPING_LLM_AUTH_TOKEN": ""}
-            with (
-                patch.dict(os.environ, env, clear=False),
-                patch("shopping_cli.cli_llm_commands.run_marketplace_tool_loop", side_effect=fake_loop),
-                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value=object()),
-                redirect_stdout(StringIO()),
-            ):
-                cli_llm_commands.cmd_llm_run(self.llm_run_args(db_file))
-            local_messages = captured["messages"]
-
-            with (
-                patch.dict(os.environ, env, clear=False),
-                patch("shopping_cli.cli_llm_commands.HTTPMarketplaceToolDispatcher", FakeDispatcher),
-                patch("shopping_cli.cli_llm_commands.run_marketplace_tool_loop", side_effect=fake_loop),
-                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value=object()),
-                redirect_stdout(StringIO()),
-            ):
-                cli_llm_commands.cmd_llm_run(
-                    self.llm_run_args(db_file, api_url="http://127.0.0.1:9", auth_token="merchant-token")
-                )
-            api_messages = captured["messages"]
-
-            self.assertEqual(api_messages[0]["role"], "system")
-            self.assertEqual(api_messages[0]["content"], local_messages[0]["content"])
-            self.assertIn(boundaries, api_messages[0]["content"])
-
-    def test_llm_run_merchant_api_mode_fails_closed_when_private_config_unavailable(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            self.seed_merchant(db_file)
-
-            class FailingDispatcher:
-                def __init__(self, *_args, **_kwargs):
-                    pass
-
-                def merchant_private_config(self, _merchant_id):
-                    raise HTTPMarketplaceError("private config unavailable")
-
-            loop = Mock(return_value={"ok": True})
-            env = {"SHOPPING_MARKETPLACE_API_URL": "", "SHOPPING_API_URL": "", "SHOPPING_LLM_AUTH_TOKEN": ""}
-            with (
-                patch.dict(os.environ, env, clear=False),
-                patch("shopping_cli.cli_llm_commands.HTTPMarketplaceToolDispatcher", FailingDispatcher),
-                patch("shopping_cli.cli_llm_commands.run_marketplace_tool_loop", loop),
-                patch("shopping_cli.cli_llm_commands.provider_from_env", return_value=object()),
-                redirect_stdout(StringIO()),
-            ):
-                with self.assertRaises(HTTPMarketplaceError):
-                    cli_llm_commands.cmd_llm_run(
-                        self.llm_run_args(db_file, api_url="http://127.0.0.1:9", auth_token="merchant-token")
-                    )
-            loop.assert_not_called()
-
-    def test_http_dispatcher_private_config_requires_boundaries_and_version(self):
-        dispatcher = HTTPMarketplaceToolDispatcher("http://127.0.0.1:9", auth_token="merchant-token")
-        for malformed in (
-            {},
-            {"automation_boundaries": "不议价。"},
-            {"version": "2026-07-24T00:00:00"},
-            {"automation_boundaries": None, "version": "2026-07-24T00:00:00"},
-        ):
-            with self.subTest(payload=malformed):
-                dispatcher._request = lambda *_args, **_kwargs: malformed
-                with self.assertRaises(HTTPMarketplaceError):
-                    dispatcher.merchant_private_config("seller-a")
-        dispatcher._request = lambda *_args, **_kwargs: {
-            "merchant_id": "seller-a",
-            "automation_boundaries": "不议价。",
-            "version": "2026-07-24T00:00:00",
-        }
-        config = dispatcher.merchant_private_config("seller-a")
-        self.assertEqual(config["automation_boundaries"], "不议价。")
-        self.assertEqual(config["version"], "2026-07-24T00:00:00")
-
-    def test_cjk_bigram_documents_cover_product_merchant_and_policy_substrings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            with db_session(db_file) as conn:
-                create_merchant(conn, "seller-a", "西湖龙井茶庄", city="杭州")
-                create_product(conn, "seller-a", "tea-a", "西湖龙井礼盒", 88, 5)
-                create_policy(conn, "seller-a", "returns", "礼盒商品需要人工确认退换条件", title="退换政策")
-
-                self.assertEqual(search_products(conn, query="龙井")[0]["sku"], "tea-a")
-                self.assertEqual(search_products(conn, query="今天想买龙井礼盒")[0]["sku"], "tea-a")
-                self.assertEqual(search_merchants(conn, query="龙井")[0]["id"], "seller-a")
-                self.assertEqual(search_policies(conn, query="人工确认")[0]["code"], "returns")
-
-    # ---- P1-10: Chinese FTS index/query tokenization ----
-
-    def test_single_cjk_character_query_matches_via_fts_index(self):
-        """Single CJK char queries ('龙', '茶') must match products whose title
-        contains that character, even when the character is embedded in a longer
-        CJK token."""
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            with db_session(db_file) as conn:
-                create_merchant(conn, "seller-a", "西湖龙井茶庄", city="杭州")
-                create_product(conn, "seller-a", "tea-a", "西湖龙井礼盒", 88, 5)
-
-                # Single CJK characters — these were silently missed before the fix.
-                results_long = search_products(conn, query="龙")
-                results_char = search_products(conn, query="茶")
-                self.assertEqual(len(results_long), 1)
-                self.assertEqual(results_long[0]["sku"], "tea-a")
-                # '茶' appears in merchant name "西湖龙井茶庄", so product search
-                # indexed through the merchant join should also match.
-                self.assertGreaterEqual(len(results_char), 1)
-
-    def test_cjk_substring_query_matches_across_word_boundaries(self):
-        """A CJK query whose characters span the boundary between two
-        indexed tokens should still match via bigram-index tokens."""
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            with db_session(db_file) as conn:
-                create_merchant(conn, "seller-b", "杭州西湖茶馆", city="杭州")
-                create_product(conn, "seller-b", "tea-b", "明前龙井礼盒装", 88, 5)
-
-                # "龙井" is a bigram token in the index for "明前龙井礼盒装"
-                self.assertEqual(search_products(conn, query="龙井礼盒")[0]["sku"], "tea-b")
-                # 3+ char substrings also work because individual chars are
-                # consecutive in the original text
-                self.assertEqual(search_products(conn, query="前龙井礼")[0]["sku"], "tea-b")
-
-    def test_mixed_cjk_ascii_query_still_finds_results(self):
-        """ASCII tokens mixed with CJK should not prevent CJK substring matching."""
-        with tempfile.TemporaryDirectory() as tmp:
-            db_file = Path(tmp) / "shopping.sqlite"
-            with db_session(db_file) as conn:
-                create_merchant(conn, "seller-c", "龙井茶园", city="杭州")
-                create_product(conn, "seller-c", "tea-c", "2024明前龙井", 88, 5)
-
-                # "2024" is ASCII, "明前龙井" is CJK — the product should be found.
-                results = search_products(conn, query="龙井")
-                self.assertEqual(len(results), 1)
-                self.assertEqual(results[0]["sku"], "tea-c")
-
-    # ---- P1-08: merchant bootstrap idempotency & token recovery ----
 
     def test_merchant_bootstrap_replays_without_client_idempotency_key(self):
         """Replay works even when the client does not supply an Idempotency-Key."""

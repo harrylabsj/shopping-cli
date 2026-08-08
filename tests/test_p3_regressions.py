@@ -5,30 +5,12 @@ from pathlib import Path
 from shopping_cli.agents.tools import HTTPMerchantAgentTools
 from shopping_cli.api.app import _ROUTE_TABLE
 from shopping_cli.api.route_registry import route_info
-from shopping_cli.llm.dispatcher import HTTPMarketplaceToolDispatcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class P3RegressionTest(unittest.TestCase):
-    def test_http_callers_share_the_same_transport_implementation(self):
-        def transport(*_args):
-            return {"ok": True}
-        merchant = HTTPMerchantAgentTools(
-            "http://127.0.0.1:8765",
-            "seller-a",
-            "merchant-token",
-            opener=lambda *_args, **_kwargs: None,
-        )
-        dispatcher = HTTPMarketplaceToolDispatcher(
-            "http://127.0.0.1:8765",
-            "buyer-token",
-            transport=transport,
-        )
-
-        self.assertEqual(type(merchant.http), type(dispatcher.http))
-
     def test_route_registry_derives_methods_from_executable_router(self):
         executable: dict[str, set[str]] = {}
         for entry in _ROUTE_TABLE:
