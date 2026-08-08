@@ -151,26 +151,37 @@ def _begin_channel_ingress(
         """,
         (channel, external_user_id, external_message_id),
     ).fetchone()
+    now = now_iso()
     if row is not None:
         if row["status"] == PROCESSING_STATUS and _processing_ingress_is_stale(row):
+            # 标记而非删除：保留审计痕迹；stale_at 非空后允许重处理覆盖
+            #（删除会让合法但缓慢的处理被重复执行）。
             conn.execute(
                 """
-                delete from channel_message_ingresses
+                update channel_message_ingresses
+                set stale_at = ?, updated_at = ?
                 where channel = ? and external_user_id = ? and external_message_id = ?
                 """,
-                (channel, external_user_id, external_message_id),
+                (now, now, channel, external_user_id, external_message_id),
             )
-        else:
+        elif not str(row["stale_at"] or ""):
             return _existing_ingress_response(conn, row, buyer_id, channel)
-    now = now_iso()
+        # stale_at 非空 → 落 INSERT ON CONFLICT 覆盖旧行（重处理幂等）
     try:
         conn.execute(
             """
             insert into channel_message_ingresses(
                 channel, external_user_id, external_message_id, status,
-                conversation_id, message_id, created_at, updated_at
+                conversation_id, message_id, stale_at, created_at, updated_at
             )
-            values (?, ?, ?, ?, '', 0, ?, ?)
+            values (?, ?, ?, ?, '', 0, '', ?, ?)
+            on conflict(channel, external_user_id, external_message_id) do update set
+                status = excluded.status,
+                conversation_id = excluded.conversation_id,
+                message_id = excluded.message_id,
+                stale_at = excluded.stale_at,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
             """,
             (channel, external_user_id, external_message_id, PROCESSING_STATUS, now, now),
         )

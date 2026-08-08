@@ -179,6 +179,10 @@ def replay_buyer_idempotency(
     return response_from_idempotency_row(conn, payload, row, ensure_buyer_token)
 
 
+# 幂等账本保留策略：completed 行超过该时长即清理（重试窗口远超此值）。
+_IDEMPOTENCY_LEDGER_RETENTION_DAYS = 30
+
+
 def claim_buyer_idempotency(
     conn: Any,
     payload: dict[str, Any],
@@ -191,6 +195,15 @@ def claim_buyer_idempotency(
 ) -> dict[str, Any] | None:
     if not idempotency_key:
         return None
+    # 顺带清理：completed 旧行保留 30 天，账本不会无限增长（processing 行
+    # 绝不清理——删掉会破坏幂等冲突语义）。
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_IDEMPOTENCY_LEDGER_RETENTION_DAYS)).isoformat()
+    conn.execute(
+        "delete from buyer_request_idempotency where status = 'completed' and updated_at < ?",
+        (cutoff,),
+    )
     current = now_iso()
     try:
         conn.execute(

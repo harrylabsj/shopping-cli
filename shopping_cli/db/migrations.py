@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 
 @dataclass(frozen=True)
@@ -367,6 +367,15 @@ def migration_020_buyer_ledger_buyer_dimension(conn: sqlite3.Connection) -> None
     conn.execute("alter table buyer_bootstrap_rate_limits_v20 rename to buyer_bootstrap_rate_limits")
 
 
+def migration_021_channel_ingress_stale_marker(conn: sqlite3.Connection) -> None:
+    """v3.0: channel ingress 的 stale 处理从"删除重处理"改为"标记 stale_at"。
+
+    删除会让合法但缓慢的处理（>300s）被重复执行（重复买家消息）；标记后
+    保留审计痕迹，且 stale_at 非空的行允许被后续重处理覆盖（幂等）。
+    """
+    ensure_column(conn, "channel_message_ingresses", "stale_at", "text not null default ''")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -381,6 +390,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(17, "product_provenance", migration_017_product_provenance),
     Migration(19, "remove_catalog_subsystem_tables", migration_019_remove_catalog_subsystem_tables),
     Migration(20, "buyer_ledger_buyer_dimension", migration_020_buyer_ledger_buyer_dimension),
+    Migration(21, "channel_ingress_stale_marker", migration_021_channel_ingress_stale_marker),
 )
 
 
@@ -389,5 +399,17 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     for migration in MIGRATIONS:
         if migration.version <= current_version:
             continue
-        migration.apply(conn)
-        _set_schema_user_version(conn, migration.version)
+        # SAVEPOINT 包裹：迁移中途崩溃不再留下"user_version 已推进但 DDL
+        # 缺失"的中间态（此前无事务，migration_009 的破坏性 dedup 与后续
+        # 索引创建之间崩溃会让库处于 fast-path 永不修复的状态）。SAVEPOINT
+        # 兼容调用方已有的隐式事务（显式 BEGIN 会冲突）。
+        savepoint = f"migrate_{migration.version}"
+        conn.execute(f"savepoint {savepoint}")
+        try:
+            migration.apply(conn)
+            _set_schema_user_version(conn, migration.version)
+            conn.execute(f"release {savepoint}")
+        except Exception:
+            conn.execute(f"rollback to {savepoint}")
+            conn.execute(f"release {savepoint}")
+            raise

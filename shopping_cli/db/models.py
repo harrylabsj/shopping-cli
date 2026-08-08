@@ -186,6 +186,7 @@ SCHEMA = [
         conversation_id text not null default '',
         message_id integer not null default 0,
         status text not null,
+        stale_at text not null default '',
         created_at text not null,
         updated_at text not null,
         primary key (channel, external_user_id, external_message_id)

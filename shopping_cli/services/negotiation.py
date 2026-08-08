@@ -37,7 +37,7 @@ from shopping_cli.core.harness import (
     fail_agent_message,
 )
 from shopping_cli.core.policies import list_policies
-from shopping_cli.db.session import now_iso
+from shopping_cli.db.session import decode_json, now_iso
 from shopping_cli.services import tokens as token_service
 from shopping_cli.services.conversations import append_conversation_closed_audit
 
@@ -699,14 +699,22 @@ def _find_decision_replay(
     conversation_id: str,
     idempotency_key: str,
 ) -> dict[str, Any] | None:
-    for message in conversation_messages(conn, conversation_id):
-        payload = message.get("structured_payload") or {}
+    # 反向扫描最近 100 条：replay 目标恒是刚写入的 decision 消息（幂等
+    # 重试发生在提交后不久），首次命中即返回——避免每次 submit 全量
+    # 扫描会话（O(n)，长会话下每次决策都拖慢）。
+    rows = conn.execute(
+        "select id, structured_payload_json from messages "
+        "where conversation_id = ? order by id desc limit 100",
+        (conversation_id,),
+    ).fetchall()
+    for row in rows:
+        payload = decode_json(row["structured_payload_json"], {})
         if (
             payload.get("protocol_version") == protocol.PROTOCOL_VERSION
             and payload.get("idempotency_key") == idempotency_key
             and payload.get("agent_id") == actor.agent_id
         ):
-            return {"message_id": int(message["id"]), "decision": payload.get("decision")}
+            return {"message_id": int(row["id"]), "decision": payload.get("decision")}
     return None
 
 
@@ -785,6 +793,12 @@ def submit_decision(
     _require_own_turn(conversation, actor)
     message_id = int(decision["in_reply_to_message_id"])
     _require_counterpart_message(conn, actor, conversation_id, message_id)
+    # 决策提交时对端消息必须仍是最新——claim 之后到达的新买家消息会使
+    # 本决策回答旧问题（跨消息跳答）。拦截后客户端重 claim 最新消息即可；
+    # 幂等 replay 在回合检查之前，不受影响。
+    latest = _latest_counterpart_message(conn, conversation_id, actor.role)
+    if latest is None or int(latest["id"]) != message_id:
+        raise ConflictError(f"Message {message_id} is no longer the latest counterpart message")
     process = _require_active_claim(conn, actor, conversation_id, message_id)
 
     gate = (

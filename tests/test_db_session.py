@@ -290,7 +290,7 @@ class DbSessionTest(unittest.TestCase):
 
             self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 20)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 21)
 
             # The installed index enforces uniqueness for new open reuse rows.
             with self.assertRaises(sqlite3.IntegrityError) as raised:
@@ -341,6 +341,34 @@ class DbSessionTest(unittest.TestCase):
             self.assertIn("moderation_flags", tables)
             self.assertIn("conversations", tables)
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
+
+    def test_failed_migration_rolls_back_without_advancing_user_version(self):
+        """迁移在 SAVEPOINT 内执行——中途失败回滚，user_version 不推进。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "rollback.sqlite"
+            with db_session(db_file):
+                pass
+            # 模拟"还有待应用迁移"的库：user_version 降到 CURRENT-1
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute(f"pragma user_version = {CURRENT_SCHEMA_VERSION - 1}")
+                conn.commit()
+
+            def boom(_conn):
+                raise RuntimeError("migration failed")
+
+            with patch.object(
+                migrations_module,
+                "MIGRATIONS",
+                (migrations_module.Migration(CURRENT_SCHEMA_VERSION, "boom", boom),),
+            ):
+                with self.assertRaises(RuntimeError):
+                    with db_session(db_file):
+                        pass
+
+            with closing(sqlite3.connect(db_file)) as conn:
+                user_version = conn.execute("pragma user_version").fetchone()[0]
+            # 失败迁移未推进版本——重跑仍会尝试（可修复后重试）
+            self.assertEqual(user_version, CURRENT_SCHEMA_VERSION - 1)
 
 
 if __name__ == "__main__":

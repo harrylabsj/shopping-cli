@@ -369,6 +369,17 @@ def sync_erp_products(
                     )
                     report.skipped += 1
                     continue
+                # 新行归属校验：feed 指定的 merchant 必须真实存在（否则
+                # FK 违反会以裸 IntegrityError 中止整个同步）。
+                merchant_exists = conn.execute(
+                    "select 1 from merchants where id = ?", (merchant_id,)
+                ).fetchone()
+                if merchant_exists is None:
+                    report.errors.append(
+                        f"sku {sku}: unknown merchant {merchant_id!r}; skipped"
+                    )
+                    report.skipped += 1
+                    continue
             elif existing[0] == SOURCE_LOCAL:
                 report.conflicts.append({"sku": sku, "reason": "local authoritative row"})
                 report.skipped += 1
