@@ -66,15 +66,3 @@ Use `conversation create/show/list/message/close/human-review/resolve-review` wh
 
 Mark the conversation `human_required` for private discounts, bargaining, unclear product references, binding commitments, stock reservation, order confirmation, payment evidence, refunds, disputes, or unsupported promises.
 
-## Legacy Import
-
-Use `legacy import --from-json PATH` to import merchants and products from the older Shopping JSON store. Legacy transaction records are intentionally ignored.
-
-## Verification
-
-Before claiming the package is ready, use Python >=3.11:
-
-- `$PY scripts/shopping.py --help`
-- `$PY -m unittest discover -s tests`
-- `node --test tests/shopping_plugin.test.mjs`
-- `bash scripts/verify.sh`

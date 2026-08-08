@@ -22,6 +22,7 @@ services:
       SHOPPING_ADMIN_TOKEN: "${SHOPPING_ADMIN_TOKEN:?set SHOPPING_ADMIN_TOKEN before starting shopping-api}"
       SHOPPING_BUYER_BOOTSTRAP_TOKEN: "${SHOPPING_BUYER_BOOTSTRAP_TOKEN:?set SHOPPING_BUYER_BOOTSTRAP_TOKEN before starting shopping-api}"
       SHOPPING_CHANNEL_TOKENS: "${SHOPPING_CHANNEL_TOKENS:-}"
+      SHOPPING_BUYER_TOKEN_SECRET: "${SHOPPING_BUYER_TOKEN_SECRET:-}"
     volumes:
       - shopping_cli_api_data:/data
     healthcheck:

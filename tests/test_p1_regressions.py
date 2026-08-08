@@ -791,6 +791,29 @@ class P1RegressionTest(unittest.TestCase):
 
             self.assertEqual((cross_merchant_status, cross_agent_status, bogus_status), (403, 403, 403))
 
+    def test_conversation_summary_strips_private_merchant_fields(self):
+        """H2: 买家可见的会话响应不得含 contact / automation_boundaries。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(
+                    conn,
+                    "seller-a",
+                    "西湖龙井茶庄",
+                    city="杭州",
+                    contact="wechat:westlake",
+                    automation_boundaries='{"floor": 9.5}',
+                )
+                create_product(conn, "seller-a", "tea-a", "西湖龙井礼盒", 88, 5)
+                conversation = ensure_conversation(conn, "alice", "seller-a", "tea-a")
+                summary = conversation_summary(conn, conversation["id"])
+            product_merchant = summary["product"]["merchant"]
+            self.assertNotIn("automation_boundaries", product_merchant)
+            self.assertNotIn("contact", product_merchant)
+            # 商品投影本身仍保留（商家名/配送等公开信息）
+            self.assertEqual(product_merchant["name"], "西湖龙井茶庄")
+            self.assertEqual(summary["product"]["price"], 88)
+
     def test_merchant_bootstrap_replays_without_client_idempotency_key(self):
         """Replay works even when the client does not supply an Idempotency-Key."""
         with tempfile.TemporaryDirectory() as tmp:

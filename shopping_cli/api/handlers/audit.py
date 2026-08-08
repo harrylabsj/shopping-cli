@@ -56,7 +56,7 @@ def record_tool_call_audit(db_path: str | Path, payload: dict[str, Any]) -> dict
             conn,
             conversation_id,
             actor,
-            "llm_tool_call",
+            "agent_tool_call",
             {
                 "tool": str(payload.get("tool") or ""),
                 "status": str(payload.get("status") or ""),

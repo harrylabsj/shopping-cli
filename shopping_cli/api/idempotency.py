@@ -1,4 +1,4 @@
-"""Buyer bootstrap and Agent Catalog write idempotency and rate-limit helpers."""
+"""Buyer bootstrap idempotency and rate-limit helpers."""
 
 from __future__ import annotations
 
@@ -9,10 +9,6 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from shopping_cli.api.auth import (
-    payload_buyer_bootstrap_token,
-    payload_token,
-)
 from shopping_cli.core.errors import IdempotencyConflict, RateLimitError, ValidationError
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import decode_json, encode_json, now_iso
@@ -69,7 +65,17 @@ def deterministic_buyer_token(
     buyer_id: str,
     conversation_id: str,
 ) -> str:
-    secret = payload_buyer_bootstrap_token(payload)
+    """派生幂等回放用的 per-conversation buyer token（H6）。
+
+    密钥是服务器端秘密（``SHOPPING_BUYER_TOKEN_SECRET`` env 或
+    state_dir/buyer_token_secret 文件）——绝不使用请求体内携带的共享
+    bootstrap token：它是 in-band 的，任何持有者都能算出任意
+    (buyer_id, conversation_id) 的 token（会话 id 顺序可枚举）。
+    *payload* 参数仅为兼容旧签名保留，不再参与密钥派生。
+    """
+    from shopping_cli.config import buyer_token_secret
+
+    secret = buyer_token_secret()
     material = f"{endpoint}\n{idempotency_key}\n{buyer_id}\n{conversation_id}"
     digest = hmac.new(secret.encode("utf-8"), material.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"shopping_buyer_{digest}"

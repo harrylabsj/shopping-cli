@@ -31,6 +31,12 @@ def _fake_fetch(url: str, auth_token: str = "", timeout_seconds: int = 15) -> tu
 
 class ErpSyncCliTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.resolver = mock.patch(
+            "shopping_cli.data_sources.erp_source._resolve_verified_host",
+            return_value="203.0.113.1",
+        )
+        self.resolver.start()
+        self.addCleanup(self.resolver.stop)
         self.tmp = tempfile.mkdtemp()
         self.db_file = Path(self.tmp) / "shop.sqlite"
         with db_session(self.db_file) as conn:
@@ -98,6 +104,12 @@ class ErpSyncCliTest(unittest.TestCase):
 
 class ErpSyncApiTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.resolver = mock.patch(
+            "shopping_cli.data_sources.erp_source._resolve_verified_host",
+            return_value="203.0.113.1",
+        )
+        self.resolver.start()
+        self.addCleanup(self.resolver.stop)
         self.tmp = tempfile.mkdtemp()
         self.db_file = Path(self.tmp) / "marketplace.sqlite"
         with db_session(self.db_file) as conn:

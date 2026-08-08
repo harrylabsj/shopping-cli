@@ -9,7 +9,7 @@ from shopping_cli.api import auth as api_auth
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT, positive_whole_int, result_limit, result_offset
 from shopping_cli.core.conversations import add_flag, append_message, conversation_summary
 from shopping_cli.core.errors import AuthError, ConflictError, NotFoundError
-from shopping_cli.core.harness import append_audit_event, next_actor_for_status
+from shopping_cli.core.harness import append_audit_event, next_actor_for_review_reason, next_actor_for_status
 from shopping_cli.db.session import db_session, now_iso
 from shopping_cli.services import conversations as conversation_service
 from shopping_cli.services import human_review as human_review_service
@@ -111,6 +111,27 @@ def create_human_review(db_path: str | Path, conversation_id: str, payload: dict
         }
 
 
+def _require_resolver_identity(
+    conn: Any,
+    conversation: dict[str, Any],
+    reasons: list[str],
+    payload: dict[str, Any],
+) -> str:
+    """H7: operator 路由的 flag（suspicious_content）只能由 admin 身份销案。
+
+    merchant 是"被审查方"——用自家 merchant token 自销 operator 仲裁的
+    flag 会完全绕过人工审查控制。普通 flag 仍走 merchant token。
+    返回解析者 actor 标识。
+    """
+    if any(
+        next_actor_for_review_reason(str(reason or "")) == "operator" for reason in reasons
+    ):
+        api_auth.require_admin_token(payload)
+        return "admin"
+    token_row = token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
+    return str(token_row["agent_id"] or token_row["merchant_id"]) if token_row is not None else conversation["merchant_id"]
+
+
 def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload: dict[str, Any]) -> dict[str, Any]:
     action = human_review_service.validate_action(str(payload.get("action") or "reply"))
     sender = human_review_sender(payload)
@@ -120,8 +141,7 @@ def resolve_human_review_item(db_path: str | Path, review_id: str | int, payload
             raise ConflictError(f"Human review already resolved: {review_id}")
         conversation_id = row["conversation_id"]
         conversation = conversation_summary(conn, conversation_id)
-        token_row = token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
-        actor = str(token_row["agent_id"] or token_row["merchant_id"]) if token_row is not None else conversation["merchant_id"]
+        actor = _require_resolver_identity(conn, conversation, [str(row["reason"] or "")], payload)
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()
@@ -204,8 +224,12 @@ def resolve_human_review(db_path: str | Path, conversation_id: str, payload: dic
     status = "closed" if action == "close" else "waiting_buyer"
     with db_session(db_path) as conn:
         conversation = conversation_summary(conn, conversation_id)
-        token_row = token_service.require_merchant_token(conn, conversation["merchant_id"], _payload_token(payload))
-        actor = str(token_row["agent_id"] or token_row["merchant_id"]) if token_row is not None else conversation["merchant_id"]
+        unresolved_reasons = [
+            str(r["reason"] or "")
+            for r in human_review_service.list_conversation_reviews(conn, conversation_id)
+            if not str(r["resolved_at"] or "")
+        ]
+        actor = _require_resolver_identity(conn, conversation, unresolved_reasons, payload)
         if conversation["status"] == "closed":
             raise ConflictError(f"Conversation {conversation_id} is closed")
         now = now_iso()

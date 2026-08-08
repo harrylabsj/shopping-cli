@@ -10,6 +10,7 @@ creates orders, payments or inventory reservations.
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -595,6 +596,12 @@ def _check_proposal_facts(
     return _ACCEPT
 
 
+def _normalize_digits(text: str) -> str:
+    """全角→半角数字并去掉空白/千分位分隔符，供底价匹配使用。"""
+    table = str.maketrans("０１２３４５６７８９．", "0123456789.")
+    return re.sub(r"[\s,，]", "", text.translate(table))
+
+
 def _leaks_private_threshold(public_message: str, floor_str: str) -> bool:
     try:
         floor_value = float(floor_str)
@@ -603,10 +610,14 @@ def _leaks_private_threshold(public_message: str, floor_str: str) -> bool:
     candidates = {floor_str, f"{floor_value:.2f}"}
     if floor_value.is_integer():
         candidates.add(str(int(floor_value)))
+    normalized_candidates = {_normalize_digits(c) for c in candidates}
     lowered = public_message.lower()
     if not any(term in lowered or term in public_message for term in _THRESHOLD_TERMS):
         return False
-    return any(candidate in public_message for candidate in candidates)
+    normalized_message = _normalize_digits(public_message)
+    return any(c in public_message for c in candidates) or any(
+        n in normalized_message for n in normalized_candidates
+    )
 
 
 def _merchant_gate(
@@ -617,6 +628,12 @@ def _merchant_gate(
     proposal = decision.get("proposal")
     if decision["action"] in {"propose", "counter"} and proposal is None:
         return _reject("missing_proposal", "propose/counter 必须携带结构化 proposal。")
+    product = product_summary(conn, str(conversation["sku"]))
+    floor_str = merchant_agent._authorized_bargain_amount(product)
+    # 泄漏守卫对每个 merchant 决策运行——ask/decline 等无 proposal 的决策
+    # 也可能携带泄露底价的 public_message（此前该分支直接放行）。
+    if floor_str and _leaks_private_threshold(str(decision.get("public_message") or ""), floor_str):
+        return _human("private_threshold_leak", "公开消息可能泄露商家私有价格边界，需要人工处理。")
     if proposal is None:
         return _ACCEPT
     facts = _check_proposal_facts(conn, conversation, proposal)
@@ -627,14 +644,10 @@ def _merchant_gate(
     age = (datetime.now(timezone.utc) - observed_at).total_seconds()
     if age > protocol.STOCK_OBSERVATION_MAX_AGE_SECONDS or age < -60:
         return _reject("stale_inventory", "库存观察时间已过期，请重新获取快照后再报价。")
-    product = product_summary(conn, str(conversation["sku"]))
     unit_price = float(proposal["unit_price"])
-    floor_str = merchant_agent._authorized_bargain_amount(product)
     if floor_str:
         if unit_price < float(floor_str):
             return _human("below_floor", "报价低于商家授权的自动磋商范围，需要人工处理。")
-        if _leaks_private_threshold(str(decision["public_message"]), floor_str):
-            return _human("private_threshold_leak", "公开消息可能泄露商家私有价格边界，需要人工处理。")
     elif unit_price < float(product["price"]):
         return _human("unauthorized_discount", "该折扣没有商家授权规则，需要人工处理。")
     return _ACCEPT
