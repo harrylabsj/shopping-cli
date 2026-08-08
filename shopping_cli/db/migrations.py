@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 
 
 @dataclass(frozen=True)
@@ -242,241 +242,6 @@ def migration_009_unique_open_reuse_key(conn: sqlite3.Connection) -> None:
     )
 
 
-_AGENT_CATALOG_DDL = [
-    """
-    create table if not exists catalog_agents (
-        catalog_agent_id text primary key,
-        merchant_id text,
-        hosted_runtime_agent_id text,
-        display_name text not null,
-        provider_name text not null default '',
-        canonical_domain text not null default '',
-        agent_type text not null default '',
-        source_type text not null
-            check(source_type in ('hosted','self_registered','discovered','imported','admin_curated')),
-        lifecycle_status text not null default 'active'
-            check(lifecycle_status in ('active','inactive','deprecated')),
-        verification_status text not null default 'discovered'
-            check(verification_status in (
-                'discovered','profile_valid','domain_verified','agent_verified',
-                'commerce_verified','stale','rejected','suspended','unreachable'
-            )),
-        hosting_mode text not null default 'unknown'
-            check(hosting_mode in ('direct','hosted','hybrid','unknown')),
-        first_seen_at text not null,
-        last_seen_at text not null,
-        last_verified_at text not null default '',
-        created_at text not null,
-        updated_at text not null,
-        foreign key (merchant_id) references merchants(id),
-        foreign key (hosted_runtime_agent_id) references agents(id)
-    )
-    """,
-    """
-    create table if not exists agent_endpoints (
-        endpoint_id integer primary key autoincrement,
-        catalog_agent_id text not null,
-        kind text not null check(kind in ('a2a','agent_card','ucp_profile','hosted_gateway')),
-        url text not null default '',
-        protocol text not null default '',
-        protocol_version text not null default '',
-        preference integer not null default 0,
-        auth_summary_json text not null default '{}',
-        status text not null default 'active',
-        last_checked_at text not null default '',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-    """,
-    """
-    create table if not exists agent_capabilities (
-        catalog_agent_id text not null,
-        namespace text not null,
-        capability_id text not null,
-        version text not null default '',
-        required integer not null default 0,
-        source text not null default '',
-        schema_url text not null default '',
-        spec_url text not null default '',
-        last_verified_at text not null default '',
-        primary key (catalog_agent_id, namespace, capability_id),
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-    """,
-    """
-    create table if not exists agent_skills (
-        catalog_agent_id text not null,
-        skill_id text not null,
-        name text not null,
-        description text not null default '',
-        tags_json text not null default '[]',
-        input_modes_json text not null default '[]',
-        output_modes_json text not null default '[]',
-        primary key (catalog_agent_id, skill_id),
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-    """,
-    """
-    create table if not exists agent_profile_snapshots (
-        snapshot_id integer primary key autoincrement,
-        catalog_agent_id text not null,
-        profile_type text not null check(profile_type in ('agent_card','ucp')),
-        source_url text not null default '',
-        etag text not null default '',
-        last_modified text not null default '',
-        content_hash text not null default '',
-        raw_json text not null default '{}',
-        fetched_at text not null default '',
-        fresh_until text not null default '',
-        validation_status text not null default 'pending',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-    """,
-    """
-    create table if not exists agent_verifications (
-        verification_id integer primary key autoincrement,
-        catalog_agent_id text not null,
-        verification_type text not null,
-        result text not null default '',
-        evidence_json text not null default '{}',
-        checked_at text not null default '',
-        expires_at text not null default '',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-    """,
-]
-
-
-def migration_010_agent_catalog(conn: sqlite3.Connection) -> None:
-    for statement in _AGENT_CATALOG_DDL:
-        conn.execute(statement)
-
-
-def migration_011_agent_catalog_register_limits(conn: sqlite3.Connection) -> None:
-    """Per-domain registration budget (§17.4) for the public register route."""
-    conn.execute(
-        """
-        create table if not exists agent_catalog_register_limits (
-            canonical_domain text not null,
-            window_start text not null,
-            request_count integer not null default 0,
-            updated_at text not null,
-            primary key (canonical_domain, window_start)
-        )
-        """
-    )
-
-
-def migration_012_agent_catalog_write_idempotency(conn: sqlite3.Connection) -> None:
-    """Generic idempotency + rate-limit tables for Agent Catalog writes (§10.4)."""
-    conn.execute(
-        """
-        create table if not exists agent_catalog_write_idempotency (
-            endpoint text not null,
-            actor_key text not null,
-            idempotency_key text not null,
-            request_hash text not null,
-            status text not null,
-            response_json text not null default '{}',
-            created_at text not null,
-            updated_at text not null,
-            primary key (endpoint, actor_key, idempotency_key)
-        )
-        """
-    )
-    conn.execute(
-        """
-        create table if not exists agent_catalog_write_rate_limits (
-            actor_key text not null,
-            window_start text not null,
-            request_count integer not null default 0,
-            updated_at text not null,
-            primary key (actor_key, window_start)
-        )
-        """
-    )
-
-
-_AGENT_TRUST_OBSERVATIONS_DDL = """
-    create table if not exists agent_trust_observations (
-        observation_id integer primary key autoincrement,
-        catalog_agent_id text not null,
-        kind text not null
-            check(kind in (
-                'protocol_compliance','timeout_rate','schema_error_rate',
-                'successful_exchange','local_asserted_dispute'
-            )),
-        value real not null,
-        source text not null default '',
-        evidence_ref text not null default '',
-        observed_at text not null,
-        expires_at text not null default '',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
-"""
-
-
-def migration_013_agent_trust_observations(conn: sqlite3.Connection) -> None:
-    """Add the §5.7 private-only ``agent_trust_observations`` table (v2.2 / Phase 2).
-
-    Commercial reputation and protocol trust live in this table and are
-    deliberately kept separate from public verification metadata.  Observations
-    are private-only by default: no public serializer, search response, or any
-    public API output may expose them (§5.7, §3.4).
-    """
-    conn.execute(_AGENT_TRUST_OBSERVATIONS_DDL)
-
-
-_A2A_INBOUND_IDEMPOTENCY_DDL = """
-    create table if not exists a2a_inbound_idempotency (
-        sender_identity text not null,
-        message_id text not null,
-        digest text not null,
-        status text not null default 'processing',
-        response_json text not null default '{}',
-        created_at text not null,
-        updated_at text not null,
-        primary key (sender_identity, message_id)
-    )
-"""
-
-
-def migration_014_a2a_inbound_idempotency(conn: sqlite3.Connection) -> None:
-    """Add the Hosted A2A inbound idempotency ledger (v2.4-W3, binding rc1 §3.6).
-
-    ``(sender_identity, message_id)`` is the authoritative KNP idempotency key
-    (D8): same id + same digest replays the stored response, same id +
-    different digest fails closed as ``idempotency_conflict``.  The response
-    snapshot holds the JSON-RPC ``{"result": ...}`` / ``{"error": ...}`` part
-    so a replay can rebuild the identical response for the current request id.
-    """
-    conn.execute(_A2A_INBOUND_IDEMPOTENCY_DDL)
-
-
-_VERIFICATION_QUEUE_TASKS_DDL = """
-    create table if not exists verification_queue_tasks (
-        task_id text primary key,
-        catalog_agent_id text not null,
-        kind text not null,
-        actor text not null default 'verification_worker',
-        status text not null default 'pending'
-            check (status in ('pending','running','completed','failed','timeout')),
-        enqueued_at real not null,
-        started_at real not null default 0,
-        finished_at real not null default 0,
-        verification_status text not null default '',
-        error text not null default '',
-        result_json text not null default '{}',
-        created_at text not null,
-        updated_at text not null
-    );
-"""
-
-_VERIFICATION_QUEUE_RECOVERY_INDEX_DDL = """
-    create index if not exists idx_verification_queue_recovery
-        on verification_queue_tasks(status)
-"""
-
-
 def migration_016_product_source_column(conn: sqlite3.Connection) -> None:
     """products.source —— 数据来源标注（shopping-cli data hub v0.2.1 §5）。
 
@@ -509,43 +274,33 @@ def migration_017_product_provenance(conn: sqlite3.Connection) -> None:
             conn.execute(f"alter table products add column {name} {ddl}")
 
 
-def migration_018_listing_publications(conn: sqlite3.Connection) -> None:
-    """本地发布镜像表（shopping-cli v0.3 DoD #4/#5）。
+_CATALOG_ERA_TABLES = (
+    "catalog_agents",
+    "agent_endpoints",
+    "agent_capabilities",
+    "agent_skills",
+    "agent_profile_snapshots",
+    "agent_verifications",
+    "agent_catalog_register_limits",
+    "agent_catalog_write_idempotency",
+    "agent_catalog_write_rate_limits",
+    "agent_trust_observations",
+    "a2a_inbound_idempotency",
+    "verification_queue_tasks",
+    "listing_publications",
+)
 
-    listing_publications 记录已发布到 kiwi-catalog 的 projection：digest 去重
-    （同内容不重复发布）、products.active=0 → withdraw 的 reconcile 锚点。
+
+def migration_019_remove_catalog_subsystem_tables(conn: sqlite3.Connection) -> None:
+    """v3.0: drop the Agent Catalog / A2A / kiwi-catalog era tables.
+
+    The Discovery/A2A/Agent-Catalog/kiwi-catalog subsystems moved to the
+    standalone kiwi-catalog service.  Fresh databases never create these
+    tables (the SCHEMA list dropped them), so this migration is a no-op
+    there; legacy v18 databases get the orphaned tables removed.
     """
-    conn.execute(
-        """
-        create table if not exists listing_publications (
-            id integer primary key autoincrement,
-            listing_id text not null,
-            merchant_id text not null,
-            source_key text not null,
-            source_revision text not null default '',
-            digest text not null,
-            publication_state text not null default 'ACTIVE',
-            published_at text not null,
-            updated_at text not null,
-            unique (merchant_id, source_key)
-        )
-        """
-    )
-
-
-def migration_015_verification_queue_tasks(conn: sqlite3.Connection) -> None:
-    """Add the persistent verification queue ledger (v3.0-P4, §25 Phase 2).
-
-    The in-process queue writes through to this table so tasks survive a
-    process restart: ``pending`` / ``running`` rows are recovered into a new
-    queue instance on startup (verification tasks are idempotent — refresh /
-    verify / mark_stale / suspend are safe to re-run).  ``result_json`` holds
-    a serialized :class:`VerificationResult` so a restarted queue can rebuild
-    the outcome for ``wait()``.  Terminal rows (completed / failed / timeout)
-    are kept as an audit trail; only pending / running are recovered.
-    """
-    conn.execute(_VERIFICATION_QUEUE_TASKS_DDL)
-    conn.execute(_VERIFICATION_QUEUE_RECOVERY_INDEX_DDL)
+    for table in _CATALOG_ERA_TABLES:
+        conn.execute(f"drop table if exists {table}")
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -558,15 +313,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "atomic_lifecycle_constraints", migration_007_atomic_lifecycle_constraints),
     Migration(8, "rebuild_cjk_search_documents", migration_008_rebuild_cjk_search_documents),
     Migration(9, "unique_open_reuse_key", migration_009_unique_open_reuse_key),
-    Migration(10, "agent_catalog", migration_010_agent_catalog),
-    Migration(11, "agent_catalog_register_limits", migration_011_agent_catalog_register_limits),
-    Migration(12, "agent_catalog_write_idempotency", migration_012_agent_catalog_write_idempotency),
-    Migration(13, "agent_trust_observations", migration_013_agent_trust_observations),
-    Migration(14, "a2a_inbound_idempotency", migration_014_a2a_inbound_idempotency),
-    Migration(15, "verification_queue_tasks", migration_015_verification_queue_tasks),
     Migration(16, "product_source_column", migration_016_product_source_column),
     Migration(17, "product_provenance", migration_017_product_provenance),
-    Migration(18, "listing_publications", migration_018_listing_publications),
+    Migration(19, "remove_catalog_subsystem_tables", migration_019_remove_catalog_subsystem_tables),
 )
 
 

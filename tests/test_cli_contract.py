@@ -60,16 +60,11 @@ PUBLIC_SUBCOMMANDS = [
     ("human-review", "show"),
     ("human-review", "resolve"),
     ("audit", "events"),
-    ("llm", "run"),
-    ("adapter", "inspect"),
-    ("adapter", "doctor"),
-    ("adapter", "install-command"),
-    ("legacy", "import"),
     ("api", "routes"),
     ("api", "serve"),
 ]
 
-TOP_LEVEL_CHOICES = "{merchant,delivery,product,search,channel,buyer,conversation,agent,human-review,llm,adapter,legacy,api}"
+TOP_LEVEL_CHOICES = "{merchant,delivery,product,search,channel,buyer,conversation,agent,human-review,audit,api,erp,listings}"
 
 
 class CliContractTest(unittest.TestCase):

@@ -17,15 +17,12 @@ from typing import Any, Callable
 from shopping_cli import VERSION
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
-from shopping_cli.api.handlers import agent_catalog as agent_catalog_handlers
 from shopping_cli.api.handlers import agents as agent_handlers
 from shopping_cli.api.handlers import audit as audit_handlers
 from shopping_cli.api.handlers import buyer as buyer_handlers
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.api.handlers import conversations as conversation_handlers
 from shopping_cli.api.handlers import erp as erp_handlers
-from shopping_cli.api.handlers import hosted_a2a as hosted_a2a_handlers
-from shopping_cli.api.handlers import hosted_publication as hosted_publication_handlers
 from shopping_cli.api.handlers import listings_projection as listings_projection_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
@@ -60,10 +57,7 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     StarletteHTTPException = None  # type: ignore[misc,assignment]
 
 
-# Route handlers return the JSON response body (a dict), except the Hosted
-# A2A JSON-RPC endpoint which returns ``(http_status, jsonrpc_body)`` so
-# ``handle_request`` can pass its HTTP status through.  The type is widened to
-# ``Any`` for that single tuple-returning handler.
+# Route handlers return the JSON response body (a dict).
 Handler = Callable[..., Any]
 
 
@@ -160,15 +154,6 @@ def _idempotency_key_header_default() -> Any:
 
 
 IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
-
-
-def _if_none_match_header_default() -> Any:
-    if Header is None:
-        return ""
-    return Header(default="")
-
-
-IF_NONE_MATCH_HEADER = _if_none_match_header_default()
 
 
 def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
@@ -459,124 +444,6 @@ def _negotiation_submit_decision(db_path: str | Path, payload: dict[str, Any]) -
     return negotiation_handlers.submit_decision(db_path, payload)
 
 
-# ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────────
-
-
-def _list_catalog_agents(db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
-    return agent_catalog_handlers.list_catalog_agents(db_path, query)
-
-
-def _get_catalog_agent(
-    db_path: str | Path, _payload: dict[str, Any], _query: dict[str, Any], catalog_agent_id: str
-) -> dict[str, Any]:
-    return agent_catalog_handlers.get_catalog_agent(db_path, catalog_agent_id)
-
-
-def _search_agent_catalog(db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
-    return agent_catalog_handlers.search_agent_catalog(db_path, query)
-
-
-def _list_merchant_catalog_agents(
-    db_path: str | Path, _payload: dict[str, Any], query: dict[str, Any], merchant_id: str
-) -> dict[str, Any]:
-    return agent_catalog_handlers.list_merchant_catalog_agents(db_path, merchant_id, query)
-
-
-# ── Agent Catalog v2.2 writes (§10.2–§10.4) ──────────────────────────────────
-
-
-def _register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    return agent_catalog_handlers.register_catalog_agent(db_path, payload)
-
-
-def _refresh_catalog_agent(
-    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    return agent_catalog_handlers.refresh_catalog_agent(db_path, catalog_agent_id, payload)
-
-
-def _verify_catalog_agent(
-    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    return agent_catalog_handlers.verify_catalog_agent(db_path, catalog_agent_id, payload)
-
-
-def _claim_catalog_agent(
-    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    return agent_catalog_handlers.claim_catalog_agent(db_path, catalog_agent_id, payload)
-
-
-def _suspend_catalog_agent(
-    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    return agent_catalog_handlers.suspend_catalog_agent(db_path, catalog_agent_id, payload)
-
-
-def _reinstate_catalog_agent(
-    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    return agent_catalog_handlers.reinstate_catalog_agent(db_path, catalog_agent_id, payload)
-
-
-# ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────────
-
-
-def _hosted_agent_card_document(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
-    return hosted_publication_handlers.hosted_agent_card(db_path, catalog_agent_id)
-
-
-def _hosted_ucp_profile_document(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
-    return hosted_publication_handlers.hosted_ucp_profile(db_path, catalog_agent_id)
-
-
-def _hosted_a2a_message_send(
-    db_path: str | Path,
-    catalog_agent_id: str,
-    payload: dict[str, Any],
-) -> tuple[int, dict[str, Any]]:
-    """POST /a2a/agents/{catalog_agent_id} — JSON-RPC message/send.
-
-    Returns ``(http_status, jsonrpc_body)`` so ``handle_request`` can pass the
-    JSON-RPC response through unchanged (it does not use the ok/error envelope).
-    """
-    return hosted_a2a_handlers.a2a_message_send(db_path, catalog_agent_id, payload)
-
-
-def _etag_response(document: dict[str, Any], if_none_match: str) -> Any:
-    """Wrap a hosted A2A document with a §18 server-side ETag.
-
-    Returns a 304 Response when *if_none_match* matches the content hash,
-    otherwise a 200 JSONResponse carrying the document and its ETag header.
-    When the optional FastAPI/Starlette stack is unavailable, returns a
-    ``SimpleNamespace`` stand-in (the same shape ``_json_error_response`` uses)
-    so the route stays testable with the FakeFastAPI harness.
-    """
-    from shopping_cli.discovery.cache import compute_etag, etag_matches
-
-    body = json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    etag = compute_etag(body)
-    if if_none_match and etag_matches(if_none_match, etag):
-        if Response is not None:
-            return Response(status_code=304, headers={"ETag": etag})
-        return SimpleNamespace(status_code=304, body=b"", headers={"ETag": etag})
-    if JSONResponse is not None:
-        return JSONResponse(status_code=200, content=document, headers={"ETag": etag})
-    return SimpleNamespace(
-        status_code=200,
-        body=body,
-        headers={"ETag": etag, "content-type": "application/json"},
-    )
-
-
-def _hosted_agent_card_response(db_path: str | Path, catalog_agent_id: str, if_none_match: str) -> Any:
-    return _etag_response(_hosted_agent_card_document(db_path, catalog_agent_id), if_none_match)
-
-
-def _hosted_ucp_profile_response(db_path: str | Path, catalog_agent_id: str, if_none_match: str) -> Any:
-    return _etag_response(_hosted_ucp_profile_document(db_path, catalog_agent_id), if_none_match)
-
-
 def _match_path(template: str, path: str) -> dict[str, str] | None:
     parts = template.split("/")
     regex_parts = []
@@ -857,95 +724,6 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         "/negotiation/decisions",
         lambda db_path, payload, query, **kw: _negotiation_submit_decision(db_path, payload),
     ),
-    # ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────
-    RouteEntry(
-        {"GET"},
-        "/v1/agent-catalog/agents",
-        lambda db_path, payload, query, **kw: _list_catalog_agents(db_path, payload, query),
-    ),
-    RouteEntry(
-        {"GET"},
-        "/v1/agent-catalog/agents/search",
-        lambda db_path, payload, query, **kw: _search_agent_catalog(db_path, payload, query),
-    ),
-    RouteEntry(
-        {"GET"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}",
-        lambda db_path, payload, query, catalog_agent_id: _get_catalog_agent(
-            db_path, payload, query, catalog_agent_id
-        ),
-    ),
-    RouteEntry(
-        {"GET"},
-        "/v1/agent-catalog/merchants/{merchant_id}/agents",
-        lambda db_path, payload, query, merchant_id: _list_merchant_catalog_agents(
-            db_path, payload, query, merchant_id
-        ),
-    ),
-    # ── Agent Catalog v2.2 writes (§10.2–§10.4) ────────────────────────────────
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/register",
-        lambda db_path, payload, query, **kw: _register_catalog_agent(db_path, payload),
-    ),
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}/refresh",
-        lambda db_path, payload, query, catalog_agent_id: _refresh_catalog_agent(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}/verify",
-        lambda db_path, payload, query, catalog_agent_id: _verify_catalog_agent(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}/claim",
-        lambda db_path, payload, query, catalog_agent_id: _claim_catalog_agent(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
-        lambda db_path, payload, query, catalog_agent_id: _suspend_catalog_agent(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
-    RouteEntry(
-        {"POST"},
-        "/v1/agent-catalog/agents/{catalog_agent_id}/reinstate",
-        lambda db_path, payload, query, catalog_agent_id: _reinstate_catalog_agent(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
-    # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────
-    RouteEntry(
-        {"GET"},
-        "/v1/hosted/agents/{catalog_agent_id}/agent-card.json",
-        lambda db_path, payload, query, catalog_agent_id: _hosted_agent_card_document(
-            db_path, catalog_agent_id
-        ),
-    ),
-    RouteEntry(
-        {"GET"},
-        "/v1/hosted/agents/{catalog_agent_id}/ucp",
-        lambda db_path, payload, query, catalog_agent_id: _hosted_ucp_profile_document(
-            db_path, catalog_agent_id
-        ),
-    ),
-    # ── Hosted A2A JSON-RPC endpoint v2.4-W3 (shared-host path, §14.1) ───────
-    RouteEntry(
-        {"POST"},
-        "/a2a/agents/{catalog_agent_id}",
-        lambda db_path, payload, query, catalog_agent_id: _hosted_a2a_message_send(
-            db_path, catalog_agent_id, payload
-        ),
-    ),
 )
 
 
@@ -954,9 +732,8 @@ def resolve_route(
 ) -> tuple[bool, bool]:
     """Return (path_known, method_allowed) without parsing the request body.
 
-    *routes* defaults to the full ``_ROUTE_TABLE``; a filtered table can be
-    passed to resolve against a route subset (e.g. the kiwi-catalog
-    standalone service — see :func:`create_catalog_app`).
+    *routes* defaults to the full ``_ROUTE_TABLE``; the parameter is kept for
+    API compatibility (previously used by the kiwi-catalog standalone service).
     """
     table = _ROUTE_TABLE if routes is None else tuple(routes)
     path_known = False
@@ -968,21 +745,6 @@ def resolve_route(
         if method.upper() in route.methods:
             return True, True
     return path_known, False
-
-
-def _is_status_body_pair(result: Any) -> bool:
-    """True when a handler returned ``(http_status, body)`` directly.
-
-    Used by the Hosted A2A JSON-RPC endpoint to return its own HTTP status
-    (401/403/400) alongside a JSON-RPC response body, which does not use the
-    ok/error envelope.  No other route handler returns a tuple.
-    """
-    return (
-        isinstance(result, tuple)
-        and len(result) == 2
-        and isinstance(result[0], int)
-        and not isinstance(result[0], bool)
-    )
 
 
 def handle_request(
@@ -1004,8 +766,6 @@ def handle_request(
             path_matched = True
             if method.upper() in route.methods:
                 result = route.handler(db_path, payload, query, **path_params)
-                if _is_status_body_pair(result):
-                    return result
                 return 200, result
         if path_matched:
             raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
@@ -1034,37 +794,10 @@ def handle_request(
         return 500, {"ok": False, "error": "internal server error"}
 
 
-def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
-    """kiwi-catalog standalone service (阶段 1 裁剪原型).
-
-    Exposes only the Agent Catalog domain: registration / verification /
-    search / governance routes (/v1/agent-catalog/*), the hosted publication
-    surface (/v1/hosted/* — Agent Card / UCP) and /health.  The hosted
-    negotiation endpoint (/a2a/agents/{id}) and all marketplace routes are
-    excluded (切割分水岭, see docs/shopping-cli-agent-catalog-extraction-
-    plan-v1.0.md).
-
-    阶段 1 说明：路由层裁剪 + 独立 DB 文件（首次访问经 db_session 自动
-    初始化，schema 是全量超集——marketplace 表空置）；models 拆分与
-    影子表解耦属阶段 2。当前只提供 fallback ASGI 形态；FastAPI 双栈留
-    阶段 3（新仓库）。
-    """
-    from shopping_cli.api.route_registry import catalog_route_info
-
-    routes = catalog_route_info()
-    return MarketplaceASGIApp(
-        db_path,
-        route_provider=lambda: routes,
-        route_resolver=lambda method, path: resolve_route(method, path, routes=routes),
-    )
-
-
 def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
-    # MVP #8（v0.3 §12）：主 API 不再承担 Agent Catalog 面——排除
-    # /v1/agent-catalog/*（职责在独立 kiwi-catalog 服务）；共享路由保留。
-    from shopping_cli.api.route_registry import marketplace_route_info
+    from shopping_cli.api.route_registry import route_info
 
-    routes = marketplace_route_info()
+    routes = route_info()
     if FastAPI is None:
         return MarketplaceASGIApp(
             db_path,
@@ -1610,179 +1343,4 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     ) -> dict[str, Any]:
         return _negotiation_submit_decision(db_path, api_auth.payload_with_auth(payload, authorization))
 
-    # ── Agent Catalog v2.1 public read (§10.1) ────────────────────────────────
-
-    @app.get("/v1/agent-catalog/agents")
-    def list_catalog_agents(limit: str = "", cursor: str = "") -> dict[str, Any]:
-        return _list_catalog_agents(db_path, {}, {"limit": limit, "cursor": cursor})
-
-    @app.get("/v1/agent-catalog/agents/search")
-    def search_agent_catalog(
-        q: str = "",
-        category: str = "",
-        skill: str = "",
-        capability: str = "",
-        protocol: str = "",
-        hosting_mode: str = "",
-        verification_status: str = "",
-        verified_after: str = "",
-        limit: str = "",
-        cursor: str = "",
-    ) -> dict[str, Any]:
-        return _search_agent_catalog(
-            db_path,
-            {},
-            {
-                "q": q,
-                "category": category,
-                "skill": skill,
-                "capability": capability,
-                "protocol": protocol,
-                "hosting_mode": hosting_mode,
-                "verification_status": verification_status,
-                "verified_after": verified_after,
-                "limit": limit,
-                "cursor": cursor,
-            },
-        )
-
-    @app.get("/v1/agent-catalog/agents/{catalog_agent_id}")
-    def get_catalog_agent(catalog_agent_id: str) -> dict[str, Any]:
-        return _get_catalog_agent(db_path, {}, {}, catalog_agent_id)
-
-    @app.get("/v1/agent-catalog/merchants/{merchant_id}/agents")
-    def list_merchant_catalog_agents(
-        merchant_id: str, limit: str = "", cursor: str = ""
-    ) -> dict[str, Any]:
-        return _list_merchant_catalog_agents(
-            db_path, {}, {"limit": limit, "cursor": cursor}, merchant_id
-        )
-
-    # ── Agent Catalog v2.2 writes (§10.2–§10.4) ────────────────────────────────
-
-    @app.post("/v1/agent-catalog/agents/register")
-    def register_catalog_agent(
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _register_catalog_agent(
-            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/refresh")
-    def refresh_catalog_agent(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _refresh_catalog_agent(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
-        )
-
-    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/verify")
-    def verify_catalog_agent(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _verify_catalog_agent(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
-        )
-
-    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/claim")
-    def claim_catalog_agent(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _claim_catalog_agent(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
-        )
-
-    # v3.0 moderation: suspend / reinstate are admin-only (§10.4, P2).
-    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/suspend")
-    def suspend_catalog_agent(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _suspend_catalog_agent(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
-        )
-
-    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/reinstate")
-    def reinstate_catalog_agent(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _reinstate_catalog_agent(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
-        )
-
-    # ── Hosted A2A publication v2.4-W1 (read-only) ────────────────────────────
-
-    @app.get("/v1/hosted/agents/{catalog_agent_id}/agent-card.json")
-    def hosted_agent_card_route(
-        catalog_agent_id: str,
-        if_none_match: str = IF_NONE_MATCH_HEADER,
-    ) -> Any:
-        return _hosted_agent_card_response(db_path, catalog_agent_id, if_none_match)
-
-    @app.get("/v1/hosted/agents/{catalog_agent_id}/ucp")
-    def hosted_ucp_profile_route(
-        catalog_agent_id: str,
-        if_none_match: str = IF_NONE_MATCH_HEADER,
-    ) -> Any:
-        return _hosted_ucp_profile_response(db_path, catalog_agent_id, if_none_match)
-
-    @app.post("/a2a/agents/{catalog_agent_id}")
-    def hosted_a2a_message_send_route(
-        catalog_agent_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-    ) -> Any:
-        status, body = _hosted_a2a_message_send(
-            db_path,
-            catalog_agent_id,
-            api_auth.payload_with_auth(payload, authorization),
-        )
-        if JSONResponse is not None:
-            return JSONResponse(status_code=status, content=body)
-        # FakeFastAPI harness fallback (same shape as ``_etag_response``).
-        return SimpleNamespace(
-            status_code=status,
-            body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        )
-
-    # MVP #8（v0.3 §12）：主 API 不再承担 Agent Catalog 面——注册后移除
-    # /v1/agent-catalog/* 路由（catalog 面由 create_catalog_app 独立服务承担；
-    # /v1/hosted/* 与 /a2a/* 共享路由保留）。
-    # FakeFastAPI harness（无 router 属性）与真实 FastAPI 双兼容。
-    if getattr(app, "routes", None) is not None:
-        filtered_routes = [
-            route
-            for route in app.routes
-            if not str(getattr(route, "path", "")).startswith("/v1/agent-catalog/")
-        ]
-        if hasattr(app, "router"):
-            app.router.routes = filtered_routes
-        else:
-            app.routes = filtered_routes
     return app

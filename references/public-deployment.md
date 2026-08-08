@@ -36,7 +36,7 @@ SHOPPING_MERCHANT_TOKEN_TTL_SECONDS=2592000
 
 `SHOPPING_ADMIN_TOKEN` protects merchant onboarding. `SHOPPING_BUYER_BOOTSTRAP_TOKEN` protects buyer conversation creation. In production both are required, must not use a known placeholder, and must contain at least 32 UTF-8 bytes. Channel tokens are optional; channel ingress through `/channels/messages` fails closed unless `SHOPPING_CHANNEL_TOKENS` or `SHOPPING_CHANNEL_TOKEN` is configured.
 
-The API rejects request bodies larger than 1 MiB by default and applies JSON depth/collection/text limits. Buyer credentials expire after one day and are revoked when their conversation closes; merchant credentials expire after 30 days by default. Override these defaults only through the documented environment variables. Remote Agent/LLM API clients require HTTPS; `SHOPPING_ALLOW_INSECURE_HTTP=true` is reserved for a trusted internal network such as the Compose service network.
+The API rejects request bodies larger than 1 MiB by default and applies JSON depth/collection/text limits. Buyer credentials expire after one day and are revoked when their conversation closes; merchant credentials expire after 30 days by default. Override these defaults only through the documented environment variables. Remote Agent API clients require HTTPS; `SHOPPING_ALLOW_INSECURE_HTTP=true` is reserved for a trusted internal network such as the Compose service network.
 
 ## Health check
 
