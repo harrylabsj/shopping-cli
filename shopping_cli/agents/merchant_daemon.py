@@ -581,6 +581,14 @@ def stop_agent(
             if state.get("running") is False or not pid_record_matches_process(pid_record, merchant_id):
                 break
             time.sleep(0.1)
+        # SIGKILL 兜底：SIGTERM 被阻塞的处理中进程（如卡在 HTTP 调用，
+        # 默认 5s 内无法响应）停不掉——强杀并短等待。
+        if pid_record_matches_process(pid_record, merchant_id):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError):
+                pass
+            time.sleep(0.2)
 
     with _PidFileLock(paths["pid_file"]):
         state_after_stop = read_json(paths["state_file"], {})
@@ -613,7 +621,7 @@ def stop_agent(
             pid=pid or None,
             extra={
                 "stopped_at": now_iso(),
-                "stop_timeout": running,
+                "stop_timed_out": running,
                 "mode": mode,
                 "api_url": api_url,
                 "host": host,

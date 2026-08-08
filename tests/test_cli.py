@@ -2373,7 +2373,6 @@ class ShoppingCliTest(unittest.TestCase):
                     "list",
                     "--buyer",
                     "alice",
-                    "--summary",
                     "--format",
                     "json",
                 )

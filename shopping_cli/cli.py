@@ -663,7 +663,6 @@ def build_parser() -> argparse.ArgumentParser:
     conversation_list.add_argument("--status", default="")
     conversation_list.add_argument("--sku", default="")
     conversation_list.add_argument("--updated-since", default="")
-    conversation_list.add_argument("--summary", action="store_true", help=argparse.SUPPRESS)
     conversation_list.add_argument("--details", action="store_true", help="Return full conversation details instead of lightweight summaries")
     conversation_list.add_argument("--limit", type=positive_int, default=50)
     conversation_list.add_argument("--offset", type=non_negative_int, default=0)
