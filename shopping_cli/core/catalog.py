@@ -453,6 +453,9 @@ def update_product(
         updates.append("delivery_attributes_json = ?")
         values.append(encode_json(parse_tags(delivery_attributes)))
     if updates:
+        # 本地手改提升权威（§5）：编辑过 source='erp' 的行升级为 'local'，
+        # 否则下一次 ERP 同步会静默覆盖本地改动（冲突守卫只保护 local 行）。
+        updates.append("source = case when source = 'erp' then 'local' else source end")
         updates.append("updated_at = ?")
         values.append(now_iso())
         values.append(sku)
@@ -469,7 +472,9 @@ def set_stock(conn: sqlite3.Connection, sku: str, stock: int, merchant_id: str =
     if merchant_id and product["merchant_id"] != merchant_id:
         raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
     conn.execute(
-        "update products set stock = ?, updated_at = ? where sku = ?",
+        "update products set stock = ?, "
+        "source = case when source = 'erp' then 'local' else source end, "
+        "updated_at = ? where sku = ?",
         (int(stock), now_iso(), sku),
     )
     sync_product_search_index(conn, sku=sku)
@@ -495,6 +500,26 @@ def delivery_rule(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
         "radius_km": _safe_non_negative_float(row["radius_km"]),
         "notes": row["notes"],
     }
+
+
+def public_merchant_summary(merchant: dict[str, Any]) -> dict[str, Any]:
+    """公开投影：剥离商家私有字段（contact / automation_boundaries）。
+
+    会话/买家可见的序列化必须走公开投影——automation_boundaries 含议价
+    底价（negotiation 路径以 _leaks_private_threshold 守护的隐私）。
+    """
+    summary = dict(merchant)
+    summary.pop("contact", None)
+    summary.pop("automation_boundaries", None)
+    return summary
+
+
+def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(product)
+    merchant = summary.get("merchant")
+    if isinstance(merchant, dict):
+        summary["merchant"] = public_merchant_summary(merchant)
+    return summary
 
 
 def merchant_summary(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:

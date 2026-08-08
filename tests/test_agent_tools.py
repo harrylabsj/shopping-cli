@@ -171,6 +171,30 @@ class AuthorizedQuoteRequestMarketplaceTools(QuoteRequestMarketplaceTools):
         return product
 
 
+class NegotiationProtocolMessageTools(FakeMarketplaceTools):
+    """买家消息带 shopping.negotiation/0.1 协议载荷——由 kiwi 运行时驱动，
+    resident 必须跳过（H4：抢 claim 会打断买家谈判回合）。"""
+
+    def waiting_merchant_conversations(self, merchant_id):
+        self.calls.append(("waiting_merchant_conversations", merchant_id))
+        return [
+            {
+                "id": "CONV-0001",
+                "merchant_id": merchant_id,
+                "sku": "tea-a",
+                "messages": [
+                    {
+                        "id": 1,
+                        "sender": "buyer",
+                        "intent": "negotiate",
+                        "text": "negotiate payload",
+                        "structured_payload": {"protocol_version": "shopping.negotiation/0.1"},
+                    }
+                ],
+            }
+        ]
+
+
 class CorruptBuyerMessageIdTools(FakeMarketplaceTools):
     def waiting_merchant_conversations(self, merchant_id):
         conversations = super().waiting_merchant_conversations(merchant_id)
@@ -575,17 +599,31 @@ class AgentToolsBoundaryTest(unittest.TestCase):
         self.assertIn("merchant human review", tools.messages[0]["text"])
         self.assertIn(("add_flag", "CONV-0001", "bargaining", "macmini-16g-128g"), tools.calls)
 
-    def test_process_once_uses_authorized_bargain_rule_without_human_review(self):
+    def test_process_once_skips_negotiation_protocol_messages(self):
+        """带 protocol_version 的买家消息（kiwi 谈判载荷）不被 resident 抢占。"""
+        tools = NegotiationProtocolMessageTools()
+
+        result = merchant_agent.process_once_with_tools(tools, "seller-a")
+
+        self.assertEqual(result["replied"], [])
+        self.assertEqual(result["failed"], [])
+        self.assertNotIn(("claim_message", "shopping-cli-merchant-agent:seller-a", "CONV-0001", 1), tools.calls)
+        self.assertFalse(any(call[0] == "append_message" for call in tools.calls))
+
+    def test_process_once_routes_authorized_bargain_request_to_human_review(self):
+        # 议价底价是隐私：即使商家配置了授权议价规则，resident 也不自动报价
+        # （与 negotiation 路径 _leaks_private_threshold 的守卫一致），而是
+        # 路由人工审查——绝不把授权底价写进公开会话。
         tools = AuthorizedQuoteRequestMarketplaceTools()
 
         result = merchant_agent.process_once_with_tools(tools, "seller-a")
 
         self.assertEqual(result["failed"], [])
-        self.assertFalse(result["replied"][0]["human_required"])
-        self.assertEqual(result["replied"][0]["reason"], "")
-        self.assertIn("4000", tools.messages[0]["text"])
-        self.assertIn(("append_message", "CONV-0001", "merchant_agent", "waiting_buyer"), tools.calls)
-        self.assertFalse(any(call[0] == "add_flag" for call in tools.calls))
+        self.assertTrue(result["replied"][0]["human_required"])
+        self.assertEqual(result["replied"][0]["reason"], "bargaining")
+        self.assertNotIn("4000", tools.messages[0]["text"])
+        self.assertIn("merchant human review", tools.messages[0]["text"])
+        self.assertIn(("add_flag", "CONV-0001", "bargaining", "macmini-16g-128g"), tools.calls)
 
     def test_process_once_reports_corrupt_buyer_message_id_without_crashing(self):
         tools = CorruptBuyerMessageIdTools()

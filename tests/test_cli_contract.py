@@ -64,7 +64,17 @@ PUBLIC_SUBCOMMANDS = [
     ("api", "serve"),
 ]
 
-TOP_LEVEL_CHOICES = "{merchant,delivery,product,search,channel,buyer,conversation,agent,human-review,audit,api,erp,listings}"
+def top_level_choices_str() -> str:
+    """从真实 parser 派生顶层 choices（argparse 显示顺序 = 注册顺序）——
+
+    消除手写常量与 CLI surface 的漂移（v3.0 曾漏掉 policy）。
+    """
+    from shopping_cli.cli import build_parser
+
+    for action in build_parser()._actions:
+        if action.dest == "command":
+            return "{" + ",".join(action.choices) + "}"
+    raise AssertionError("top-level subparsers action not found")
 
 
 class CliContractTest(unittest.TestCase):
@@ -92,7 +102,7 @@ class CliContractTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("usage:", result.stdout)
                 self.assertIn("--help", result.stdout)
-                self.assertNotIn(TOP_LEVEL_CHOICES, result.stdout)
+                self.assertNotIn(top_level_choices_str(), result.stdout)
 
     def test_one_shot_json_output_is_a_single_json_value(self):
         with tempfile.TemporaryDirectory() as tmp:

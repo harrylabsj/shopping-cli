@@ -9,7 +9,6 @@ v3.0 起发布面（publish-listings / withdraw-listing）随 kiwi-catalog 子�
 from __future__ import annotations
 
 import argparse
-from typing import Any
 
 from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.db.session import db_session

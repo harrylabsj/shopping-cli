@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -135,6 +136,43 @@ def db_path_from(value: str | Path | None = None) -> Path:
 
 def state_dir_from(value: str | Path | None = None) -> Path:
     return Path(value or os.environ.get("SHOPPING_CLI_STATE_DIR") or DEFAULT_STATE_DIR).expanduser()
+
+
+_BUYER_TOKEN_SECRET_FILE = "buyer_token_secret"
+
+
+def buyer_token_secret(state_dir: str | Path | None = None) -> str:
+    """服务器端 buyer-token 派生密钥（H6）。
+
+    优先级：``SHOPPING_BUYER_TOKEN_SECRET`` env → ``state_dir/buyer_token_secret``
+    文件（不存在则生成随机 32 字节，0600 持久化——重启后确定性 token 稳定）。
+
+    密钥只存在服务器侧（env/本地文件）——绝不使用请求体内携带的 bootstrap
+    token 派生，否则任何持共享 bootstrap token 的客户端都能伪造任意买家的
+    per-conversation token。
+    """
+    env_secret = os.environ.get("SHOPPING_BUYER_TOKEN_SECRET") or ""
+    if env_secret.strip():
+        return env_secret.strip()
+    secret_file = state_dir_from(state_dir) / _BUYER_TOKEN_SECRET_FILE
+    try:
+        if secret_file.is_file():
+            stored = secret_file.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+    except OSError:
+        pass
+    generated = secrets.token_hex(32)
+    try:
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text(generated, encoding="utf-8")
+        try:
+            secret_file.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass  # 无法持久化则退回进程内密钥（重启后旧确定性 token 失效，幂等回放会重新签发）
+    return generated
 
 
 def agent_stale_ttl_seconds_from(value: str | int | None = None) -> int:

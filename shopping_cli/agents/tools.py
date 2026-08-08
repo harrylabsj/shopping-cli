@@ -139,9 +139,6 @@ def record_heartbeat(
     require_merchant(conn, merchant_id)
     agent_id = f"shopping-cli-merchant-agent:{merchant_id}"
     now = now_iso()
-    was_new = (
-        conn.execute("select 1 from agents where id = ?", (agent_id,)).fetchone() is None
-    )
     conn.execute(
         """
         insert into agents(

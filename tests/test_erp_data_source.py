@@ -49,6 +49,15 @@ def fake_fetch(pages: list[dict]) -> object:
 
 class ErpDataSourceTest(unittest.TestCase):
     def setUp(self) -> None:
+        # 注入 fetch 的测试不经过真实 DNS；SSRF 解析校验路径在
+        # test_private_ip_base_url_rejected_before_fetch 独立覆盖。
+        from unittest import mock
+        self.resolver = mock.patch(
+            "shopping_cli.data_sources.erp_source._resolve_verified_host",
+            return_value="203.0.113.1",
+        )
+        self.resolver.start()
+        self.addCleanup(self.resolver.stop)
         self.tmp = tempfile.mkdtemp()
         self.db_path = str(Path(self.tmp) / "shop.sqlite")
         self.conn = open_connection(self.db_path)
@@ -169,6 +178,90 @@ class ErpDataSourceTest(unittest.TestCase):
 
         fresh = datetime.fromisoformat(row["fresh_until"])
         self.assertGreater(fresh, datetime.fromisoformat(row["observed_at"]))
+
+    # ── v3.0 SSRF 加固（H1）──
+
+    def test_private_ip_base_url_rejected_before_fetch(self) -> None:
+        # 本测试需要真实 DNS/IP 校验——临时停用 setUp 的解析 mock。
+        self.resolver.stop()
+        try:
+            for url in (
+                "http://127.0.0.1:8765",
+                "http://localhost:8765",
+                "http://169.254.169.254/latest/meta-data/",
+                "http://10.0.0.5/",
+                "http://192.168.1.1/",
+            ):
+                with self.subTest(url=url), self.assertRaises(ErpSourceError):
+                    sync_erp_products(
+                        self.conn, ErpSyncConfig(base_url=url), fetch=fake_fetch([PAGE1])
+                    )
+        finally:
+            self.resolver.start()
+
+    def test_non_standard_port_rejected(self) -> None:
+        with self.assertRaises(ErpSourceError):
+            sync_erp_products(
+                self.conn, ErpSyncConfig(base_url="https://erp.example:8443"), fetch=fake_fetch([PAGE1])
+            )
+
+    def test_feed_beyond_page_cap_aborts(self) -> None:
+        """恶意/异常 feed 永远返回满页 → 超过页数硬上限必须中止。"""
+        def always_full(_url):
+            # 每页返回满页（page_size=100）→ 循环永不自然终止
+            return (200, json.dumps({"results": [PAGE1["results"][0]] * 100}).encode("utf-8"))
+        from unittest.mock import patch
+        with patch("shopping_cli.data_sources.erp_source._MAX_PAGES", 3):
+            with self.assertRaises(ErpSourceError) as raised:
+                sync_erp_products(
+                    self.conn,
+                    ErpSyncConfig(base_url="https://erp.example", page_size=100),
+                    fetch=always_full,
+                )
+        self.assertIn("more than 3 full pages", str(raised.exception))
+
+    def test_non_finite_price_rejected(self) -> None:
+        """price=inf 在解析期被拒（此前会写进投影并让 get_price OverflowError）。"""
+        from unittest.mock import patch
+        page = {"results": [{"sku": "INF-1", "title": "Bad", "price": float("inf"), "stock": 1}]}
+        def fetch_inf(_url):
+            return (200, json.dumps(page).encode("utf-8"))
+        with self.assertRaises(ErpSourceError):
+            sync_erp_products(
+                self.conn, ErpSyncConfig(base_url="https://erp.example"), fetch=fetch_inf
+            )
+
+    def test_local_edit_promotes_erp_row_to_authoritative(self) -> None:
+        """update_product/set_stock 编辑 ERP 行 → source 提升为 local（H3）。"""
+        sync_erp_products(
+            self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),
+            fetch=fake_fetch([PAGE1]),
+        )
+        from shopping_cli.core.catalog import set_stock, update_product
+        update_product(self.conn, "SKU-001", title="手工改的标题")
+        row = self.conn.execute(
+            "select source from products where sku = 'SKU-001'"
+        ).fetchone()
+        self.assertEqual(row["source"], "local")
+        # 提升后：再次同步同一 SKU 必须跳过并记入 conflicts（不再被覆盖）。
+        fetch = fake_fetch([PAGE1])
+        report = sync_erp_products(
+            self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),
+            fetch=fetch,
+        )
+        self.assertIn("local authoritative row", report.conflicts[0]["reason"])
+
+    def test_set_stock_promotes_erp_row_to_authoritative(self) -> None:
+        from shopping_cli.core.catalog import set_stock
+        sync_erp_products(
+            self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),
+            fetch=fake_fetch([PAGE1]),
+        )
+        set_stock(self.conn, "SKU-001", 42)
+        row = self.conn.execute(
+            "select source from products where sku = 'SKU-001'"
+        ).fetchone()
+        self.assertEqual(row["source"], "local")
 
 
 if __name__ == "__main__":

@@ -14,8 +14,13 @@ Operations Hub 接入 ERP，把外部商品事实同步进本地 ``products`` �
 
 from __future__ import annotations
 
+import http.client
+import math
+import socket
 import sqlite3
+import ssl
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -75,25 +80,161 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _validate_url(base_url: str) -> str:
+# SSRF 防护：只允许标准 HTTP(S) 端口；解析期校验全部解析 IP（私有/环回/
+# 链路本地/云 metadata/多播/保留全拒）；连接直接用已验证 IP（防 DNS
+# rebinding），Host 头与 SNI 保留原主机名；禁重定向；响应体有上限。
+_ALLOWED_PORTS = (80, 443)
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# 分页硬上限：防止恶意/异常 feed 无限返回满页（page_size ≤ 500 → 单次同步
+# 最多 5000 行）。
+_MAX_PAGES = 10
+
+
+def _blocked_ip(ip_text: str) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(ip_text.split("%")[0])
+    except ValueError:
+        return True
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+        return True
+    if isinstance(addr, ipaddress.IPv4Address):
+        # AWS/GCP/Azure 云 metadata 端点（169.254.169.254 已在 link-local 内，
+        # 这里防御性显式列出 GCP metadata 的 169.254.169.252/253）。
+        if int(addr) in (0xA9FEA9FC, 0xA9FEA9FD):
+            return True
+        # 0.0.0.0/8（源地址）与 192.0.0.0/24（协议保留）
+        if addr.version == 4 and (int(addr) >> 24) in (0, 192):
+            return True
+    return False
+
+
+def _resolve_verified_host(hostname: str) -> str:
+    """解析 *hostname* 的全部地址；任一被拦即拒绝；返回首个合法 IP。"""
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ErpSourceError(f"erp base_url hostname does not resolve: {hostname}: {exc}") from exc
+    if not infos:
+        raise ErpSourceError(f"erp base_url hostname does not resolve: {hostname}")
+    ips = {info[4][0] for info in infos}
+    for ip in ips:
+        if _blocked_ip(ip):
+            raise ErpSourceError(f"erp base_url resolves to a blocked address: {ip} ({hostname})")
+    return sorted(ips)[0]
+
+
+class _VerifiedIPHTTPConnection(http.client.HTTPConnection):
+    """连接已验证 IP，Host 头保留原主机名（不跟随 DNS 二次解析）。"""
+
+    def __init__(self, verified_ip: str, host: str, port: int, timeout: float):
+        super().__init__(host, port, timeout=timeout)
+        self._verified_ip = verified_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._verified_ip, self.port), self.timeout)
+
+
+class _VerifiedIPHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, verified_ip: str, host: str, port: int, timeout: float, context: Any):
+        super().__init__(host, port, timeout=timeout, context=context)
+        self._verified_ip = verified_ip
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self._verified_ip, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self._host)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class _VerifiedIPHandler(urllib.request.HTTPHandler):
+    """连接已验证 IP 的 opener handler（http + https 共用一个连接工厂）。"""
+
+    def __init__(self, verified_ip: str, host: str, port: int, timeout: float):
+        super().__init__()
+        self._verified_ip = verified_ip
+        self._host = host
+        self._port = port
+        self._timeout = timeout
+
+    def http_open(self, req: Any) -> Any:
+        conn = _VerifiedIPHTTPConnection(self._verified_ip, self._host, self._port, self._timeout)
+        return self.do_open(conn, req)
+
+    def https_open(self, req: Any) -> Any:
+        context = ssl.create_default_context()
+        conn = _VerifiedIPHTTPSConnection(
+            self._verified_ip, self._host, self._port, self._timeout, context
+        )
+        return self.do_open(conn, req)
+
+
+def _read_limited(response: Any, maximum: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(min(maximum - total, 65536))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > maximum:
+            raise ErpSourceError(f"erp response exceeds {maximum} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_url(base_url: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ErpSourceError(f"erp base_url must be http(s): {base_url!r}")
     if parsed.username or parsed.password:
         raise ErpSourceError("erp base_url must not embed credentials (userinfo)")
-    return base_url.rstrip("/")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ErpSourceError(f"erp base_url has no hostname: {base_url!r}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port not in _ALLOWED_PORTS:
+        raise ErpSourceError(f"erp base_url port must be one of {sorted(_ALLOWED_PORTS)} (got {port})")
+    # 构造期即解析并校验全部解析 IP（fail-closed 最早点；_default_fetch
+    # 每页请求仍会重新解析校验一次，防止 DNS 变化）。
+    _resolve_verified_host(hostname)
+    return base_url.rstrip("/"), hostname
 
 
 def _default_fetch(url: str, auth_token: str, timeout_seconds: int) -> tuple[int, bytes]:
-    """默认 fetch：urllib（零依赖）；返回 (status, body_bytes)。"""
-    import urllib.request
+    """默认 fetch：SSRF 防护的 urllib（零额外依赖）；返回 (status, body_bytes)。
+
+    * DNS 解析 → 校验全部解析 IP（私有/环回/metadata 全拒，fail-closed）；
+    * 连接使用已验证 IP（防 DNS rebinding）；Host 头与 SNI 保留原主机名；
+    * 重定向被拒绝（不跟随 3xx）；
+    * 响应体有 2 MiB 上限。
+    """
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ErpSourceError(f"erp fetch url has no hostname: {url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    verified_ip = _resolve_verified_host(hostname)
 
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     if auth_token:
         request.add_header("Authorization", f"Bearer {auth_token}")
+    opener = urllib.request.build_opener(
+        _VerifiedIPHandler(verified_ip, hostname, port, timeout_seconds),
+        _NoRedirectHandler(),
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            return (response.status, response.read())
+        with opener.open(request, timeout=timeout_seconds) as response:
+            if 300 <= response.status < 400:
+                raise ErpSourceError(f"erp fetch returned redirect HTTP {response.status}; redirects are not allowed")
+            body = _read_limited(response, _MAX_RESPONSE_BYTES)
+            return (response.status, body)
+    except ErpSourceError:
+        raise
     except Exception as exc:  # 网络/超时/HTTP —— fail-closed
         raise ErpSourceError(f"erp fetch failed for {url}: {exc}") from exc
 
@@ -137,6 +278,8 @@ def _parse_erp_product(raw: Any, index: int) -> dict[str, Any]:
         raise ErpSourceError(f"erp product at index {index} is missing title")
     if isinstance(price, bool) or not isinstance(price, (int, float)) or not price >= 0:
         raise ErpSourceError(f"erp product at index {index} has invalid price")
+    if not math.isfinite(float(price)):
+        raise ErpSourceError(f"erp product at index {index} has a non-finite price")
     if not isinstance(stock, int) or stock < 0:
         raise ErpSourceError(f"erp product at index {index} has invalid stock")
     row = {
@@ -166,12 +309,19 @@ def sync_erp_products(
       （绝不静默合并冲突权威源）；
     * 任何网络/结构错误 → ErpSourceError（fail-closed），不部分落盘后假装成功。
     """
-    base = _validate_url(config.base_url)
+    base, _hostname = _validate_url(config.base_url)
     report = ErpSyncReport()
     offset = 0
+    page = 0
     now_ts = now()
 
     while True:
+        page += 1
+        if page > _MAX_PAGES:
+            raise ErpSourceError(
+                f"erp feed returned more than {_MAX_PAGES} full pages; "
+                "aborting to bound fetch/write amplification"
+            )
         params = urllib.parse.urlencode(
             {"limit": config.page_size, "offset": offset}
         )

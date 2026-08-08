@@ -2,9 +2,8 @@
 
 Use:
 
-```bash
-python3 scripts/shopping.py --db ./shopping-cli.sqlite legacy import --from-json ./shopping.json --format json
-```
+> v3.0 起 `legacy import` 命令已随宿主适配器子系统移除。旧 Shopping JSON 数据
+> 不再支持自动导入；如仍需迁移，请直接写 SQL 插入 merchants/products 表。
 
 The legacy adapter imports:
 

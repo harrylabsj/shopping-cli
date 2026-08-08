@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from shopping_cli.core.catalog import product_summary, require_merchant, require_product
+from shopping_cli.core.catalog import product_summary, public_product_summary, require_merchant, require_product
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event, conversation_audit_events, next_actor_for_status
 from shopping_cli.db.session import decode_json, encode_json, now_iso
@@ -179,6 +179,17 @@ def append_message(
         else:
             status = conversation["status"]
     status = _normalize_conversation_status(status)
+    # 状态转移表：merchant 侧发送者只能推进到 waiting_buyer / human_required /
+    # closed。waiting_merchant 会重新武装 resident 队列（feedback 循环），
+    # open 会把会话卡死在无队列状态——两者都破坏路由/谈判完整性（H4 系）。
+    # closed 走显式 close 路径（含 unresolved-review 检查）；buyer 侧仍不
+    # 允许显式设置状态（handler 层拦截）。
+    if sender in {"merchant", "merchant_agent"}:
+        if status not in {"waiting_buyer", "human_required", "closed"}:
+            raise ValidationError(
+                f"merchant senders may only set status to waiting_buyer, human_required "
+                f"or closed (got {status!r})"
+            )
     if status == "human_required":
         payload["reason"] = _normalize_review_text(payload.get("reason"), "human_required")
     next_actor = next_actor_for_status(status, str(payload.get("reason") or ""))
@@ -359,7 +370,9 @@ def conversation_summary(conn: sqlite3.Connection, conversation_id: str) -> dict
     }
     if row["sku"]:
         try:
-            summary["product"] = product_summary(conn, row["sku"])
+            # 公开投影：product_summary 内嵌完整 merchant_summary（含
+            # contact / automation_boundaries 底价）——买家可见路径必须剥离。
+            summary["product"] = public_product_summary(product_summary(conn, row["sku"]))
         except NotFoundError:
             pass
     return summary

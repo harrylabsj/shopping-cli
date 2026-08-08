@@ -139,34 +139,28 @@ def generate_reply(
         reason = "low_stock"
     if not reason and buyer_message["intent"] == "ask_delivery" and not delivery.get("service_area"):
         reason = "unclear_delivery"
+    delivery_text = "delivery rule is missing"
+    if delivery.get("service_area"):
+        delivery_text = (
+            f"delivery area {delivery['service_area']}, ETA {_safe_non_negative_int(delivery.get('eta_minutes'))} minutes, "
+            f"fee {_safe_non_negative_float(delivery.get('fee')):.2f} {delivery['currency']}"
+        )
     if reason == "bargaining":
-        bargain_amount = _authorized_bargain_amount(product)
-        if bargain_amount:
-            delivery_text = "delivery rule is missing"
-            if delivery.get("service_area"):
-                delivery_text = (
-                    f"delivery area {delivery['service_area']}, ETA {_safe_non_negative_int(delivery.get('eta_minutes'))} minutes, "
-                    f"fee {_safe_non_negative_float(delivery.get('fee')):.2f} {delivery['currency']}"
-                )
-            return (
-                f"{product['title']} has a merchant-authorized bargain rule. "
-                f"The approved consultation price is {bargain_amount} {product['currency']}; "
-                f"catalog price {price:.2f} {product['currency']}, stock {stock}; {delivery_text}. {disclaimer}",
-                False,
-                "",
-            )
+        # 议价底价是隐私——negotiation 路径以 _leaks_private_threshold 守护，
+        # resident 若直接报价（_authorized_bargain_amount）会把授权底价写进
+        # 公开会话。一致处理：议价请求一律路由人工审查，不自动报价。
+        return (
+            f"{product['title']} needs merchant human review for price negotiation. "
+            f"Catalog price {price:.2f} {product['currency']}, stock {stock}; {delivery_text}. {disclaimer}",
+            True,
+            "bargaining",
+        )
     if reason:
         return (
             f"{product['title']} is listed at {price:.2f} {product['currency']} with "
             f"{stock} in stock. This request needs merchant human review because: {reason}. {disclaimer}",
             True,
             reason,
-        )
-    delivery_text = "delivery rule is missing"
-    if delivery.get("service_area"):
-        delivery_text = (
-            f"delivery area {delivery['service_area']}, ETA {_safe_non_negative_int(delivery.get('eta_minutes'))} minutes, "
-            f"fee {_safe_non_negative_float(delivery.get('fee')):.2f} {delivery['currency']}"
         )
     return (
         f"{product['title']} has stock {stock} and current price "
@@ -187,6 +181,11 @@ def process_once_with_tools(tools: MerchantAgentTools, merchant_id: str) -> dict
     for conversation in conversations:
         buyer_message = latest_buyer_message(conversation)
         if buyer_message is None:
+            continue
+        # Negotiation-protocol 消息由 kiwi merchant 运行时经 negotiation API
+        # 驱动——resident 抢 claim 会打断买家的谈判回合（协商方 claim 失败），
+        # 且 generate_reply 曾把授权底价写进公开会话。协商消息一律跳过。
+        if (buyer_message.get("structured_payload") or {}).get("protocol_version"):
             continue
         try:
             buyer_message_id = _positive_message_id(buyer_message.get("id"))

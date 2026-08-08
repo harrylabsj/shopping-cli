@@ -2218,7 +2218,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                 {**payload, "merchant_token": merchant["merchant_token"]},
             )
             self.assertEqual(status, 200)
-            self.assertEqual(audited["event"]["event"], "llm_tool_call")
+            self.assertEqual(audited["event"]["event"], "agent_tool_call")
             self.assertEqual(audited["event"]["details"]["host"], "hermes")
             self.assertEqual(audited["event"]["actor"], "seller-a")
             self.assertEqual(audited["event"]["details"]["token_scope"], "merchant")
@@ -2231,7 +2231,7 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
             tool_events = [
-                event for event in conversation["conversation"]["audit_events"] if event["event"] == "llm_tool_call"
+                event for event in conversation["conversation"]["audit_events"] if event["event"] == "agent_tool_call"
             ]
             self.assertEqual(tool_events[-1]["details"]["tool"], "conversation_send")
             self.assertEqual(tool_events[-1]["details"]["status"], "ok")
@@ -3046,6 +3046,20 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual([review["id"] for review in queue["reviews"]], [second_review_id])
 
+            # H7: operator 路由的 suspicious_content flag 不能被 merchant 自销
+            status, rejected = self.request(
+                app,
+                "POST",
+                f"/human-review/{second_review_id}/resolve",
+                {
+                    "action": "reply",
+                    "sender": "merchant",
+                    "text": "Self-resolve attempt.",
+                    "merchant_token": merchant_a["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 403)
+            # 只有 admin 身份可以销 operator 仲裁的 flag。
             status, final = self.request(
                 app,
                 "POST",
@@ -3054,7 +3068,7 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "action": "reply",
                     "sender": "merchant",
                     "text": "Human checked the suspicious content review.",
-                    "merchant_token": merchant_a["merchant_token"],
+                    "admin_token": self.TEST_ADMIN_TOKEN,
                 },
             )
             self.assertEqual(status, 200)
@@ -3123,7 +3137,9 @@ class PublicMarketplaceTest(unittest.TestCase):
             )
             self.assertEqual(status, 200)
 
-            status, closed_by_conversation = self.request(
+            # H7: suspicious_content（operator 路由）不能由 merchant 自销——
+            # 先验证 merchant token 被拒，再以 admin 身份关闭。
+            status, rejected = self.request(
                 app,
                 "POST",
                 "/conversations/CONV-0002/human-review/resolve",
@@ -3131,6 +3147,17 @@ class PublicMarketplaceTest(unittest.TestCase):
                     "action": "close",
                     "sender": "merchant",
                     "merchant_token": merchant_token,
+                },
+            )
+            self.assertEqual(status, 403)
+            status, closed_by_conversation = self.request(
+                app,
+                "POST",
+                "/conversations/CONV-0002/human-review/resolve",
+                {
+                    "action": "close",
+                    "sender": "merchant",
+                    "admin_token": self.TEST_ADMIN_TOKEN,
                 },
             )
             self.assertEqual(status, 200)

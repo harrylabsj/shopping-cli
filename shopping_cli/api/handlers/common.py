@@ -5,6 +5,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from shopping_cli.core.catalog import (
+    public_merchant_summary as catalog_public_merchant_summary,
+    public_product_summary as catalog_public_product_summary,
+)
 from shopping_cli.core.errors import ValidationError
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -64,15 +68,9 @@ def result_offset(value: Any) -> int:
 
 
 def public_merchant_summary(merchant: dict[str, Any]) -> dict[str, Any]:
-    summary = dict(merchant)
-    summary.pop("contact", None)
-    summary.pop("automation_boundaries", None)
-    return summary
+    """公开投影：剥离商家私有字段（contact / automation_boundaries）。"""
+    return catalog_public_merchant_summary(merchant)
 
 
 def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
-    summary = dict(product)
-    merchant = summary.get("merchant")
-    if isinstance(merchant, dict):
-        summary["merchant"] = public_merchant_summary(merchant)
-    return summary
+    return catalog_public_product_summary(product)
