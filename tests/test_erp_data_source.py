@@ -220,6 +220,73 @@ class ErpDataSourceTest(unittest.TestCase):
                 self.conn, ErpSyncConfig(base_url="https://erp.example:8443"), fetch=fake_fetch([PAGE1])
             )
 
+    def test_default_fetch_connects_to_verified_ip_via_callable_factory(self) -> None:
+        """真实 _default_fetch 传输路径回归（全 mock，不访问公网）。
+
+        ``urllib.request.AbstractHTTPHandler.do_open`` 的契约要求第一个参数是
+        可调用连接工厂（会以 ``http_class(host, timeout=...)`` 调用它），此前传
+        实例会在真实 fetch 路径抛 ``TypeError: ... object is not callable``。
+        修复后：http/https 都经 _VerifiedIPHandler 连接已验证 IP（而非重新解析
+        原主机名——防 DNS rebinding / SSRF 旁路），Host/SNI 保留原主机名。
+        """
+        import io
+        from unittest.mock import patch
+
+        from shopping_cli.data_sources import erp_source
+
+        response_bytes = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"{}"
+        )
+        created: list[tuple[object, object]] = []
+        sni_hosts: list[str] = []
+
+        class _FakeSocket:
+            def __init__(self) -> None:
+                self.stream = io.BytesIO(response_bytes)
+
+            def settimeout(self, *_args: object) -> None:
+                return None
+
+            def sendall(self, _data: object) -> None:
+                return None
+
+            def makefile(self, _mode: str) -> io.BytesIO:
+                return self.stream
+
+            def close(self) -> None:
+                return None
+
+        def fake_create_connection(address: object, timeout: object = None) -> _FakeSocket:
+            created.append((address, timeout))
+            return _FakeSocket()
+
+        def fake_wrap_socket(sock: object, server_hostname: str | None = None) -> object:
+            sni_hosts.append(server_hostname or "")
+            return sock
+
+        with (
+            patch.object(erp_source, "_resolve_verified_host", return_value="203.0.113.1"),
+            patch.object(erp_source.socket, "create_connection", side_effect=fake_create_connection),
+        ):
+            status, body = erp_source._default_fetch("http://erp.example/products?limit=1", "", 15)
+        self.assertEqual((status, body), (200, b"{}"))
+        self.assertEqual(created, [(("203.0.113.1", 80), 15)])
+
+        created.clear()
+        with (
+            patch.object(erp_source, "_resolve_verified_host", return_value="203.0.113.1"),
+            patch.object(erp_source.socket, "create_connection", side_effect=fake_create_connection),
+            patch.object(erp_source.ssl.SSLContext, "wrap_socket", side_effect=fake_wrap_socket),
+        ):
+            status, body = erp_source._default_fetch("https://erp.example/products?limit=1", "", 15)
+        self.assertEqual((status, body), (200, b"{}"))
+        self.assertEqual(created, [(("203.0.113.1", 443), 15)])
+        self.assertEqual(sni_hosts, ["erp.example"])
+
     def test_feed_beyond_page_cap_aborts(self) -> None:
         """恶意/异常 feed 永远返回满页 → 超过页数硬上限必须中止。"""
         def always_full(_url):
