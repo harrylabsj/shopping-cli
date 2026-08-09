@@ -18,7 +18,7 @@ write mode：
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 # ── write mode（v0.3 §4）───────────────────────────────────────────────────
 
@@ -33,11 +33,14 @@ class AuthorityConflictError(Exception):
     """两个配置源对同一字段都声明权威且无优先级（fail-closed，v0.3 §5）。"""
 
 
+T = TypeVar("T")
+
+
 @dataclass(frozen=True)
-class CommerceField:
+class CommerceField(Generic[T]):
     """per-field provenance（v0.3 §5 记录形状）。"""
 
-    value: Any
+    value: T
     authority_source: str
     source_revision: str = ""
     observed_at: str = ""
