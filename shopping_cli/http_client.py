@@ -16,10 +16,52 @@ HTTPTransport = Callable[
     dict[str, Any],
 ]
 MAX_HTTP_TIMEOUT_SECONDS = 60.0
+MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class MarketplaceHTTPError(RuntimeError):
     """Raised when the Marketplace API transport or response is invalid."""
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects for authenticated Marketplace requests.
+
+    urllib's default redirect handler can replay request headers on the next
+    hop. Rejecting redirects at the transport boundary prevents a Bearer
+    credential from crossing origins (and makes the failure explicit to the
+    caller).
+    """
+
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def _bounded_read(response: Any) -> bytes:
+    """Read a response body without allowing unbounded memory growth."""
+    content_length = None
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            content_length = headers.get("Content-Length")
+        except AttributeError:
+            content_length = None
+    if content_length is None and hasattr(response, "getheader"):
+        content_length = response.getheader("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_HTTP_RESPONSE_BYTES:
+                raise MarketplaceHTTPError("Marketplace API response exceeds 8 MiB limit")
+        except (TypeError, ValueError):
+            pass
+    try:
+        raw_body = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
+    except TypeError:
+        # Small test doubles and embedding transports may expose read() without
+        # a size argument; retain compatibility while enforcing the post-read cap.
+        raw_body = response.read()
+    if len(raw_body) > MAX_HTTP_RESPONSE_BYTES:
+        raise MarketplaceHTTPError("Marketplace API response exceeds 8 MiB limit")
+    return raw_body
 
 
 def safe_http_timeout(value: Any, default: float = 10.0) -> float:
@@ -94,11 +136,16 @@ class MarketplaceHTTPClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            opener = self.opener or urllib.request.urlopen
+            opener = self.opener or urllib.request.build_opener(_NoRedirectHandler())
             with opener(request, timeout=self.timeout) as response:
-                raw_body = response.read()
+                status = int(getattr(response, "status", 200))
+                if 300 <= status < 400:
+                    raise MarketplaceHTTPError(
+                        f"Marketplace API redirect refused (HTTP {status})"
+                    )
+                raw_body = _bounded_read(response)
         except urllib.error.HTTPError as exc:  # pragma: no cover - network path
-            raw_body = exc.read()
+            raw_body = _bounded_read(exc)
             raise MarketplaceHTTPError(self.error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")) from exc
         except TimeoutError as exc:
             raise MarketplaceHTTPError(f"Marketplace API request timed out: {exc}") from exc

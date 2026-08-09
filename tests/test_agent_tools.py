@@ -699,6 +699,67 @@ class AgentToolsBoundaryTest(unittest.TestCase):
             any(call[0] == "heartbeat" and call[3].get("last_error") == "RuntimeError: temporary catalog failure" for call in tools.calls)
         )
 
+    def test_marketplace_client_refuses_redirect_before_replaying_bearer(self):
+        from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
+
+        class RedirectResponse:
+            status = 302
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return b""
+
+        class RedirectOpener:
+            def __init__(self):
+                self.request = None
+
+            def __call__(self, request, timeout=0):
+                self.request = request
+                return RedirectResponse()
+
+        opener = RedirectOpener()
+        with patch("shopping_cli.http_client.urllib.request.build_opener", return_value=opener):
+            client = MarketplaceHTTPClient("https://market.example", "secret-token")
+            with self.assertRaises(MarketplaceHTTPError) as raised:
+                client.request("GET", "/agents")
+
+        self.assertIn("redirect refused", str(raised.exception))
+        self.assertEqual(opener.request.get_header("Authorization"), "Bearer secret-token")
+
+    def test_marketplace_client_rejects_oversized_response_body(self):
+        from shopping_cli.http_client import (
+            MAX_HTTP_RESPONSE_BYTES,
+            MarketplaceHTTPClient,
+            MarketplaceHTTPError,
+        )
+
+        class OversizedResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=None):
+                length = MAX_HTTP_RESPONSE_BYTES + 1 if size else MAX_HTTP_RESPONSE_BYTES + 1
+                return b"x" * length
+
+        with self.assertRaises(MarketplaceHTTPError) as raised:
+            MarketplaceHTTPClient(
+                "https://market.example",
+                "secret-token",
+                opener=lambda request, timeout=0: OversizedResponse(),
+            ).request("GET", "/agents")
+
+        self.assertIn("8 MiB", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
