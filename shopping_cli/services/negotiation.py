@@ -39,6 +39,10 @@ from shopping_cli.core.policies import list_policies
 from shopping_cli.db.session import decode_json, now_iso
 from shopping_cli.services import tokens as token_service
 from shopping_cli.services.conversations import append_conversation_closed_audit
+from shopping_cli.services.negotiation_gates import (
+    buyer_gate as _buyer_gate,
+    check_proposal_facts as _check_proposal_facts,
+)
 from shopping_cli.services.negotiation_policy_helpers import (
     leaks_private_threshold as _leaks_private_threshold,
 )
@@ -516,63 +520,6 @@ def build_snapshot(
     return snapshot
 
 
-def _check_proposal_facts(
-    conn: sqlite3.Connection,
-    conversation: sqlite3.Row,
-    proposal: dict[str, Any],
-) -> GateOutcome:
-    """Fact checks shared by both roles, re-read from the latest catalog data.
-
-    Beyond purchase feasibility (quantity <= stock) this verifies the
-    proposal's observed stock quantity/status against the authoritative
-    server-side stock, so a stale or forged inventory observation is never
-    written into a public structured message."""
-    sku = str(conversation["sku"] or "").strip()
-    if not sku or proposal["sku"] != sku:
-        return _reject("unknown_product", "磋商商品与会话商品不一致，请基于最新快照中的商品报价。")
-    try:
-        product = product_summary(conn, sku)
-    except NotFoundError:
-        return _reject("unknown_product", "商品当前不可用，请重新获取快照。")
-    if product["merchant_id"] != conversation["merchant_id"]:
-        return _reject("unknown_product", "商品不属于该商家，请重新获取快照。")
-    if proposal["currency"] != product["currency"]:
-        return _reject("currency_mismatch", f"币种必须为 {product['currency']}。")
-    stock_qty = int(product["stock"])
-    if stock_qty <= 0:
-        return _reject("insufficient_stock", "商品当前无库存，请重新获取快照后再报价。")
-    if int(proposal["quantity"]) > stock_qty:
-        return _reject("insufficient_stock", f"当前可售库存为 {stock_qty} 件，请调整数量。")
-    # Authoritative inventory cross-check: the observed stock carried by the
-    # proposal must match the latest server-side stock, otherwise a forged
-    # observation would be written into the public structured message.
-    expected_status = "available" if stock_qty > 2 else "low" if stock_qty > 0 else "out_of_stock"
-    observed = proposal["stock"]
-    if int(observed["quantity"]) != stock_qty or observed["status"] != expected_status:
-        return _reject(
-            "stale_inventory",
-            f"库存观察与服务端最新库存（{stock_qty} 件，{expected_status}）不一致，请重新获取快照后再报价。",
-        )
-    now = datetime.now(timezone.utc)
-    observed_at = protocol.parse_rfc3339(proposal["stock"]["observed_at"])
-    valid_until = protocol.parse_rfc3339(proposal["valid_until"])
-    eta_start = protocol.parse_rfc3339(proposal["delivery"]["eta_start"])
-    eta_end = protocol.parse_rfc3339(proposal["delivery"]["eta_end"])
-    if observed_at is None or valid_until is None or eta_start is None or eta_end is None:
-        return _reject("invalid_timestamp", "时间字段必须是带时区的 RFC 3339 时间戳。")
-    if valid_until <= now:
-        return _reject("quote_expired", "报价有效期已过期，请重新获取快照后再报价。")
-    if eta_end < eta_start:
-        return _reject("invalid_delivery", "配送时效结束时间早于开始时间，请修正。")
-    valid_refs = {
-        f"policy:{policy['code']}" for policy in list_policies(conn, str(conversation["merchant_id"]), limit=100)
-    }
-    unknown_refs = [ref for ref in proposal["after_sales_policy_refs"] if ref not in valid_refs]
-    if unknown_refs:
-        return _reject("unknown_policy_ref", f"售后政策引用不存在或已失效: {unknown_refs[0]}。")
-    return _ACCEPT
-
-
 def _merchant_gate(
     conn: sqlite3.Connection,
     conversation: sqlite3.Row,
@@ -604,25 +551,6 @@ def _merchant_gate(
     elif unit_price < float(product["price"]):
         return _human("unauthorized_discount", "该折扣没有商家授权规则，需要人工处理。")
     return _ACCEPT
-
-
-def _buyer_gate(
-    conn: sqlite3.Connection,
-    conversation: sqlite3.Row,
-    decision: dict[str, Any],
-) -> GateOutcome:
-    proposal = decision.get("proposal")
-    if decision["action"] in {"propose", "counter"} and proposal is None:
-        return _reject("missing_proposal", "propose/counter 必须携带结构化 proposal。")
-    if proposal is None:
-        return _ACCEPT
-    # Non-binding boundary: the buyer side checks structure, facts and expiry
-    # only. Private budgets live in the Kiwi profile and are never sent here.
-    # A buyer proposal is a non-binding intent, but an accepted one is still
-    # written into the public structured message, so the same authoritative
-    # stock-observation consistency (quantity/status vs latest server stock)
-    # is enforced for buyers as for merchants.
-    return _check_proposal_facts(conn, conversation, proposal)
 
 
 def _find_decision_replay(
