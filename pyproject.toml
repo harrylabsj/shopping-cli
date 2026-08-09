@@ -58,3 +58,6 @@ omit = ["shopping_cli/__main__.py"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shopping_cli*"]
+
+[tool.setuptools.package-data]
+shopping_cli = ["contracts/*.json"]
