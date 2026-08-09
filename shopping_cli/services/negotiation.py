@@ -10,7 +10,6 @@ creates orders, payments or inventory reservations.
 from __future__ import annotations
 
 import math
-import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,6 +39,9 @@ from shopping_cli.core.policies import list_policies
 from shopping_cli.db.session import decode_json, now_iso
 from shopping_cli.services import tokens as token_service
 from shopping_cli.services.conversations import append_conversation_closed_audit
+from shopping_cli.services.negotiation_policy_helpers import (
+    leaks_private_threshold as _leaks_private_threshold,
+)
 
 MAX_PENDING_MESSAGES = 100
 MAX_SNAPSHOT_MESSAGES = 50
@@ -58,20 +60,6 @@ _POLICY_AUDIT_EVENTS = {
 }
 
 # Words that turn a quoted number into a private-threshold disclosure.
-_THRESHOLD_TERMS = (
-    "最低价",
-    "底价",
-    "最低可成交",
-    "底线",
-    "成本价",
-    "lowest price",
-    "floor price",
-    "min price",
-    "minimum price",
-    "cost price",
-)
-
-
 @dataclass(frozen=True)
 class NegotiationActor:
     """Server-derived identity behind an API token. Never client-declared."""
@@ -615,30 +603,6 @@ def _check_proposal_facts(
     if unknown_refs:
         return _reject("unknown_policy_ref", f"售后政策引用不存在或已失效: {unknown_refs[0]}。")
     return _ACCEPT
-
-
-def _normalize_digits(text: str) -> str:
-    """全角→半角数字并去掉空白/千分位分隔符，供底价匹配使用。"""
-    table = str.maketrans("０１２３４５６７８９．", "0123456789.")
-    return re.sub(r"[\s,，]", "", text.translate(table))
-
-
-def _leaks_private_threshold(public_message: str, floor_str: str) -> bool:
-    try:
-        floor_value = float(floor_str)
-    except (TypeError, ValueError):
-        return False
-    candidates = {floor_str, f"{floor_value:.2f}"}
-    if floor_value.is_integer():
-        candidates.add(str(int(floor_value)))
-    normalized_candidates = {_normalize_digits(c) for c in candidates}
-    lowered = public_message.lower()
-    if not any(term in lowered or term in public_message for term in _THRESHOLD_TERMS):
-        return False
-    normalized_message = _normalize_digits(public_message)
-    return any(c in public_message for c in candidates) or any(
-        n in normalized_message for n in normalized_candidates
-    )
 
 
 def _merchant_gate(
