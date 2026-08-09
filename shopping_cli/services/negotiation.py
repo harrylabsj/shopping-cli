@@ -54,6 +54,13 @@ from shopping_cli.services.negotiation_policy_result import (
     rejected as _reject,
 )
 from shopping_cli.services.negotiation_snapshot import snapshot_message as _snapshot_message
+from shopping_cli.services.negotiation_snapshot_projection import (
+    latest_open_issues as _latest_open_issues,
+    latest_proposal as _latest_proposal,
+    project_delivery as _project_delivery,
+    project_product as _project_product,
+    project_stock as _project_stock,
+)
 
 MAX_PENDING_MESSAGES = 100
 MAX_SNAPSHOT_MESSAGES = 50
@@ -454,28 +461,13 @@ def build_snapshot(
 
     observed_at = protocol.now_rfc3339()
     stock_qty = int(product["stock"])
-    stock_status = "available" if stock_qty > 2 else "low" if stock_qty > 0 else "out_of_stock"
     delivery_rule = product.get("delivery") or {}
-    eta_minutes = int(delivery_rule.get("eta_minutes") or 60)
     now = datetime.now(timezone.utc)
-    eta_start = now.timestamp() + eta_minutes * 60
-    eta_end = now.timestamp() + (eta_minutes + 120) * 60
 
     messages = [_snapshot_message(message) for message in conversation_messages(conn, conversation_id)]
     messages = messages[-MAX_SNAPSHOT_MESSAGES:]
-    current_proposal = None
-    open_issues: list[str] = []
-    for message in reversed(messages):
-        if current_proposal is None and isinstance(message.get("proposal"), dict):
-            current_proposal = message["proposal"]
-    for message in reversed(conversation_messages(conn, conversation_id)):
-        payload = message.get("structured_payload") or {}
-        decision = payload.get("decision") if payload.get("protocol_version") == protocol.PROTOCOL_VERSION else None
-        if isinstance(decision, dict):
-            issues = decision.get("open_issues")
-            if isinstance(issues, list):
-                open_issues = [protocol.truncate_text(issue, 500) for issue in issues if str(issue or "").strip()][:32]
-            break
+    current_proposal = _latest_proposal(messages)
+    open_issues = _latest_open_issues(conversation_messages(conn, conversation_id))
 
     snapshot: dict[str, Any] = {
         "protocol_version": protocol.PROTOCOL_VERSION,
@@ -486,36 +478,15 @@ def build_snapshot(
         },
         "role": actor.role,
         "in_reply_to_message_id": message_id,
-        "product": {
-            "sku": protocol.truncate_text(product["sku"], 128),
-            "title": protocol.truncate_text(product["title"], 500),
-            "currency": protocol.truncate_text(product["currency"], 8),
-            "list_price": float(product["price"]),
-        },
-        "stock": {
-            "status": stock_status,
-            "quantity": stock_qty,
-            "observed_at": observed_at,
-            "reserved": False,
-            "source": {"backend": "local_marketplace", "observed_at": observed_at},
-        },
-        "delivery": {
-            "eta_start": datetime.fromtimestamp(eta_start, timezone.utc).isoformat(timespec="seconds"),
-            "eta_end": datetime.fromtimestamp(eta_end, timezone.utc).isoformat(timespec="seconds"),
-            "fee": float(delivery_rule.get("fee") or 0),
-        },
+        "product": _project_product(product),
+        "stock": _project_stock(stock_qty, observed_at),
+        "delivery": _project_delivery(delivery_rule, now=now),
         "after_sales_policies": _policy_ref_summary(conn, str(conversation["merchant_id"])),
         "messages": messages,
         "current_proposal": current_proposal,
         "open_issues": open_issues,
         "policy_results": _own_policy_results(conn, conversation_id, actor.role),
     }
-    description = protocol.truncate_text(product.get("description"), 2000)
-    if description:
-        snapshot["product"]["description"] = description
-    notes = protocol.truncate_text(delivery_rule.get("notes"), 500)
-    if notes:
-        snapshot["delivery"]["notes"] = notes
     protocol.validate_contract("snapshot", snapshot)
     return snapshot
 
