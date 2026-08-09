@@ -11,7 +11,6 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable
 
 from shopping_cli import VERSION
@@ -28,6 +27,7 @@ from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.api.limits import max_request_body_bytes, validate_payload
+from shopping_cli.api.error_response import build_error_response
 from shopping_cli.api.route_matching import match_path as _match_path
 from shopping_cli.core.errors import (
     AuthError,
@@ -135,10 +135,7 @@ class _RequestBodyLimitMiddleware:
 
 
 def _json_error_response(status_code: int, error: str) -> Any:
-    payload = {"ok": False, "error": error}
-    if JSONResponse is not None:  # pragma: no cover - exercised with fastapi installed
-        return JSONResponse(status_code=status_code, content=payload)
-    return SimpleNamespace(status_code=status_code, body=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    return build_error_response(status_code, error, JSONResponse)
 
 
 def _auth_header_default() -> Any:
