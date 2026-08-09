@@ -42,6 +42,13 @@ from shopping_cli.services.conversations import append_conversation_closed_audit
 from shopping_cli.services.negotiation_policy_helpers import (
     leaks_private_threshold as _leaks_private_threshold,
 )
+from shopping_cli.services.negotiation_policy_result import (
+    ACCEPTED_OUTCOME as _ACCEPT,
+    GateOutcome,
+    build_policy_result as _policy_result,
+    human_required as _human,
+    rejected as _reject,
+)
 
 MAX_PENDING_MESSAGES = 100
 MAX_SNAPSHOT_MESSAGES = 50
@@ -530,24 +537,6 @@ def build_snapshot(
     return snapshot
 
 
-@dataclass(frozen=True)
-class GateOutcome:
-    result: str  # "accepted" | "rejected_retryable" | "human_required"
-    reason_codes: tuple[str, ...]
-    public_reason: str
-
-
-_ACCEPT = GateOutcome("accepted", (), "")
-
-
-def _reject(code: str, public_reason: str) -> GateOutcome:
-    return GateOutcome("rejected_retryable", (code,), public_reason)
-
-
-def _human(code: str, public_reason: str) -> GateOutcome:
-    return GateOutcome("human_required", (code,), public_reason)
-
-
 def _check_proposal_facts(
     conn: sqlite3.Connection,
     conversation: sqlite3.Row,
@@ -680,30 +669,6 @@ def _find_decision_replay(
         ):
             return {"message_id": int(row["id"]), "decision": payload.get("decision")}
     return None
-
-
-def _policy_result(
-    conversation_id: str,
-    result: str,
-    next_actor: str,
-    reason_codes: list[str],
-    public_reason: str,
-    retries_remaining: int,
-    message_id: int | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "protocol_version": protocol.PROTOCOL_VERSION,
-        "result": result,
-        "conversation_id": conversation_id,
-        "next_actor": next_actor,
-        "reason_codes": reason_codes[:32],
-        "public_reason": protocol.truncate_text(public_reason, 1000),
-        "retries_remaining": max(0, retries_remaining),
-    }
-    if message_id is not None:
-        payload["message_id"] = message_id
-    protocol.validate_contract("policy-result", payload)
-    return payload
 
 
 def submit_decision(
