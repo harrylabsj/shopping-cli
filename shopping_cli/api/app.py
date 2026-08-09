@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +28,7 @@ from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.api.limits import max_request_body_bytes, validate_payload
+from shopping_cli.api.route_matching import match_path as _match_path
 from shopping_cli.core.errors import (
     AuthError,
     ConflictError,
@@ -445,19 +445,6 @@ def _negotiation_snapshot(db_path: str | Path, payload: dict[str, Any], query: d
 
 def _negotiation_submit_decision(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     return negotiation_handlers.submit_decision(db_path, payload)
-
-
-def _match_path(template: str, path: str) -> dict[str, str] | None:
-    parts = template.split("/")
-    regex_parts = []
-    for part in parts:
-        if part.startswith("{") and part.endswith("}"):
-            param_name = part[1:-1]
-            regex_parts.append(f"(?P<{param_name}>[^/]+)")
-        else:
-            regex_parts.append(re.escape(part))
-    match = re.match("^" + "/".join(regex_parts) + "$", path)
-    return match.groupdict() if match else None
 
 
 def _buyer_conversation_list(
