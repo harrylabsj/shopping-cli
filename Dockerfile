@@ -1,13 +1,14 @@
-ARG PYTHON_IMAGE=python:3.13.11-slim-bookworm
+ARG PYTHON_IMAGE=python:3.13.11-slim-bookworm@sha256:20080e807bfc404f8450b185cf0fc95d553462673598549613735f70a5b4d5d0
 
 FROM ${PYTHON_IMAGE} AS builder
 WORKDIR /build
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY shopping_cli ./shopping_cli
-RUN python -m pip install --no-cache-dir "build==1.3.0" \
+RUN python -m pip install --no-cache-dir "build==1.3.0" "uv==0.10.6" \
+    && uv export --locked --no-dev --extra api --no-emit-project --format requirements.txt > /tmp/requirements.txt \
+    && python -m pip wheel --no-cache-dir --wheel-dir /wheels --require-hashes -r /tmp/requirements.txt \
     && python -m build --wheel --outdir /wheels \
-    && python -m pip wheel --no-cache-dir --wheel-dir /wheels \
-        "psutil>=5.9" "fastapi>=0.110" "pydantic>=2" "uvicorn>=0.27"
+    && rm -f /tmp/requirements.txt
 
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
