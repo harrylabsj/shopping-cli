@@ -17,6 +17,10 @@ from shopping_cli.core.catalog_text import (
     fts_search_document,
     tokenize,
 )
+from shopping_cli.core.catalog_views import (  # noqa: F401 — preserve catalog module exports
+    public_merchant_summary,
+    public_product_summary,
+)
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -449,26 +453,6 @@ def delivery_rule(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
         "radius_km": _safe_non_negative_float(row["radius_km"]),
         "notes": row["notes"],
     }
-
-
-def public_merchant_summary(merchant: dict[str, Any]) -> dict[str, Any]:
-    """公开投影：剥离商家私有字段（contact / automation_boundaries）。
-
-    会话/买家可见的序列化必须走公开投影——automation_boundaries 含议价
-    底价（negotiation 路径以 _leaks_private_threshold 守护的隐私）。
-    """
-    summary = dict(merchant)
-    summary.pop("contact", None)
-    summary.pop("automation_boundaries", None)
-    return summary
-
-
-def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
-    summary = dict(product)
-    merchant = summary.get("merchant")
-    if isinstance(merchant, dict):
-        summary["merchant"] = public_merchant_summary(merchant)
-    return summary
 
 
 def merchant_summary(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
