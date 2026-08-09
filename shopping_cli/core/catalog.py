@@ -11,6 +11,12 @@ from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationErr
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
+from shopping_cli.core.catalog_text import (
+    cjk_bigrams,
+    fts_query,
+    fts_search_document,
+    tokenize,
+)
 from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -29,79 +35,6 @@ def parse_tags(value: str | list[str] | None) -> list[str]:
         return bounded_string_list([str(item).strip() for item in value if str(item).strip()], "tags")
     parts = re.split(r"[,;，；、\n]+", str(value))
     return bounded_string_list([part.strip() for part in parts if part.strip()], "tags")
-
-
-def tokenize(value: str) -> list[str]:
-    return [token.lower() for token in re.findall(r"[\w\u4e00-\u9fff]+", value or "")]
-
-
-def cjk_bigrams(value: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for sequence in re.findall(r"[\u4e00-\u9fff]+", value or ""):
-        for index in range(0, max(len(sequence) - 1, 0)):
-            term = sequence[index : index + 2]
-            if term not in seen:
-                terms.append(term)
-                seen.add(term)
-    return terms
-
-
-def fts_search_document(value: str) -> str:
-    """Add space-delimited CJK characters and bigrams while preserving the original text.
-
-    unicode61 treats each contiguous CJK block as a single token (e.g.
-    "西湖龙井礼盒" is one token). To support single-character queries and
-    substring matching, we inject each CJK character as an individual token
-    alongside the original text and bigrams.
-    """
-    original = str(value or "")
-    bigrams = cjk_bigrams(original)
-    # Extract every individual CJK character so single-char queries match.
-    singles: list[str] = []
-    seen_singles: set[str] = set()
-    for sequence in re.findall(r"[一-鿿]+", original):
-        for ch in sequence:
-            if ch not in seen_singles:
-                singles.append(ch)
-                seen_singles.add(ch)
-    return " ".join([original, *singles, *bigrams]).strip()
-
-
-def fts_query(query: str) -> str:
-    """Build an FTS5 phrase-query string from a user query.
-
-    Emits phrase queries for whole CJK words, CJK bigrams, and — when the
-    query is a single CJK character — the individual character.  The index
-    document (fts_search_document) carries the original text, individual
-    CJK characters, and bigrams, so all three token classes are searchable.
-    """
-    terms: list[str] = []
-    seen: set[str] = set()
-    # Whole CJK words (contiguous \w+ or CJK runs)
-    for candidate in tokenize(query):
-        if candidate and candidate not in seen:
-            terms.append(candidate)
-            seen.add(candidate)
-    # CJK bigrams
-    cj_bigrams = cjk_bigrams(query)
-    for candidate in cj_bigrams:
-        if candidate and candidate not in seen:
-            terms.append(candidate)
-            seen.add(candidate)
-    # Individual CJK characters — only for single-character queries where
-    # no bigrams exist.  For multi-character queries the bigram and
-    # full-word phrase tokens are precise enough; individual chars would
-    # introduce false positives through the OR semantics.
-    if not cj_bigrams:
-        for ch in query:
-            if "一" <= ch <= "鿿" and ch not in seen:
-                terms.append(ch)
-                seen.add(ch)
-    return " OR ".join(
-        f'"{token.replace(chr(34), chr(34) + chr(34))}"'
-        for token in terms
-    )
 
 
 def require_merchant(conn: sqlite3.Connection, merchant_id: str) -> sqlite3.Row:
