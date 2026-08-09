@@ -113,6 +113,7 @@ def _clear_idempotency_claim(
     conn: Any,
     endpoint: str,
     bootstrap_token_hash: str,
+    buyer_id: str,
     idempotency_key: str,
     request_hash: str,
 ) -> None:
@@ -120,6 +121,7 @@ def _clear_idempotency_claim(
         conn,
         endpoint,
         bootstrap_token_hash,
+        buyer_id,
         idempotency_key,
         request_hash,
     )
