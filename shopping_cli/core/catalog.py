@@ -12,10 +12,13 @@ from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.core.catalog_text import (
-    cjk_bigrams,
     fts_query,
     fts_search_document,
     tokenize,
+)
+from shopping_cli.core.catalog_scoring import (
+    merchant_match_score,
+    product_match_score,
 )
 from shopping_cli.core.catalog_views import (  # noqa: F401 — preserve catalog module exports
     public_merchant_summary,
@@ -870,26 +873,12 @@ def _ensure_merchant_search_index_populated(conn: sqlite3.Connection) -> bool:
 
 
 def _match_score(query: str, product: sqlite3.Row, merchant: Mapping[str, Any]) -> float:
-    query_lower = query.lower()
-    searchable = _search_text(product, merchant).lower()
-    query_tokens = tokenize(query_lower)
-    product_tokens = tokenize(searchable)
-    score = 0.0
-    for token in query_tokens:
-        if token in searchable:
-            score += 10
-    for token in product_tokens:
-        if len(token) >= 2 and token in query_lower:
-            score += 8
-    # CJK bigrams catch substring matches when full-word tokens don't overlap
-    # (e.g. query "今天想买龙井礼盒" vs product "西湖龙井礼盒").
-    for bigram in cjk_bigrams(query_lower):
-        if bigram in searchable:
-            score += 7
-    if _safe_non_negative_int(product["stock"]) > 0:
-        score += 5
-    score -= _safe_non_negative_float(product["price"]) / 1000
-    return round(score, 4)
+    return product_match_score(
+        query,
+        _search_text(product, merchant),
+        _safe_non_negative_int(product["stock"]),
+        _safe_non_negative_float(product["price"]),
+    )
 
 
 def _joined_product_merchant(row: sqlite3.Row) -> dict[str, Any]:
@@ -1173,7 +1162,6 @@ def search_merchants(
 
 
 def _match_merchant_score(query: str, merchant: sqlite3.Row) -> float:
-    query_lower = query.lower()
     searchable = " ".join(
         [
             merchant["id"],
@@ -1182,17 +1170,5 @@ def _match_merchant_score(query: str, merchant: sqlite3.Row) -> float:
             merchant["service_area"],
             " ".join(decode_json(merchant["tags_json"], [])),
         ]
-    ).lower()
-    query_tokens = tokenize(query_lower)
-    merchant_tokens = tokenize(searchable)
-    score = 0.0
-    for token in query_tokens:
-        if token in searchable:
-            score += 10
-    for token in merchant_tokens:
-        if len(token) >= 2 and token in query_lower:
-            score += 8
-    for bigram in cjk_bigrams(query_lower):
-        if bigram in searchable:
-            score += 7
-    return round(score, 4)
+    )
+    return merchant_match_score(query, searchable)
