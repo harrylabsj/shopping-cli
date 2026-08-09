@@ -43,6 +43,11 @@ from shopping_cli.services.negotiation_gates import (
     buyer_gate as _buyer_gate,
     check_proposal_facts as _check_proposal_facts,
 )
+from shopping_cli.services.negotiation_message import (
+    decision_sender as _decision_sender,
+    decision_status as _decision_status,
+    decision_structured_payload as _decision_structured_payload,
+)
 from shopping_cli.services.negotiation_policy_helpers import (
     leaks_private_threshold as _leaks_private_threshold,
 )
@@ -686,19 +691,9 @@ def submit_decision(
             retries_remaining,
         )
 
-    sender = "merchant_agent" if actor.role == "merchant" else "buyer"
-    if decision["action"] == "decline":
-        status = "closed"
-    else:
-        status = "waiting_buyer" if actor.role == "merchant" else "waiting_merchant"
-    structured_payload = {
-        "protocol_version": protocol.PROTOCOL_VERSION,
-        "idempotency_key": idempotency_key,
-        "agent_id": actor.agent_id,
-        "role": actor.role,
-        "source_id": actor.agent_id,
-        "decision": decision,
-    }
+    sender = _decision_sender(actor.role)
+    status = _decision_status(actor.role, decision["action"])
+    structured_payload = _decision_structured_payload(actor.agent_id, actor.role, decision, idempotency_key)
     message = append_message(
         conn,
         conversation_id,
