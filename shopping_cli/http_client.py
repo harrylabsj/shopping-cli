@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 HTTPTransport = Callable[
     [str, str, dict[str, Any] | None, dict[str, Any] | None, dict[str, str]],
@@ -62,6 +62,37 @@ def _bounded_read(response: Any) -> bytes:
     if len(raw_body) > MAX_HTTP_RESPONSE_BYTES:
         raise MarketplaceHTTPError("Marketplace API response exceeds 8 MiB limit")
     return raw_body
+
+
+def _url_origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
+
+
+def _assert_same_origin(response: Any, request_url: str) -> None:
+    """Fail closed when a transport returned a response from another origin.
+
+    urllib exposes the effective URL on responses (``geturl``). The default
+    opener refuses redirects via _NoRedirectHandler, but a caller-supplied
+    opener may follow a 3xx and replay the Authorization header on the next
+    hop. Comparing the effective origin rejects such responses so a
+    cross-origin result is never accepted as the Marketplace API's answer.
+    """
+    geturl = getattr(response, "geturl", None)
+    if geturl is None:
+        return
+    try:
+        effective = urllib.parse.urlsplit(geturl())
+    except ValueError:
+        raise MarketplaceHTTPError("Marketplace API response has an invalid origin") from None
+    requested = urllib.parse.urlsplit(request_url)
+    if _url_origin(effective) != _url_origin(requested):
+        raise MarketplaceHTTPError(
+            f"Marketplace API response origin mismatch ({effective.netloc or geturl()})"
+        )
 
 
 def safe_http_timeout(value: Any, default: float = 10.0) -> float:
@@ -136,13 +167,23 @@ class MarketplaceHTTPClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            opener = self.opener or urllib.request.build_opener(_NoRedirectHandler())
-            with opener(request, timeout=self.timeout) as response:
+            opener = self.opener
+            if opener is None:
+                opener = urllib.request.build_opener(_NoRedirectHandler())
+            # build_opener returns an OpenerDirector (call .open, not
+            # __call__); custom test doubles are callables invoked directly.
+            # Normalize so the default transport path actually engages the
+            # redirect refusal below.
+            if hasattr(opener, "open"):
+                opener = opener.open
+            open_request = cast(Callable[..., Any], opener)
+            with open_request(request, timeout=self.timeout) as response:
                 status = int(getattr(response, "status", 200))
                 if 300 <= status < 400:
                     raise MarketplaceHTTPError(
                         f"Marketplace API redirect refused (HTTP {status})"
                     )
+                _assert_same_origin(response, url)
                 raw_body = _bounded_read(response)
         except urllib.error.HTTPError as exc:  # pragma: no cover - network path
             raw_body = _bounded_read(exc)
