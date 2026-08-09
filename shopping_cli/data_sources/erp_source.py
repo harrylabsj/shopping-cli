@@ -118,7 +118,16 @@ def _resolve_verified_host(hostname: str) -> str:
         raise ErpSourceError(f"erp base_url hostname does not resolve: {hostname}: {exc}") from exc
     if not infos:
         raise ErpSourceError(f"erp base_url hostname does not resolve: {hostname}")
-    ips = {info[4][0] for info in infos}
+    ips: set[str] = set()
+    for info in infos:
+        ip = info[4][0]
+        if not isinstance(ip, str):
+            # getaddrinfo 的 sockaddr 首元素在非 IP 族时可能是 int（如 AF_UNIX）；
+            # 无法当作 IP 校验即拒绝（fail-closed）。
+            raise ErpSourceError(
+                f"erp base_url hostname resolved to a non-address element: {ip!r} ({hostname})"
+            )
+        ips.add(ip)
     for ip in ips:
         if _blocked_ip(ip):
             raise ErpSourceError(f"erp base_url resolves to a blocked address: {ip} ({hostname})")
@@ -137,13 +146,20 @@ class _VerifiedIPHTTPConnection(http.client.HTTPConnection):
 
 
 class _VerifiedIPHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, verified_ip: str, host: str, port: int, timeout: float, context: Any):
+    """连接已验证 IP 的 HTTPS 连接：SNI/Host 保留原主机名。
+
+    不依赖 HTTPSConnection 未在 typeshed 声明的私有 ``_context``/``_host``；
+    用自己的字段保持同样语义（``self.host`` 是公开声明的主机名）。
+    """
+
+    def __init__(self, verified_ip: str, host: str, port: int, timeout: float, context: ssl.SSLContext):
         super().__init__(host, port, timeout=timeout, context=context)
         self._verified_ip = verified_ip
+        self._verified_context = context
 
     def connect(self) -> None:
         sock = socket.create_connection((self._verified_ip, self.port), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self._host)
+        self.sock = self._verified_context.wrap_socket(sock, server_hostname=self.host)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -151,8 +167,21 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-class _VerifiedIPHandler(urllib.request.HTTPHandler):
-    """连接已验证 IP 的 opener handler（http + https 共用一个连接工厂）。"""
+class _VerifiedIPHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    """连接已验证 IP 的 opener handler（http + https 共用已验证 IP/原主机名）。
+
+    同时继承 ``HTTPHandler`` 与 ``HTTPSHandler``，使 ``build_opener`` 跳过内置的
+    默认 HTTP/HTTPS handler——否则 https 会落到默认 ``HTTPSHandler``，它用真实
+    主机名重新解析并连接（DNS rebinding / SSRF 旁路）。
+
+    ``urllib.request.AbstractHTTPHandler.do_open`` 的运行时契约要求第一个参数是
+    可调用连接工厂（它会被调用为 ``http_class(host, timeout=req.timeout)``），而
+    不是已经实例化的连接对象——传实例会在真实 fetch 路径触发
+    ``TypeError: ... object is not callable``。因此这里传一个工厂闭包：它忽略
+    do_open 转发的 host（``req.host`` 可能带冗余端口），始终用本 handler 捕获的
+    已验证 IP / 原主机名 / 端口构造连接——连接目标仍是已验证 IP，Host 头与 SNI
+    保留原主机名。
+    """
 
     def __init__(self, verified_ip: str, host: str, port: int, timeout: float):
         super().__init__()
@@ -162,15 +191,20 @@ class _VerifiedIPHandler(urllib.request.HTTPHandler):
         self._timeout = timeout
 
     def http_open(self, req: Any) -> Any:
-        conn = _VerifiedIPHTTPConnection(self._verified_ip, self._host, self._port, self._timeout)
-        return self.do_open(conn, req)
+        def factory(hostname: str, **kwargs: Any) -> http.client.HTTPConnection:
+            return _VerifiedIPHTTPConnection(self._verified_ip, self._host, self._port, self._timeout)
+
+        return self.do_open(factory, req)
 
     def https_open(self, req: Any) -> Any:
         context = ssl.create_default_context()
-        conn = _VerifiedIPHTTPSConnection(
-            self._verified_ip, self._host, self._port, self._timeout, context
-        )
-        return self.do_open(conn, req)
+
+        def factory(hostname: str, **kwargs: Any) -> http.client.HTTPConnection:
+            return _VerifiedIPHTTPSConnection(
+                self._verified_ip, self._host, self._port, self._timeout, context
+            )
+
+        return self.do_open(factory, req)
 
 
 def _read_limited(response: Any, maximum: int) -> bytes:
