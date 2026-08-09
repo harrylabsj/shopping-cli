@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -238,7 +237,6 @@ class ErpDataSourceTest(unittest.TestCase):
 
     def test_non_finite_price_rejected(self) -> None:
         """price=inf 在解析期被拒（此前会写进投影并让 get_price OverflowError）。"""
-        from unittest.mock import patch
         page = {"results": [{"sku": "INF-1", "title": "Bad", "price": float("inf"), "stock": 1}]}
         def fetch_inf(_url):
             return (200, json.dumps(page).encode("utf-8"))
@@ -253,7 +251,7 @@ class ErpDataSourceTest(unittest.TestCase):
             self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),
             fetch=fake_fetch([PAGE1]),
         )
-        from shopping_cli.core.catalog import set_stock, update_product
+        from shopping_cli.core.catalog import update_product
         update_product(self.conn, "SKU-001", title="手工改的标题")
         row = self.conn.execute(
             "select source from products where sku = 'SKU-001'"

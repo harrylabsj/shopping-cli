@@ -2,7 +2,6 @@ import json
 import unittest
 from pathlib import Path
 
-from shopping_cli.agents.tools import HTTPMerchantAgentTools
 from shopping_cli.api.app import _ROUTE_TABLE
 from shopping_cli.api.route_registry import route_info
 

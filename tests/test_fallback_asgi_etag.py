@@ -13,7 +13,6 @@ import unittest
 from pathlib import Path
 
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp, compute_etag, etag_matches
-from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT, result_limit
 from shopping_cli.core.catalog import create_merchant
 from shopping_cli.db.session import db_session
 
@@ -88,10 +87,9 @@ class FallbackAsgiEtagTest(unittest.TestCase):
         self.assertEqual(body304, b"")
 
     def test_conditional_get_with_stale_etag_returns_200(self) -> None:
-        _status, headers, _body = _capture(self.app, "/merchants")
-        etag = headers["etag"]
+        _status, _headers, _body = _capture(self.app, "/merchants")
 
-        status, _headers, body = _capture(
+        status, _response_headers, body = _capture(
             self.app, "/merchants", headers={"if-none-match": '"stale-etag"'}
         )
         self.assertEqual(status, 200)

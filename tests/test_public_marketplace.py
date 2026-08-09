@@ -13,7 +13,7 @@ from unittest.mock import patch
 from shopping_cli.api.app import create_app
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.handlers import human_review as human_review_handlers
-from shopping_cli.api.route_registry import marketplace_route_info, route_info
+from shopping_cli.api.route_registry import marketplace_route_info
 from shopping_cli.core import catalog
 from shopping_cli.core.conversations import conversation_summary
 from shopping_cli.core.errors import AuthError, ConflictError

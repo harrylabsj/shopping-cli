@@ -20,7 +20,6 @@ from shopping_cli.commerce.adapters import (
 )
 from shopping_cli.commerce.data_source import (
     LOCAL_AUTHORITATIVE,
-    READ_ONLY,
     UPSTREAM_PROXY_WRITE,
     AuthorityConflictError,
     CommerceField,
