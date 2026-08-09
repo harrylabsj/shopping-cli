@@ -1,9 +1,18 @@
-"""Local lifecycle management for resident merchant-agent processes."""
+"""Local lifecycle management for resident merchant-agent processes.
+
+Pure path-naming / id-sanitization / counter-coercion / error-classification
+helpers moved move-only to :mod:`shopping_cli.agents.merchant_state_helpers`;
+the public names are re-exported here (``as`` aliases) so
+``merchant_daemon.safe_merchant_id`` / ``agent_paths`` / ``safe_replied_count``
+/ ``permanent_agent_error`` / ``state_dir_from`` / ``DEFAULT_STATE_DIR`` keep
+their exact surface, path naming, return types and call order. This module
+still owns process start/stop, PID-file locking, signals, log rotation/tailing,
+state file I/O and the process loop.
+"""
 
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import secrets
 import signal
@@ -30,40 +39,23 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     psutil = None
 
 from shopping_cli.agents import merchant_agent
+from shopping_cli.agents.merchant_state_helpers import (
+    DEFAULT_STATE_DIR as DEFAULT_STATE_DIR,
+    agent_paths as agent_paths,
+    permanent_agent_error as permanent_agent_error,
+    safe_merchant_id as safe_merchant_id,
+    safe_replied_count as safe_replied_count,
+    state_dir_from as state_dir_from,
+)
 from shopping_cli.db.session import db_session, decode_json, now_iso
 from shopping_cli.core.limits import safe_non_negative_int, safe_positive_float, safe_non_negative_float_with_max as safe_non_negative_float
 
-DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "shopping-cli"
 MAX_AGENT_INTERVAL_SECONDS = 3600.0
 MAX_AGENT_STOP_TIMEOUT_SECONDS = 300.0
 MAX_AGENT_LOG_TAIL = 1000
 MAX_AGENT_LOG_BYTES = 5 * 1024 * 1024
 MAX_AGENT_LOG_BACKUPS = 3
 MAX_AGENT_ERROR_BACKOFF_SECONDS = 60.0
-
-
-def state_dir_from(value: str | Path | None = None) -> Path:
-    return Path(value or os.environ.get("SHOPPING_CLI_STATE_DIR") or DEFAULT_STATE_DIR).expanduser()
-
-
-def safe_merchant_id(merchant_id: str) -> str:
-    raw = str(merchant_id or "")
-    slug = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw).strip("._-")
-    slug = (slug or "merchant")[:64]
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    return f"{slug}-{digest}"
-
-
-def agent_paths(merchant_id: str, state_dir: str | Path | None = None) -> dict[str, Path]:
-    root = state_dir_from(state_dir)
-    safe_id = safe_merchant_id(merchant_id)
-    return {
-        "state_dir": root,
-        "pid_file": root / "agents" / f"{safe_id}.pid",
-        "state_file": root / "agents" / f"{safe_id}.state.json",
-        "stop_file": root / "agents" / f"{safe_id}.stop",
-        "log_file": root / "logs" / f"{safe_id}.log",
-    }
 
 
 def ensure_agent_dirs(paths: dict[str, Path]) -> None:
@@ -135,20 +127,6 @@ def read_json(path: Path, default: Any) -> Any:
     if isinstance(default, dict) and not isinstance(decoded, dict):
         return default
     return decoded
-
-
-
-
-
-def safe_replied_count(value: Any) -> int:
-    if not isinstance(value, list):
-        return 0
-    return len(value)
-
-
-def permanent_agent_error(error: str) -> bool:
-    lowered = str(error or "").lower()
-    return any(marker in lowered for marker in ("invalid authorization", "revoked authorization", "expired authorization", "token required", "unknown merchant"))
 
 
 def write_json_atomic(path: Path, value: Any) -> None:
