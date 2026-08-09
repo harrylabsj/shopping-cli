@@ -2,7 +2,7 @@ ARG PYTHON_IMAGE=python:3.13.11-slim-bookworm
 
 FROM ${PYTHON_IMAGE} AS builder
 WORKDIR /build
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY shopping_cli ./shopping_cli
 RUN python -m pip install --no-cache-dir "build==1.3.0" \
     && python -m build --wheel --outdir /wheels \
@@ -20,7 +20,7 @@ RUN groupadd --gid 10001 shopping \
     && useradd --uid 10001 --gid shopping --create-home --shell /usr/sbin/nologin shopping \
     && install -d -o shopping -g shopping /data
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels "shopping-cli[api]==3.0.0" \
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels "shopping-cli[api]==3.0.1" \
     && find /wheels -type f -delete
 
 USER 10001:10001

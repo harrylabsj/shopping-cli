@@ -2271,6 +2271,10 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(audited["event"]["details"]["host"], "hermes")
             self.assertEqual(audited["event"]["actor"], "seller-a")
             self.assertEqual(audited["event"]["details"]["token_scope"], "merchant")
+            # 凭据不落审计（SC-SEC-01 硬化）：body 里的 merchant_token 只用
+            # 于鉴权，details 白名单不含凭据（token_scope 是作用域标注，非凭据）
+            self.assertNotIn("merchant_token", audited["event"]["details"])
+            self.assertNotIn("merchant_token", json.dumps(audited["event"]["details"]))
 
             status, conversation = self.request(
                 app,
