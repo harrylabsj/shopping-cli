@@ -24,8 +24,8 @@ from shopping_cli.api.handlers import listings_projection as listings_projection
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
+from shopping_cli.api.error_handlers import register_error_handlers
 from shopping_cli.api.limits import validate_payload
-from shopping_cli.api.error_response import build_error_response
 from shopping_cli.api.request_dispatch import RouteEntry, dispatch_request
 from shopping_cli.api.request_limits import (
     ASGIApp as _ASGIApp,  # noqa: F401 - compat re-export for external importers
@@ -63,10 +63,6 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     RequestValidationError = None  # type: ignore[misc,assignment]
     Request = None  # type: ignore[misc,assignment]
     StarletteHTTPException = None  # type: ignore[misc,assignment]
-
-
-def _json_error_response(status_code: int, error: str) -> Any:
-    return build_error_response(status_code, error, JSONResponse)
 
 
 def _auth_header_default() -> Any:
@@ -730,66 +726,12 @@ def create_app(db_path: str | Path = "shopping-cli.sqlite") -> Any:
     if hasattr(app, "add_middleware"):
         app.add_middleware(_RequestBodyLimitMiddleware)
 
-    @app.exception_handler(AuthError)
-    def auth_error_handler(_request: Any, exc: AuthError) -> Any:
-        return _json_error_response(403, str(exc))
-
-    @app.exception_handler(PermissionDenied)
-    def permission_denied_handler(_request: Any, exc: PermissionDenied) -> Any:
-        return _json_error_response(403, str(exc))
-
-    @app.exception_handler(IdempotencyConflict)
-    def idempotency_conflict_handler(_request: Any, exc: IdempotencyConflict) -> Any:
-        return _json_error_response(409, str(exc))
-
-    @app.exception_handler(ConflictError)
-    def conflict_error_handler(_request: Any, exc: ConflictError) -> Any:
-        return _json_error_response(409, str(exc))
-
-    @app.exception_handler(NotFoundError)
-    def not_found_error_handler(_request: Any, exc: NotFoundError) -> Any:
-        return _json_error_response(404, str(exc))
-
-    @app.exception_handler(RateLimitError)
-    def rate_limit_error_handler(_request: Any, exc: RateLimitError) -> Any:
-        return _json_error_response(429, str(exc))
-
-    @app.exception_handler(PayloadTooLargeError)
-    def payload_too_large_handler(_request: Any, exc: PayloadTooLargeError) -> Any:
-        return _json_error_response(413, str(exc))
-
-    @app.exception_handler(MethodNotAllowedError)
-    def method_not_allowed_handler(_request: Any, exc: MethodNotAllowedError) -> Any:
-        return _json_error_response(405, str(exc))
-
-    @app.exception_handler(ValidationError)
-    def validation_error_handler(_request: Any, exc: ValidationError) -> Any:
-        return _json_error_response(400, str(exc))
-
-    @app.exception_handler(ShoppingCliError)
-    def shopping_cli_error_handler(_request: Any, exc: ShoppingCliError) -> Any:
-        return _json_error_response(400, str(exc))
-
-    if RequestValidationError is not None:  # pragma: no cover - exercised with fastapi installed
-
-        @app.exception_handler(RequestValidationError)
-        def request_validation_error_handler(request: Any, exc: Exception) -> Any:
-            # 不回显 str(exc)：包含 schema 内部结构并回显调用方输入。
-            logger.warning("request validation failed on %s: %s", getattr(request, "url", "?"), exc)
-            return _json_error_response(400, "invalid request body")
-
-    if StarletteHTTPException is not None:  # pragma: no cover - exercised with fastapi installed
-
-        @app.exception_handler(StarletteHTTPException)
-        def http_exception_handler(_request: Any, exc: Any) -> Any:
-            status = int(exc.status_code)
-            message = "not found" if status == 404 else "method not allowed" if status == 405 else str(exc.detail)
-            return _json_error_response(status, message)
-
-    @app.exception_handler(Exception)
-    def unexpected_error_handler(request: Any, exc: Exception) -> Any:
-        logger.exception("unhandled error on %s %s", getattr(request, "method", "?"), getattr(request, "url", "?"))
-        return _json_error_response(500, "internal server error")
+    register_error_handlers(
+        app,
+        json_response=JSONResponse,
+        request_validation_error=RequestValidationError,
+        starlette_http_exception=StarletteHTTPException,
+    )
 
     @app.get("/health")
     def health() -> dict[str, Any]:
