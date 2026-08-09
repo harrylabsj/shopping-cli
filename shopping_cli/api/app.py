@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from shopping_cli import VERSION
 from shopping_cli.api import auth as api_auth
@@ -28,6 +27,7 @@ from shopping_cli.api.handlers import negotiation as negotiation_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.api.limits import max_request_body_bytes, validate_payload
 from shopping_cli.api.error_response import build_error_response
+from shopping_cli.api.request_dispatch import RouteEntry, dispatch_request
 from shopping_cli.api.route_matching import match_path as _match_path
 from shopping_cli.core.errors import (
     AuthError,
@@ -58,17 +58,6 @@ except ModuleNotFoundError:  # pragma: no cover - local CI currently has no fast
     RequestValidationError = None  # type: ignore[misc,assignment]
     Request = None  # type: ignore[misc,assignment]
     StarletteHTTPException = None  # type: ignore[misc,assignment]
-
-
-# Route handlers return the JSON response body (a dict).
-Handler = Callable[..., Any]
-
-
-@dataclass(frozen=True)
-class RouteEntry:
-    methods: set[str]
-    path_template: str
-    handler: Handler
 
 
 class _RequestBodyLimitMiddleware:
@@ -745,18 +734,7 @@ def handle_request(
     query = query or {}
     try:
         validate_payload(payload)
-        path_matched = False
-        for route in _ROUTE_TABLE:
-            path_params = _match_path(route.path_template, path)
-            if path_params is None:
-                continue
-            path_matched = True
-            if method.upper() in route.methods:
-                result = route.handler(db_path, payload, query, **path_params)
-                return 200, result
-        if path_matched:
-            raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
-        raise NotFoundError(f"No route for {method} {path}")
+        return dispatch_request(db_path, method, path, payload, query, _ROUTE_TABLE)
     except AuthError as exc:
         return 403, {"ok": False, "error": str(exc)}
     except PermissionDenied as exc:
