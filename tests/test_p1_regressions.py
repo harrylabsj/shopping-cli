@@ -11,18 +11,17 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from shopping_cli import cli
 from shopping_cli.agents import merchant_daemon
 from shopping_cli.api.app import handle_request
 from shopping_cli.api.auth import require_admin_token
 from shopping_cli.api.handlers import human_review as human_review_handler
-from shopping_cli.core.catalog import create_merchant, create_product, merchant_summary, search_merchants, search_products
+from shopping_cli.core.catalog import create_merchant, create_product
 from shopping_cli.core.conversations import add_flag, append_message, conversation_summary, ensure_conversation, require_conversation
 from shopping_cli.core.errors import AuthError, ConflictError
-from shopping_cli.core.policies import create_policy, search_policies
+from shopping_cli.core.policies import create_policy
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session, open_connection
 from shopping_cli.services import agents as agent_service

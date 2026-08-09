@@ -18,7 +18,7 @@ from shopping_cli.api.handlers.common import (
 )
 from shopping_cli.config import agent_stale_ttl_seconds_from
 from shopping_cli.core.conversations import conversation_summary
-from shopping_cli.core.errors import AuthError, ValidationError
+from shopping_cli.core.errors import AuthError, ConflictError, ValidationError
 from shopping_cli.core.harness import (
     abandon_agent_message,
     abandon_stale_agent_messages,
