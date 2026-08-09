@@ -49,6 +49,7 @@ from shopping_cli.services.negotiation_policy_result import (
     human_required as _human,
     rejected as _reject,
 )
+from shopping_cli.services.negotiation_snapshot import snapshot_message as _snapshot_message
 
 MAX_PENDING_MESSAGES = 100
 MAX_SNAPSHOT_MESSAGES = 50
@@ -383,28 +384,6 @@ def abandon_stale_claims(conn: sqlite3.Connection, actor: NegotiationActor, ttl_
         "ttl_seconds": ttl,
         "at": now_iso(),
     }
-
-
-def _snapshot_message(message: dict[str, Any]) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "id": int(message["id"]),
-        "sender_role": "buyer" if message["sender"] in protocol.BUYER_SENDERS else "merchant",
-        # DB rows store naive local time; emit explicit-offset RFC 3339 so the
-        # frozen schema (and Kiwi's strict Ajv date-time check) accepts it.
-        "created_at": protocol.normalize_db_timestamp(message["created_at"]),
-        "public_message": protocol.truncate_text(message["text"], 2000),
-    }
-    payload = message.get("structured_payload") or {}
-    decision = payload.get("decision") if payload.get("protocol_version") == protocol.PROTOCOL_VERSION else None
-    if isinstance(decision, dict):
-        action = decision.get("action")
-        if action in protocol.DECISION_ACTIONS:
-            entry["action"] = action
-        proposal = decision.get("proposal")
-        entry["proposal"] = proposal if isinstance(proposal, dict) else None
-    else:
-        entry["proposal"] = None
-    return entry
 
 
 def _policy_ref_summary(conn: sqlite3.Connection, merchant_id: str) -> list[dict[str, Any]]:
