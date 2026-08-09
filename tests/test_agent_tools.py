@@ -28,6 +28,17 @@ class FakeHTTPResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+class EffectiveUrlResponse(FakeHTTPResponse):
+    """FakeHTTPResponse that also reports an effective URL (geturl)."""
+
+    def __init__(self, payload, final_url):
+        super().__init__(payload)
+        self._final_url = final_url
+
+    def geturl(self):
+        return self._final_url
+
+
 class CapturingHTTPOpener:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -759,6 +770,72 @@ class AgentToolsBoundaryTest(unittest.TestCase):
             ).request("GET", "/agents")
 
         self.assertIn("8 MiB", str(raised.exception))
+
+    def test_marketplace_client_default_transport_invokes_opener_open(self):
+        # build_opener() returns an OpenerDirector (call .open, not __call__);
+        # regression guard for the default transport path raising TypeError.
+        from shopping_cli.http_client import MarketplaceHTTPClient
+
+        class OkResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=None):
+                return b'{"ok": true}'
+
+        class OpenerDirectorDouble:
+            def __init__(self):
+                self.request = None
+                self.timeout = None
+
+            def open(self, request, timeout=0):
+                self.request = request
+                self.timeout = timeout
+                return OkResponse()
+
+        opener = OpenerDirectorDouble()
+        with patch("shopping_cli.http_client.urllib.request.build_opener", return_value=opener):
+            client = MarketplaceHTTPClient("https://market.example", "secret-token")
+            result = client.request("GET", "/agents")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(opener.timeout, client.timeout)
+        self.assertEqual(opener.request.get_header("Authorization"), "Bearer secret-token")
+        self.assertEqual(opener.request.get_header("Accept"), "application/json")
+
+    def test_marketplace_client_rejects_response_from_other_origin(self):
+        from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
+
+        # A caller-supplied opener may follow a 3xx and replay the Bearer
+        # credential on the next hop; the effective-origin guard must reject
+        # the resulting cross-origin response even though its status is 200.
+        with self.assertRaises(MarketplaceHTTPError) as raised:
+            MarketplaceHTTPClient(
+                "https://market.example",
+                "secret-token",
+                opener=lambda request, timeout=0: EffectiveUrlResponse(
+                    {"ok": True}, "https://evil.example/agents"
+                ),
+            ).request("GET", "/agents")
+
+        self.assertIn("origin mismatch", str(raised.exception))
+
+    def test_marketplace_client_accepts_same_origin_response(self):
+        from shopping_cli.http_client import MarketplaceHTTPClient
+
+        client = MarketplaceHTTPClient(
+            "https://market.example",
+            "secret-token",
+            opener=lambda request, timeout=0: EffectiveUrlResponse(
+                {"ok": True}, "https://market.example/agents"
+            ),
+        )
+        self.assertEqual(client.request("GET", "/agents"), {"ok": True})
 
 
 if __name__ == "__main__":
