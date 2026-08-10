@@ -110,7 +110,15 @@ def cmd_buyer_summarize(args: argparse.Namespace) -> None:
         if option:
             print(f"Option: {option['sku']} - {option['title']}")
             print(f"Price: {option['currency']} {option['price']:g}")
-            print(f"Stock: {option['stock']}")
+            # 审查 P2-1：公开投影只有 availability_hint（精确库存不下发）
+            stock = option.get("stock")
+            if stock is None:
+                print(
+                    "Availability: "
+                    + ("in stock" if option.get("availability_hint") == "in_stock" else "out of stock")
+                )
+            else:
+                print(f"Stock: {stock}")
         missing_facts = result.get("missing_facts") or []
         if missing_facts:
             print(f"Missing facts: {', '.join(missing_facts)}")

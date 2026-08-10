@@ -84,8 +84,8 @@ def _update_product(db_path: str | Path, sku: str, payload: dict[str, Any]) -> d
     return catalog_handlers.update_product(db_path, sku, payload, _require_merchant_token)
 
 
-def _get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
-    return catalog_handlers.get_product(db_path, sku)
+def _get_product(db_path: str | Path, sku: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return catalog_handlers.get_product(db_path, sku, payload)
 
 
 def _list_listing_projections(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
@@ -100,8 +100,8 @@ def _get_listing_projection(db_path: str | Path, sku: str) -> dict[str, Any]:
     return listings_projection_handlers.get_listing_projection(db_path, sku)
 
 
-def _search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    return catalog_handlers.search_products(db_path, query)
+def _search_products(db_path: str | Path, query: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return catalog_handlers.search_products(db_path, query, payload)
 
 
 def _search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
@@ -394,11 +394,11 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         ),
     ),
     RouteEntry({"POST"}, "/products", lambda db_path, payload, query, **kw: _create_product(db_path, payload)),
-    RouteEntry({"GET"}, "/products/{sku}", lambda db_path, payload, query, sku: _get_product(db_path, sku)),
+    RouteEntry({"GET"}, "/products/{sku}", lambda db_path, payload, query, sku: _get_product(db_path, sku, payload)),
     RouteEntry(
         {"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)
     ),
-    RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query)),
+    RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query, payload)),
     RouteEntry(
         {"GET"},
         "/v1/merchant/listings/projections",

@@ -1965,7 +1965,9 @@ class PublicMarketplaceTest(unittest.TestCase):
 
             self.assertEqual(status, 200)
             self.assertEqual(shown["product"]["price"], 0.0)
-            self.assertEqual(shown["product"]["stock"], 0)
+            # 审查 P2-1：公开投影只给 availability_hint，不下发精确 stock
+            self.assertNotIn("stock", shown["product"])
+            self.assertEqual(shown["product"]["availability_hint"], "out_of_stock")
             self.assertIn("out of stock", shown["product"]["warnings"])
 
     def test_product_search_tolerates_corrupt_price_and_stock(self):
@@ -2004,7 +2006,72 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(search["results"][0]["sku"], "tea-a")
             self.assertEqual(search["results"][0]["price"], 0.0)
-            self.assertEqual(search["results"][0]["stock"], 0)
+            # 审查 P2-1：公开搜索同样只给 availability_hint
+            self.assertNotIn("stock", search["results"][0])
+            self.assertEqual(search["results"][0]["availability_hint"], "out_of_stock")
+
+    def test_exact_stock_only_for_owner_merchant(self):
+        """审查 P2-1：精确库存仅向商品所属商户本人开放。
+
+        匿名与外来商户读 /products/{sku} 与 /search/products 只能得到
+        availability_hint；持本人 merchant token 才拿到精确 stock。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant_a = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            status, merchant_b = self.request(app, "POST", "/merchants", {"id": "seller-b", "name": "Other Tea"})
+            self.assertEqual(status, 200)
+            status, created = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "merchant_token": merchant_a["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+
+            bearer_a = {"authorization": f"Bearer {merchant_a['merchant_token']}"}
+            bearer_b = {"authorization": f"Bearer {merchant_b['merchant_token']}"}
+
+            # 匿名：availability_hint，无精确 stock
+            status, shown = self.request(app, "GET", "/products/tea-a")
+            self.assertEqual(status, 200)
+            self.assertNotIn("stock", shown["product"])
+            self.assertEqual(shown["product"]["availability_hint"], "in_stock")
+
+            # 外来商户 B：同样只能看到 availability_hint
+            status, shown = self.request(app, "GET", "/products/tea-a", headers=bearer_b)
+            self.assertEqual(status, 200)
+            self.assertNotIn("stock", shown["product"])
+            self.assertEqual(shown["product"]["availability_hint"], "in_stock")
+
+            # 所属商户 A：精确 stock
+            status, shown = self.request(app, "GET", "/products/tea-a", headers=bearer_a)
+            self.assertEqual(status, 200)
+            self.assertEqual(shown["product"]["stock"], 5)
+            self.assertNotIn("availability_hint", shown["product"])
+
+            # 搜索路径同规则：A 的结果带 stock，匿名与 B 不带
+            status, search = self.request(app, "GET", "/search/products", query_string="query=longjing")
+            self.assertEqual(status, 200)
+            self.assertNotIn("stock", search["results"][0])
+
+            status, search = self.request(app, "GET", "/search/products", query_string="query=longjing", headers=bearer_b)
+            self.assertEqual(status, 200)
+            self.assertNotIn("stock", search["results"][0])
+
+            status, search = self.request(app, "GET", "/search/products", query_string="query=longjing", headers=bearer_a)
+            self.assertEqual(status, 200)
+            self.assertEqual(search["results"][0]["stock"], 5)
 
     def test_agent_status_reads_require_owner_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
