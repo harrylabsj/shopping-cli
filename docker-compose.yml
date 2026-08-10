@@ -1,7 +1,7 @@
 services:
   shopping-api:
     build: .
-    image: shopping-cli-api:3.0.0
+    image: shopping-cli-api:3.0.1
     command:
       - shopping-cli-api
       - --db
@@ -35,7 +35,7 @@ services:
   shopping-agent:
     profiles: ["agent"]
     build: .
-    image: shopping-cli-api:3.0.0
+    image: shopping-cli-api:3.0.1
     command:
       - shopping-cli
       - agent
