@@ -75,6 +75,9 @@ def project_product_listing(
             "moq": 1,
             "supports_bulk_quote": True,
         },
+        # 每商品成交入口（KTH destination_ref）：商家自行维护，publish 时同步进
+        # catalog listing 的 handoff_destination_ref。
+        "handoff_destination": str(row.get("handoff_destination") or ""),
     }
     description = str(row.get("description") or "")
     if description:

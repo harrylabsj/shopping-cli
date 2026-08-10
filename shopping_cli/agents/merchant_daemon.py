@@ -78,7 +78,23 @@ def rotate_agent_log(log_file: Path) -> bool:
         if source.exists():
             source.replace(log_file.with_suffix(log_file.suffix + f".{index + 1}"))
     log_file.replace(log_file.with_suffix(log_file.suffix + ".1"))
+    # 审查 P2-07：rename 保留源文件权限——旧日志若世界可读，备份必须 0600
+    for index in range(1, MAX_AGENT_LOG_BACKUPS + 1):
+        backup = log_file.with_suffix(log_file.suffix + f".{index}")
+        if backup.exists():
+            os.chmod(backup, 0o600)
     return True
+
+
+def _open_log_append(log_path: Path):
+    """以 0600 创建/复用 daemon 日志文件。
+
+    审查 P2-07：日志含会话内容，且 os.open 的 mode 只在新建时生效——对
+    已存在文件也要显式 chmod 0600。
+    """
+    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.chmod(log_path, 0o600)
+    return os.fdopen(fd, "ab", buffering=0)
 
 
 def _redirect_stdout_to(log_path: Path) -> None:
@@ -91,8 +107,10 @@ def _redirect_stdout_to(log_path: Path) -> None:
         target_fd = sys.stdout.fileno()
     except (OSError, ValueError):
         return
-    # 审查 P3：日志含会话内容——0600，避免多用户机器上世界可读
+    # 审查 P3/P2-07：日志含会话内容——0600，避免多用户机器上世界可读；
+    # mode 只对新文件生效，已存在文件同样 chmod。
     fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.chmod(log_path, 0o600)
     try:
         os.dup2(fd, target_fd)
     finally:
@@ -136,6 +154,16 @@ def write_json_atomic(path: Path, value: Any) -> None:
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     # 审查 P3：pid/state 文件含 launch_token —— 0600（此前继承 umask 0644
     # 世界可读）。原子替换前 chmod，rename 后权限即为目标值。
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
+def _write_private_text(path: Path, text: str) -> None:
+    """原子写凭据类文本文件并强制 0600（审查 P2-07：stop 文件含
+    launch_token，open() 默认 mode 继承 umask 可能世界可读）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
     os.chmod(tmp, 0o600)
     tmp.replace(path)
 
@@ -454,7 +482,9 @@ def start_agent(
             elif merchant_token:
                 env["SHOPPING_MERCHANT_TOKEN"] = merchant_token
                 env.pop("SHOPPING_AGENT_TOKEN", None)
-        with paths["log_file"].open("ab", buffering=0) as log:
+        # 审查 P2-07：新建/已存在的日志文件都须 0600（open() 默认 mode 继承
+        # umask，多用户机器上可能 0644 世界可读）
+        with _open_log_append(paths["log_file"]) as log:
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -550,8 +580,9 @@ def stop_agent(
         )
 
     if was_running:
-        paths["stop_file"].parent.mkdir(parents=True, exist_ok=True)
-        paths["stop_file"].write_text(launch_token, encoding="utf-8")
+        # 审查 P2-07：stop 文件含 launch_token——0600（open() 默认 mode 会
+        # 继承 umask 0644 世界可读）
+        _write_private_text(paths["stop_file"], launch_token)
         if psutil is not None:
             try:
                 os.kill(pid, signal.SIGTERM)

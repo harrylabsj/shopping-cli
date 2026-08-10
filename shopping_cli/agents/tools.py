@@ -260,6 +260,7 @@ class HTTPMerchantAgentTools:
         merchant_token: str,
         timeout: float = 10.0,
         opener: Any | None = None,
+        transport: Any | None = None,
         host: str = "",
         session_id: str = "",
         allow_insecure_http: bool = False,
@@ -275,6 +276,7 @@ class HTTPMerchantAgentTools:
             self.merchant_token,
             timeout=timeout,
             opener=opener,
+            transport=transport,
             allow_insecure_http=allow_insecure_http,
         )
         self.base_url = self.http.base_url

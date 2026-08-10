@@ -9,7 +9,12 @@ from typing import Any
 from shopping_cli.agents import buyer_cli
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api import idempotency as api_idempotency
-from shopping_cli.api.handlers.common import MAX_SQLITE_INTEGER, non_negative_whole_int, require_field
+from shopping_cli.api.handlers.common import (
+    MAX_SQLITE_INTEGER,
+    non_negative_whole_int,
+    public_product_summary,
+    require_field,
+)
 from shopping_cli.core.channels import ingest_buyer_message
 from shopping_cli.core.errors import ValidationError
 from shopping_cli.core.tokens import token_digest
@@ -127,6 +132,27 @@ def _clear_idempotency_claim(
     )
 
 
+def _public_buyer_result(result: dict[str, Any]) -> dict[str, Any]:
+    """P1-02：candidates/selected 出网前经公开投影。
+
+    ``buyer_cli.ask`` / ``ingest_buyer_message`` 的搜索结果为完整
+    product_summary，内嵌 merchant 私有字段（contact / automation_boundaries
+    底价）与精确库存——买家可见路径必须在**响应与幂等账本**两个边界剥离。
+    ``conversation`` 已在 ``conversation_summary`` 内投影；此处只处理
+    candidates/selected。投影对已投影数据幂等（保留 availability_hint）。
+    """
+    outcome = dict(result)
+    for key in ("candidates", "selected"):
+        value = outcome.get(key)
+        if isinstance(value, list):
+            outcome[key] = [
+                public_product_summary(item) for item in value if isinstance(item, dict)
+            ]
+        elif isinstance(value, dict):
+            outcome[key] = public_product_summary(value)
+    return outcome
+
+
 def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     bootstrap_token_hash = api_auth.require_buyer_bootstrap_token(payload, token_digest)
     buyer_id = str(require_field(payload, "buyer_id")).strip()
@@ -150,7 +176,7 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             request_hash,
         )
         if replayed is not None:
-            return replayed
+            return _public_buyer_result(replayed)
         _enforce_buyer_bootstrap_rate_limit(conn, bootstrap_token_hash, buyer_id)
         replayed = _claim_idempotency(
             conn,
@@ -162,7 +188,7 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             request_hash,
         )
         if replayed is not None:
-            return replayed
+            return _public_buyer_result(replayed)
         try:
             result = buyer_cli.ask(
                 conn,
@@ -193,6 +219,7 @@ def buyer_ask(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 else:
                     result["buyer_token"] = _issue_buyer_token(conn, result["buyer_id"], result["conversation"]["id"])
             result["idempotent"] = False
+            result = _public_buyer_result(result)
             _complete_idempotency(conn, endpoint, bootstrap_token_hash, buyer_id, idempotency_key, request_hash, result)
             return result
         except KeyError as exc:
@@ -208,7 +235,7 @@ def ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict
     channel = require_field(payload, "channel")
     api_auth.require_channel_token(str(channel), payload)
     with db_session(db_path) as conn:
-        return ingest_buyer_message(
+        return _public_buyer_result(ingest_buyer_message(
             conn,
             channel=str(channel),
             external_user_id=str(require_field(payload, "external_user_id")),
@@ -217,7 +244,7 @@ def ingest_channel_message(db_path: str | Path, payload: dict[str, Any]) -> dict
             area=str(payload.get("area") or ""),
             conversation_id=str(payload.get("conversation_id") or ""),
             external_message_id=str(payload.get("external_message_id") or ""),
-        )
+        ))
 
 
 def create_conversation(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
