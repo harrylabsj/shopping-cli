@@ -15,7 +15,7 @@ class ProjectShapeTest(unittest.TestCase):
         api_extra = set(pyproject["project"]["optional-dependencies"]["api"])
 
         self.assertFalse(any(dep.startswith(("fastapi", "pydantic", "uvicorn")) for dep in required))
-        self.assertTrue({"fastapi>=0.110", "pydantic>=2", "uvicorn>=0.27"}.issubset(api_extra))
+        self.assertTrue({"fastapi>=0.141.1", "pydantic>=2", "uvicorn>=0.27"}.issubset(api_extra))
 
     def test_documented_modules_are_importable(self):
         module_names = [
@@ -185,4 +185,3 @@ class ProjectShapeTest(unittest.TestCase):
         self.assertEqual(set(package["bin"]), set(pyproject["project"]["scripts"]))
         for script_path in package["bin"].values():
             self.assertTrue((root / script_path).exists(), script_path)
-
