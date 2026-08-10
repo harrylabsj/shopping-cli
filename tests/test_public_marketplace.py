@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
 
 from shopping_cli.api.app import create_app
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
@@ -601,6 +602,56 @@ class PublicMarketplaceTest(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertFalse(bob_ok["idempotent"])
+
+
+    def test_rate_limit_old_windows_are_pruned(self):
+        """审查 BUG-11：过期限流窗口行被批量清理（当前窗口计数不受影响）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, merchant = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            status, _product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "tags": ["longjing"],
+                    "merchant_token": merchant["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+
+            # 种子：10 分钟前的旧窗口行（死数据）——持续活跃时每买家每天 1440 行
+            with closing(sqlite3.connect(db_file)) as conn:
+                old = (datetime.now(timezone.utc) - timedelta(minutes=10)).replace(microsecond=0).isoformat()
+                conn.execute(
+                    "insert into buyer_bootstrap_rate_limits"
+                    "(token_hash, buyer_id, window_start, request_count, updated_at)"
+                    " values ('h', 'zombie', '2026-01-01T00:00:00', 5, ?)",
+                    (old,),
+                )
+                conn.commit()
+
+            # 触发一次限流路径（顺带清理旧窗口）
+            with patch.dict(os.environ, {"SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE": "1"}, clear=False):
+                status, _ = self.request(
+                    app, "POST", "/buyer/ask",
+                    {"buyer_id": "alice", "text": "longjing", "idempotency_key": "prune-1"},
+                )
+                self.assertEqual(status, 200)
+
+            with closing(sqlite3.connect(db_file)) as conn:
+                remaining = conn.execute(
+                    "select count(*) from buyer_bootstrap_rate_limits where buyer_id = 'zombie'"
+                ).fetchone()[0]
+            self.assertEqual(remaining, 0, "旧窗口行应被清理")
 
     def test_idempotency_keys_are_scoped_per_buyer(self) -> None:
         """同 idempotency key 不同 buyer 不冲突——键空间按 buyer 隔离（v3.0）。"""
