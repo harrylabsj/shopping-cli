@@ -36,7 +36,7 @@
   },
   "scripts": {
     "install:agents": "bash scripts/install.sh --both",
-    "test": "python3 -m unittest discover -s tests && node --test tests/shopping_plugin.test.mjs && bash scripts/verify.sh",
+    "test": "python3 -m pytest tests/ -q && node --test tests/shopping_plugin.test.mjs && bash scripts/verify.sh",
     "test:plugin": "node --test tests/shopping_plugin.test.mjs",
     "verify": "bash scripts/verify.sh",
     "quality": "bash scripts/quality.sh",

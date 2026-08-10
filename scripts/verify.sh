@@ -8,9 +8,9 @@ DB_FILE="$TMP_DIR/shopping-cli.sqlite"
 python3 "$ROOT_DIR/scripts/shopping.py" --help >/dev/null
 python3 "$ROOT_DIR/scripts/shopping_registry.py" --help >/dev/null
 bash "$ROOT_DIR/scripts/install.sh" --both --dry-run >/dev/null
-python3 -m unittest discover -s "$ROOT_DIR/tests"
+python3 -m pytest "$ROOT_DIR/tests" -q
 node --test "$ROOT_DIR/tests/shopping_plugin.test.mjs"
-PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -s "$ROOT_DIR/tests" -p 'test_db_session.py'
+PYTHONWARNINGS=error::ResourceWarning python3 -m pytest "$ROOT_DIR/tests/test_db_session.py" -q
 python3 "$ROOT_DIR/scripts/benchmark_search.py" \
   --merchants 2 \
   --products-per-merchant 3 \
@@ -93,7 +93,9 @@ intent = json.loads(Path(sys.argv[6]).read_text(encoding="utf-8"))
 assert ask["conversation"]["id"] == "CONV-0001"
 assert ask["candidates"][0]["sku"] == "tea-a"
 assert agent["replied"][0]["conversation_id"] == "CONV-0001"
-assert summary["option"]["stock"] == 5
+# 审查 P2-1：公开投影只携带 availability_hint（精确库存不下发）
+assert summary["option"]["availability_hint"] == "in_stock"
+assert "stock" not in summary["option"]
 assert summary["no_order_created"] is True
 assert summary["no_stock_reserved"] is True
 assert intent["message"]["intent"] == "purchase_intent"
