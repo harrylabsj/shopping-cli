@@ -19,3 +19,9 @@ buyer.json
 .scratch/
 .gstack/
 dist/
+
+# pytest/coverage 生成物（quality.sh）
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
