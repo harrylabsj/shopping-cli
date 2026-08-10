@@ -91,7 +91,8 @@ def _redirect_stdout_to(log_path: Path) -> None:
         target_fd = sys.stdout.fileno()
     except (OSError, ValueError):
         return
-    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    # 审查 P3：日志含会话内容——0600，避免多用户机器上世界可读
+    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.dup2(fd, target_fd)
     finally:
@@ -133,6 +134,9 @@ def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    # 审查 P3：pid/state 文件含 launch_token —— 0600（此前继承 umask 0644
+    # 世界可读）。原子替换前 chmod，rename 后权限即为目标值。
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
 
 

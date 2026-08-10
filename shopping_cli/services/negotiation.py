@@ -516,7 +516,10 @@ def _merchant_gate(
     if facts.result != "accepted":
         return facts
     observed_at = protocol.parse_rfc3339(proposal["stock"]["observed_at"])
-    assert observed_at is not None  # guaranteed by _check_proposal_facts
+    # 审查 P3：显式守卫替代 assert——_check_proposal_facts 保证非 None，但
+    # python -O 下 assert 消失，异常形状变成 AttributeError 而非商业拒绝。
+    if observed_at is None:
+        return _reject("invalid_proposal", "库存观察时间缺失，无法校验时效。")
     age = (datetime.now(timezone.utc) - observed_at).total_seconds()
     if age > protocol.STOCK_OBSERVATION_MAX_AGE_SECONDS or age < -60:
         return _reject("stale_inventory", "库存观察时间已过期，请重新获取快照后再报价。")

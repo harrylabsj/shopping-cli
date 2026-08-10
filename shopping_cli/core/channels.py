@@ -180,7 +180,6 @@ def _begin_channel_ingress(
                 conversation_id = excluded.conversation_id,
                 message_id = excluded.message_id,
                 stale_at = excluded.stale_at,
-                created_at = excluded.created_at,
                 updated_at = excluded.updated_at
             """,
             (channel, external_user_id, external_message_id, PROCESSING_STATUS, now, now),
