@@ -31,8 +31,22 @@ def _now_iso() -> str:
 
 
 def _minor_from_yuan(price: float) -> int:
-    """元 → minor（两位小数；kiwi 侧 data-source.ts 的 元→minor 约定）。"""
-    return int(round(price * 100))
+    """元 → minor（两位小数；kiwi 侧 data-source.ts 的 元→minor 约定）。
+
+    审查 BUG-04：Decimal(str()) 精确校验——int(round(price*100)) 会把
+    19.995 静默改写后进入报价；无法精确表达或超出两位小数精度 → fail-closed
+    （抛 ValueError，绝不静默舍入）。
+    """
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        amount = Decimal(str(price))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"price is not a finite decimal: {price!r}") from exc
+    scaled = amount * 100
+    if scaled != scaled.to_integral_value():
+        raise ValueError(f"price {price!r} exceeds 2-decimal precision (lossy)")
+    return int(scaled)
 
 
 def _lead_days_from_eta(conn: sqlite3.Connection, merchant_id: str) -> int:
