@@ -17,4 +17,5 @@ mai-registry.json
 seller.json
 buyer.json
 .scratch/
+.gstack/
 dist/
