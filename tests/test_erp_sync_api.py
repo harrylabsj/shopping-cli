@@ -139,7 +139,10 @@ class ErpSyncApiTest(unittest.TestCase):
             "type": "http",
             "method": "POST",
             "path": path,
-            "headers": [],
+            # FastAPI/Starlette intentionally only decode a JSON body when the
+            # request advertises its media type; mirror a real HTTP client so
+            # the dual-stack test exercises the same contract as production.
+            "headers": [(b"content-type", b"application/json")],
             "query_string": b"",
             "http_version": "1.1",
             "scheme": "http",
