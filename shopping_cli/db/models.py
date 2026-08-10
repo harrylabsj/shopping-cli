@@ -36,6 +36,10 @@ SCHEMA = [
         currency text not null default 'CNY',
         stock integer not null,
         delivery_attributes_json text not null default '[]',
+        -- v22 — 每商品成交入口（KTH handoff destination_ref）：商家自行维护的
+        -- 交易入口（URL 类为 https URL；联系/会话类为 opaque ref），publish 时
+        -- 同步进 catalog listing 的 handoff_destination_ref。
+        handoff_destination text not null default '',
         active integer not null default 1,
         source text not null default 'local'
             check(source in ('local','erp')),

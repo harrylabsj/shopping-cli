@@ -523,6 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     product_add.add_argument("--tags", default="")
     product_add.add_argument("--description", default="")
     product_add.add_argument("--delivery-attributes", default="")
+    product_add.add_argument("--handoff-destination", default="", help="KTH 成交入口（每商品一个；URL 类为 https URL，联系/会话类为 opaque ref）")
     product_add.add_argument("--format", choices=["text", "json"], default="text")
     product_add.set_defaults(func=cmd_product_add)
     product_stock = product_sub.add_parser("stock", help="Set product stock")
@@ -542,6 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
     product_update.add_argument("--tags")
     product_update.add_argument("--description")
     product_update.add_argument("--delivery-attributes")
+    product_update.add_argument("--handoff-destination", help="KTH 成交入口（每商品一个；URL 类为 https URL，联系/会话类为 opaque ref）")
     product_update.add_argument("--format", choices=["text", "json"], default="text")
     product_update.set_defaults(func=cmd_product_update)
 

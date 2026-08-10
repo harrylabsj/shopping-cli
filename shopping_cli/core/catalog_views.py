@@ -20,12 +20,18 @@ def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
     提示（审查 P2-1：此前 /products/{sku} 与 /search/products 匿名原样
     出网精确 stock，可逐 SKU 枚举全平台库存）。需要精确库存的商家走
     merchant_product_summary（handler 层 owner 鉴权门）。
+
+    对已投影数据幂等：含 ``stock`` 时替换为 availability_hint；不含则保留
+    已有 hint（审查 P1-02：幂等回放响应二次投影不丢失 in_stock）。
     """
     summary = dict(product)
-    stock = summary.pop("stock", None)
-    summary["availability_hint"] = (
-        "in_stock" if isinstance(stock, (int, float)) and stock > 0 else "out_of_stock"
-    )
+    if "stock" in summary:
+        stock = summary.pop("stock", None)
+        summary["availability_hint"] = (
+            "in_stock" if isinstance(stock, (int, float)) and stock > 0 else "out_of_stock"
+        )
+    elif "availability_hint" not in summary:
+        summary["availability_hint"] = "out_of_stock"
     merchant = summary.get("merchant")
     if isinstance(merchant, dict):
         summary["merchant"] = public_merchant_summary(merchant)

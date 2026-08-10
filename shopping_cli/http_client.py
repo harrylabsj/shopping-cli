@@ -72,6 +72,83 @@ def _url_origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
     return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
 
 
+def _assert_same_origin_request(url: str, base_url: str) -> None:
+    """Fail closed before attaching Authorization to a non-same-origin target.
+
+    审查 P1-12：凭据只在目标与 base_url 同源时才附加。请求 URL 由
+    base_url 拼接而来，正常情况下必然同源；此检查防御畸形 path / base_url
+    使 Authorization 落在第三方 origin 的回归。
+    """
+    try:
+        target = urllib.parse.urlsplit(url)
+        base = urllib.parse.urlsplit(base_url)
+    except ValueError:
+        raise MarketplaceHTTPError("Marketplace API request has an invalid URL") from None
+    if _url_origin(target) != _url_origin(base):
+        raise MarketplaceHTTPError(
+            f"Marketplace API request origin mismatch ({target.netloc or url})"
+        )
+
+
+# 审查 P1-12：携带 Authorization 的请求只能交给"保证不跟随重定向"的 opener。
+# 默认 opener 内置 _NoRedirectHandler；受控的 urllib ``OpenerDirector`` 会重建
+# 剔除会跟跳的 ``HTTPRedirectHandler``。**任意 callable opener 无法被证明不会
+# 内部跟跳并在第二 origin 重放 Bearer**，因此对鉴权请求一律 fail-closed——
+# 需要自定义传输的调用方走显式的 ``transport=`` 注入点。
+
+
+def _resolve_opener(opener: Any) -> Any:
+    """把 opener 解析为"绝不跟跳重定向"的可调用对象（P1-12 fail-closed）。
+
+    - ``None`` → 内置默认 opener（含 ``_NoRedirectHandler``，契约由库保证）。
+    - 真实 urllib ``OpenerDirector`` → 重建剔除会跟跳的 ``HTTPRedirectHandler``。
+    - 其余任意对象（含 callable opener）→ 对鉴权请求抛 ``MarketplaceHTTPError``；
+      需要注入自定义传输请使用 ``transport=``。
+    """
+    if opener is None:
+        return urllib.request.build_opener(_NoRedirectHandler())
+    if isinstance(opener, urllib.request.OpenerDirector):
+        return _redirect_safe_opener(opener)
+    raise MarketplaceHTTPError(
+        "custom opener must be a urllib.request.OpenerDirector; arbitrary "
+        "callable openers cannot guarantee no-redirect behavior, use the "
+        "transport= injection point instead"
+    )
+
+
+def _redirect_safe_opener(opener: Any) -> Any:
+    """Strip redirect-following handlers from a caller-supplied opener.
+
+    审查 P1-12：自定义 opener 可能是带 ``HTTPRedirectHandler`` 的真实
+    urllib ``OpenerDirector``——跟随跨源 3xx 时会把原始请求头（含
+    Authorization）重放到下一跳，凭据在 ``_assert_same_origin`` 事后拦截
+    之前已经出网。重建 opener：逐个拷贝调用方自己的 handler，仅剔除所有
+    会跟跳的 ``HTTPRedirectHandler``，再装入拒绝重定向的
+    ``_NoRedirectHandler``。不引入 build_opener 的默认 handler 以免与调用方
+    自定义传输冲突。仅对 ``OpenerDirector`` 生效——任意 callable opener 已在
+    ``_resolve_opener`` 中被 fail-closed，不会走到这里。
+    """
+    if not isinstance(opener, urllib.request.OpenerDirector):
+        return opener
+    # mypy 的 urllib.request.OpenerDirector 类型不声明 .handlers；运行时存在，
+    # 用 getattr 读取并防御性校验类型。
+    handlers = getattr(opener, "handlers", [])
+    if not isinstance(handlers, (list, tuple)):
+        return opener
+    redirect_free = [
+        handler
+        for handler in handlers
+        if not isinstance(handler, urllib.request.HTTPRedirectHandler)
+    ]
+    if len(redirect_free) == len(handlers):
+        return opener
+    rebuilt = urllib.request.OpenerDirector()
+    for handler in redirect_free:
+        rebuilt.add_handler(handler)
+    rebuilt.add_handler(_NoRedirectHandler())
+    return rebuilt
+
+
 def _assert_same_origin(response: Any, request_url: str) -> None:
     """Fail closed when a transport returned a response from another origin.
 
@@ -154,26 +231,38 @@ class MarketplaceHTTPClient:
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         method = method.upper()
-        headers = {"Accept": "application/json", "Authorization": f"Bearer {self.auth_token}"}
-        if self.transport is not None:
-            return self.validate_response(self.transport(method, path, payload, query, headers))
         url = f"{self.base_url}/{path.lstrip('/')}"
         clean_query = {key: value for key, value in (query or {}).items() if value not in (None, "")}
         if clean_query:
             url = f"{url}?{urllib.parse.urlencode(clean_query)}"
+        # 审查 P1-12：先同源校验、再附加 Authorization——凭据绝不落在第三方
+        # origin。opener 解析放在 transport 分支**之后**：提供 transport 注入时
+        # 完全跳过 opener（transport 是显式替代传输，其行为由调用方负责）。
+        _assert_same_origin_request(url, self.base_url)
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {self.auth_token}"}
+        if self.transport is not None:
+            try:
+                return self.validate_response(self.transport(method, path, payload, query, headers))
+            except urllib.error.HTTPError as exc:
+                raw_body = _bounded_read(exc)
+                raise MarketplaceHTTPError(
+                    self.error_message(raw_body, f"Marketplace API returned HTTP {exc.code}")
+                ) from exc
+            except TimeoutError as exc:
+                raise MarketplaceHTTPError(f"Marketplace API request timed out: {exc}") from exc
+            except urllib.error.URLError as exc:
+                raise MarketplaceHTTPError(f"Marketplace API request failed: {exc.reason}") from exc
+        opener = _resolve_opener(self.opener)
         body = None
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            opener = self.opener
-            if opener is None:
-                opener = urllib.request.build_opener(_NoRedirectHandler())
             # build_opener returns an OpenerDirector (call .open, not
-            # __call__); custom test doubles are callables invoked directly.
-            # Normalize so the default transport path actually engages the
-            # redirect refusal below.
+            # __call__); OpenerDirector-based custom openers are normalized the
+            # same way. A rejected callable opener never reaches this point
+            # (fail-closed in _resolve_opener).
             if hasattr(opener, "open"):
                 opener = opener.open
             open_request = cast(Callable[..., Any], opener)

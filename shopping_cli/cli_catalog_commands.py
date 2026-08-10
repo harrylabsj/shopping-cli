@@ -128,6 +128,7 @@ def cmd_product_add(args: argparse.Namespace) -> None:
             tags=args.tags or "",
             description=args.description or "",
             delivery_attributes=args.delivery_attributes or "",
+            handoff_destination=args.handoff_destination or "",
         )
     emit({"ok": True, "product": product, "message": f"Product added: {args.sku}"}, args.format)
 
@@ -152,6 +153,7 @@ def cmd_product_update(args: argparse.Namespace) -> None:
             tags=args.tags,
             description=args.description,
             delivery_attributes=args.delivery_attributes,
+            handoff_destination=args.handoff_destination,
         )
     emit({"ok": True, "product": product, "message": f"Product updated: {args.sku}"}, args.format)
 

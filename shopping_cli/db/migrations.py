@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 
 @dataclass(frozen=True)
@@ -376,6 +376,16 @@ def migration_021_channel_ingress_stale_marker(conn: sqlite3.Connection) -> None
     ensure_column(conn, "channel_message_ingresses", "stale_at", "text not null default ''")
 
 
+def migration_022_product_handoff_destination(conn: sqlite3.Connection) -> None:
+    """products.handoff_destination 列（每商品成交入口，KTH destination_ref）。
+
+    商家自行维护每商品的交易入口（URL 类为 https URL；联系/会话类为 opaque
+    ref），`kiwi merchant publish` 同步进 catalog listing 的
+    handoff_destination_ref。幂等 ALTER（ensure_column，参照 v21 模式）。
+    """
+    ensure_column(conn, "products", "handoff_destination", "text not null default ''")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -391,6 +401,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(19, "remove_catalog_subsystem_tables", migration_019_remove_catalog_subsystem_tables),
     Migration(20, "buyer_ledger_buyer_dimension", migration_020_buyer_ledger_buyer_dimension),
     Migration(21, "channel_ingress_stale_marker", migration_021_channel_ingress_stale_marker),
+    Migration(22, "product_handoff_destination", migration_022_product_handoff_destination),
 )
 
 

@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from shopping_cli.core.catalog import create_product
 from shopping_cli.db.session import open_connection
 from shopping_cli.listings.projection import (
     list_publishable_listings,
@@ -61,6 +62,23 @@ class ListingProjectionTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
+
+    def test_projection_carries_handoff_destination(self) -> None:
+        """每商品成交入口（v22）：create_product 带 handoff_destination →
+        投影携带该值（publish 同步进 listing 的数据源）。"""
+        create_product(
+            self.conn,
+            merchant_id=MERCHANT,
+            sku="SKU-HD",
+            title="HD Product",
+            price=88.0,
+            stock=5,
+            handoff_destination="https://merchant.example/checkout/sku-hd",
+        )
+        projection = project_product_listing(self.conn, "SKU-HD", merchant_id=MERCHANT)
+        self.assertEqual(
+            projection["handoff_destination"], "https://merchant.example/checkout/sku-hd"
+        )
 
     def test_projection_is_public_only_doD2(self) -> None:
         _seed_product(self.conn, "SKU-001")

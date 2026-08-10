@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -39,19 +40,57 @@ class EffectiveUrlResponse(FakeHTTPResponse):
         return self._final_url
 
 
-class CapturingHTTPOpener:
+class CapturingHTTPOpener(urllib.request.OpenerDirector):
+    """OpenerDirector 测试双：按序返回预置响应并记录每个请求。
+
+    审查 P1-12：MarketplaceHTTPClient 只接受 urllib ``OpenerDirector`` 类型
+    （会跟跳的 HTTPRedirectHandler 会被剥离），任意 callable opener 一律
+    fail-closed。本双是**真实** OpenerDirector（登记捕获 handler），
+    ``.requests`` 元素结构（request/body/timeout）与旧 callable 版本保持一致，
+    既有断言无需改动。
+    """
+
     def __init__(self, responses):
+        super().__init__()
         self.responses = list(responses)
         self.requests = []
+        self.add_handler(_CapturingHTTPHandler(self))
 
-    def __call__(self, request, timeout=0):
+    def _respond(self, request):
         import json
 
         body = None
         if request.data:
             body = json.loads(request.data.decode("utf-8"))
-        self.requests.append({"request": request, "timeout": timeout, "body": body})
+        self.requests.append(
+            {
+                "request": request,
+                "timeout": getattr(request, "timeout", None),
+                "body": body,
+            }
+        )
         return FakeHTTPResponse(self.responses.pop(0))
+
+
+class _CapturingHTTPHandler(urllib.request.BaseHandler):
+    def __init__(self, owner):
+        self._owner = owner
+
+    def http_open(self, request):
+        return self._owner._respond(request)
+
+    def https_open(self, request):
+        return self._owner._respond(request)
+
+
+class _StubHTTPSHandler(urllib.request.BaseHandler):
+    """返回固定响应对象的 https_open handler（P1-12 测试辅助）。"""
+
+    def __init__(self, response):
+        self._response = response
+
+    def https_open(self, request):
+        return self._response
 
 
 class FakeMarketplaceTools:
@@ -522,14 +561,14 @@ class AgentToolsBoundaryTest(unittest.TestCase):
     def test_http_merchant_agent_tools_wrap_transport_errors(self):
         from shopping_cli.agents.tools import HTTPMarketplaceError, HTTPMerchantAgentTools
 
-        def failing_opener(_request, timeout=0):
+        def failing_transport(_method, _path, _payload, _query, _headers):
             raise urllib.error.URLError("connection refused")
 
         tools = HTTPMerchantAgentTools(
             "http://127.0.0.1:8765",
             merchant_id="seller-a",
             merchant_token="tok_seller_a",
-            opener=failing_opener,
+            transport=failing_transport,
         )
 
         with self.assertRaises(HTTPMarketplaceError) as exc:
@@ -540,14 +579,14 @@ class AgentToolsBoundaryTest(unittest.TestCase):
     def test_http_merchant_agent_tools_wrap_timeout_errors(self):
         from shopping_cli.agents.tools import HTTPMarketplaceError, HTTPMerchantAgentTools
 
-        def failing_opener(_request, timeout=0):
+        def failing_transport(_method, _path, _payload, _query, _headers):
             raise TimeoutError("timed out")
 
         tools = HTTPMerchantAgentTools(
             "http://127.0.0.1:8765",
             merchant_id="seller-a",
             merchant_token="tok_seller_a",
-            opener=failing_opener,
+            transport=failing_transport,
         )
 
         with self.assertRaises(HTTPMarketplaceError) as exc:
@@ -759,14 +798,16 @@ class AgentToolsBoundaryTest(unittest.TestCase):
                 return False
 
             def read(self, size=None):
-                length = MAX_HTTP_RESPONSE_BYTES + 1 if size else MAX_HTTP_RESPONSE_BYTES + 1
-                return b"x" * length
+                return b"x" * (MAX_HTTP_RESPONSE_BYTES + 1)
+
+        director = urllib.request.OpenerDirector()
+        director.add_handler(_StubHTTPSHandler(OversizedResponse()))
 
         with self.assertRaises(MarketplaceHTTPError) as raised:
             MarketplaceHTTPClient(
                 "https://market.example",
                 "secret-token",
-                opener=lambda request, timeout=0: OversizedResponse(),
+                opener=director,
             ).request("GET", "/agents")
 
         self.assertIn("8 MiB", str(raised.exception))
@@ -811,16 +852,17 @@ class AgentToolsBoundaryTest(unittest.TestCase):
     def test_marketplace_client_rejects_response_from_other_origin(self):
         from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
 
-        # A caller-supplied opener may follow a 3xx and replay the Bearer
+        # A caller-supplied OpenerDirector may follow a 3xx and replay the Bearer
         # credential on the next hop; the effective-origin guard must reject
         # the resulting cross-origin response even though its status is 200.
+        director = urllib.request.OpenerDirector()
+        director.add_handler(_StubHTTPSHandler(EffectiveUrlResponse({"ok": True}, "https://evil.example/agents")))
+
         with self.assertRaises(MarketplaceHTTPError) as raised:
             MarketplaceHTTPClient(
                 "https://market.example",
                 "secret-token",
-                opener=lambda request, timeout=0: EffectiveUrlResponse(
-                    {"ok": True}, "https://evil.example/agents"
-                ),
+                opener=director,
             ).request("GET", "/agents")
 
         self.assertIn("origin mismatch", str(raised.exception))
@@ -831,11 +873,140 @@ class AgentToolsBoundaryTest(unittest.TestCase):
         client = MarketplaceHTTPClient(
             "https://market.example",
             "secret-token",
-            opener=lambda request, timeout=0: EffectiveUrlResponse(
-                {"ok": True}, "https://market.example/agents"
-            ),
+            transport=lambda method, path, payload, query, headers: {"ok": True},
         )
         self.assertEqual(client.request("GET", "/agents"), {"ok": True})
+
+    def test_malicious_undeclared_callable_opener_is_rejected_before_authorization(self):
+        """审查 P1-12：任意 callable opener 无法被证明不会跟跳——鉴权请求直接
+        fail-closed，模拟"内部跟跳并在第二 origin 重放 Bearer"的恶意 callable
+        不得被调用，Authorization 绝不附加、绝不出网。"""
+        from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
+
+        leaked: list[str | None] = []
+
+        def malicious_opener(request, timeout=0):
+            # 恶意 callable：内部"跟跳"，把请求头（含 Authorization）重放到
+            # 第二 origin——如果客户端把它放行，凭据就已泄露。
+            leaked.append(request.get_header("Authorization"))
+            return EffectiveUrlResponse({"ok": True}, "https://evil.example/agents")
+
+        client = MarketplaceHTTPClient("https://market.example", "secret-token", opener=malicious_opener)
+        with self.assertRaises(MarketplaceHTTPError) as raised:
+            client.request("GET", "/agents")
+        self.assertIn("transport", str(raised.exception))
+        # fail-closed 在调用 opener 之前发生：恶意 callable 从未执行，第二 origin 收不到凭据
+        self.assertEqual(leaked, [])
+
+    def test_callable_opener_with_transport_skips_opener_resolution(self):
+        """审查 P1-12：opener 解析位于 transport 分支**之后**——提供 transport
+        注入时，任意（本会被拒的）callable opener 不再被检查、更不被调用，
+        请求走 transport。"""
+        from shopping_cli.http_client import MarketplaceHTTPClient
+
+        opener_called: list[bool] = []
+        transport_calls: list[tuple] = []
+
+        def suspicious_opener(request, timeout=0):
+            opener_called.append(True)
+            raise AssertionError("opener must never be called when a transport is provided")
+
+        def transport(method, path, payload, query, headers):
+            transport_calls.append((method, path, headers.get("Authorization")))
+            return {"ok": True}
+
+        client = MarketplaceHTTPClient(
+            "https://market.example",
+            "secret-token",
+            opener=suspicious_opener,
+            transport=transport,
+        )
+        self.assertEqual(client.request("GET", "/agents"), {"ok": True})
+        self.assertEqual(opener_called, [])
+        self.assertEqual(transport_calls, [("GET", "/agents", "Bearer secret-token")])
+
+    def test_redirect_safe_opener_strips_redirect_following_handlers(self):
+        """审查 P1-12：自定义 opener 中的 HTTPRedirectHandler 会被剔除，
+        只保留拒绝重定向的 _NoRedirectHandler——凭据不会在跨源跳转时重放。"""
+        from shopping_cli.http_client import _NoRedirectHandler, _redirect_safe_opener
+
+        director = urllib.request.OpenerDirector()
+        director.add_handler(urllib.request.HTTPRedirectHandler())
+        director.add_handler(urllib.request.HTTPHandler())
+
+        rebuilt = _redirect_safe_opener(director)
+        redirect_handlers = [
+            handler
+            for handler in rebuilt.handlers
+            if isinstance(handler, urllib.request.HTTPRedirectHandler)
+        ]
+        self.assertEqual(len(redirect_handlers), 1)
+        self.assertIsInstance(redirect_handlers[0], _NoRedirectHandler)
+        # 无重定向 handler 的 opener 原样透传（不重建、不改动调用方对象）
+        passive = urllib.request.OpenerDirector()
+        passive.add_handler(urllib.request.HTTPHandler())
+        self.assertIs(_redirect_safe_opener(passive), passive)
+
+    def test_custom_opener_redirect_cannot_leak_bearer_cross_origin(self):
+        """审查 P1-12：真实 OpenerDirector 自定义 opener 收到跨源 302 时，
+        客户端必须拒绝重定向——evil.example 绝不收到 Bearer，只发出一次请求。"""
+        from shopping_cli.http_client import MarketplaceHTTPClient, MarketplaceHTTPError
+
+        made: list[tuple[str, str | None]] = []
+
+        class RedirectingHTTPSHandler(urllib.request.BaseHandler):
+            def https_open(self, request):
+                made.append((request.get_full_url(), request.get_header("Authorization")))
+
+                class Redirect302:
+                    code = 302
+                    status = 302
+                    msg = "Found"
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback):
+                        return False
+
+                    def read(self, size=None):
+                        return b""
+
+                    def geturl(self):
+                        return request.get_full_url()
+
+                    def info(self):
+                        return {"Location": "https://evil.example/agents"}
+
+                    def close(self):
+                        pass
+
+                return Redirect302()
+
+        director = urllib.request.OpenerDirector()
+        director.add_handler(urllib.request.HTTPErrorProcessor())
+        director.add_handler(urllib.request.HTTPDefaultErrorHandler())
+        director.add_handler(urllib.request.HTTPRedirectHandler())
+        director.add_handler(RedirectingHTTPSHandler())
+
+        with self.assertRaises(MarketplaceHTTPError):
+            MarketplaceHTTPClient(
+                "https://market.example", "secret-token", opener=director
+            ).request("GET", "/agents")
+
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0][0], "https://market.example/agents")
+        self.assertFalse(any(url.startswith("https://evil") for url, _ in made))
+
+    def test_request_target_origin_enforced_before_authorization(self):
+        """审查 P1-12：Authorization 附加前强制目标与 base_url 同源。"""
+        from shopping_cli.http_client import MarketplaceHTTPError, _assert_same_origin_request
+
+        _assert_same_origin_request("https://market.example/agents", "https://market.example")
+        _assert_same_origin_request("https://market.example/api/agents", "https://market.example")
+        with self.assertRaises(MarketplaceHTTPError) as raised:
+            _assert_same_origin_request("https://evil.example/agents", "https://market.example")
+        self.assertIn("origin mismatch", str(raised.exception))
 
 
 if __name__ == "__main__":

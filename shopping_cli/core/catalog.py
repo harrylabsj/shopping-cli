@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event
-from shopping_cli.core.limits import MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
+from shopping_cli.core.limits import MAX_PERSISTED_TEXT_CHARS, MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.core.catalog_text import (
     fts_query,
@@ -320,6 +320,7 @@ def create_product(
     tags: str | list[str] | None = None,
     description: str = "",
     delivery_attributes: str | list[str] | None = None,
+    handoff_destination: str = "",
 ) -> dict[str, Any]:
     merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
     sku = bounded_text(sku, "product sku", MAX_SHORT_TEXT_CHARS).strip()
@@ -327,6 +328,7 @@ def create_product(
     description = bounded_text(description, "product description")
     category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
     currency = bounded_text(currency, "currency", 16)
+    handoff_destination = bounded_text(handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not sku:
@@ -344,9 +346,10 @@ def create_product(
             """
         insert into products(
             sku, merchant_id, title, description, category, tags_json, price,
-            currency, stock, delivery_attributes_json, active, created_at, updated_at
+            currency, stock, delivery_attributes_json, handoff_destination,
+            active, created_at, updated_at
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
             sku,
@@ -359,6 +362,7 @@ def create_product(
             currency,
             stock,
             encode_json(parse_tags(delivery_attributes)),
+            handoff_destination,
             now,
             now,
             ),
@@ -382,6 +386,7 @@ def update_product(
     tags: str | list[str] | None = None,
     description: str | None = None,
     delivery_attributes: str | list[str] | None = None,
+    handoff_destination: str | None = None,
 ) -> dict[str, Any]:
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
@@ -396,6 +401,10 @@ def update_product(
         category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
     if description is not None:
         description = bounded_text(description, "product description")
+    if handoff_destination is not None:
+        handoff_destination = bounded_text(
+            handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS
+        )
     if price is not None:
         price = _price_with_precision(price, "--price must be finite")
     if stock is not None:
@@ -422,6 +431,9 @@ def update_product(
     if delivery_attributes is not None:
         updates.append("delivery_attributes_json = ?")
         values.append(encode_json(parse_tags(delivery_attributes)))
+    if handoff_destination is not None:
+        updates.append("handoff_destination = ?")
+        values.append(handoff_destination)
     if updates:
         # 本地手改提升权威（§5）：编辑过 source='erp' 的行升级为 'local'，
         # 否则下一次 ERP 同步会静默覆盖本地改动（冲突守卫只保护 local 行）。
@@ -559,6 +571,7 @@ def product_summary(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
         "currency": product["currency"],
         "stock": _safe_non_negative_int(product["stock"]),
         "delivery_attributes": decode_json(product["delivery_attributes_json"], []),
+        "handoff_destination": product["handoff_destination"] or "",
         "merchant": merchant,
         "delivery": merchant["delivery"],
         "warnings": product_warnings(product, merchant),

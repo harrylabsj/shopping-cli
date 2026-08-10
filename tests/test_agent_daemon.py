@@ -938,5 +938,81 @@ class AgentDaemonIdentityTest(unittest.TestCase):
                 self.stop_child(child_b)
 
 
+class AgentDaemonFilePermissionsTest(unittest.TestCase):
+    """P2-07：daemon 日志/stop 文件权限必须 0600——fresh/rotated/existing/stop 全覆盖。"""
+
+    @staticmethod
+    def file_mode(path) -> int:
+        return Path(path).stat().st_mode & 0o777
+
+    def test_fresh_log_file_created_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "logs" / "agent.log"
+            log_file.parent.mkdir(parents=True)
+            with merchant_daemon._open_log_append(log_file):
+                log_file.write_text("fresh log line\n", encoding="utf-8")
+            self.assertEqual(self.file_mode(log_file), 0o600)
+
+    def test_existing_log_file_rechmodded_0600(self):
+        # 修复前遗留的世界可读日志：_open_log_append 必须把已存在文件也 chmod 0600
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "logs" / "agent.log"
+            log_file.parent.mkdir(parents=True)
+            log_file.write_text("legacy world-readable log\n", encoding="utf-8")
+            os.chmod(log_file, 0o644)
+            self.assertEqual(self.file_mode(log_file), 0o644)
+            with merchant_daemon._open_log_append(log_file):
+                log_file.write_text("appended\n", encoding="utf-8")
+            self.assertEqual(self.file_mode(log_file), 0o600)
+
+    def test_rotated_log_backups_are_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = merchant_daemon.agent_paths("seller-a", tmp)
+            merchant_daemon.ensure_agent_dirs(paths)
+            log_file = paths["log_file"]
+            log_file.write_bytes(b"x" * (merchant_daemon.MAX_AGENT_LOG_BYTES + 1))
+            os.chmod(log_file, 0o644)
+            self.assertTrue(merchant_daemon.rotate_agent_log(log_file))
+            backup = Path(str(log_file) + ".1")
+            self.assertTrue(backup.exists())
+            self.assertEqual(self.file_mode(backup), 0o600)
+
+    def test_stop_file_written_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = merchant_daemon.agent_paths("seller-a", tmp)
+            merchant_daemon.ensure_agent_dirs(paths)
+            merchant_daemon._write_private_text(paths["stop_file"], "launch-token")
+            self.assertEqual(self.file_mode(paths["stop_file"]), 0o600)
+            self.assertEqual(paths["stop_file"].read_text(encoding="utf-8"), "launch-token")
+            # 覆盖已存在的世界可读 stop 文件也强制 0600
+            os.chmod(paths["stop_file"], 0o644)
+            merchant_daemon._write_private_text(paths["stop_file"], "rotated-token")
+            self.assertEqual(self.file_mode(paths["stop_file"]), 0o600)
+            self.assertEqual(paths["stop_file"].read_text(encoding="utf-8"), "rotated-token")
+
+    def test_start_agent_creates_0600_log_and_credential_files(self):
+        from shopping_cli.core.catalog import create_merchant
+        from shopping_cli.db.session import db_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_file = tmp_path / "shopping-cli.sqlite"
+            state_dir = tmp_path / "state"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-a", "West Lake Tea", city="Hangzhou")
+            started = None
+            try:
+                started = merchant_daemon.start_agent(
+                    db_file, "seller-a", interval=1.0, state_dir=state_dir
+                )
+                self.assertTrue(started["running"])
+                self.assertEqual(self.file_mode(started["log_file"]), 0o600)
+                self.assertEqual(self.file_mode(started["pid_file"]), 0o600)
+                self.assertEqual(self.file_mode(started["state_file"]), 0o600)
+            finally:
+                if started and started.get("running"):
+                    merchant_daemon.stop_agent(db_file, "seller-a", state_dir=state_dir, timeout=2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

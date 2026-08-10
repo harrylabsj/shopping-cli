@@ -813,6 +813,143 @@ class P1RegressionTest(unittest.TestCase):
             self.assertEqual(product_merchant["name"], "西湖龙井茶庄")
             self.assertEqual(summary["product"]["price"], 88)
 
+    def _seed_private_merchant_with_product(self, db_file: Path) -> None:
+        """Seeds a merchant carrying private fields plus one in-stock product."""
+        _status, merchant = handle_request(
+            db_file,
+            "POST",
+            "/merchants",
+            {
+                "id": "seller-a",
+                "name": "West Lake Tea",
+                "city": "Hangzhou",
+                "service_area": "West Lake",
+                "contact": "wechat:westlake",
+                "automation_boundaries": '{"floor": 9.5}',
+                "admin_token": "test-admin-bootstrap-token",
+            },
+        )
+        handle_request(
+            db_file,
+            "POST",
+            "/products",
+            {
+                "merchant_id": "seller-a",
+                "sku": "tea-a",
+                "title": "Longjing Gift Box",
+                "price": 88,
+                "stock": 5,
+                "tags": ["longjing"],
+                "merchant_token": merchant["merchant_token"],
+            },
+        )
+
+    def test_buyer_ask_candidates_and_selected_are_public_projected(self):
+        """P1-02：/buyer/ask 的 candidates/selected 出网前剥离 merchant 私有
+        contact / automation_boundaries 与精确库存（只留 availability_hint）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(
+                os.environ,
+                {
+                    "SHOPPING_ADMIN_TOKEN": "test-admin-bootstrap-token",
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "test-buyer-bootstrap-token",
+                },
+                clear=False,
+            ):
+                self._seed_private_merchant_with_product(db_file)
+                status, body = handle_request(
+                    db_file,
+                    "POST",
+                    "/buyer/ask",
+                    {
+                        "buyer_id": "alice",
+                        "text": "longjing gift delivery today",
+                        "buyer_bootstrap_token": "test-buyer-bootstrap-token",
+                    },
+                )
+            self.assertEqual(status, 200)
+            for product in (body["selected"], body["candidates"][0]):
+                self.assertNotIn("stock", product)
+                self.assertEqual(product["availability_hint"], "in_stock")
+                self.assertNotIn("contact", product["merchant"])
+                self.assertNotIn("automation_boundaries", product["merchant"])
+                self.assertEqual(product["merchant"]["name"], "West Lake Tea")
+            # conversation.product 已由 conversation_summary 投影（H2），此处复验
+            self.assertNotIn("contact", body["conversation"]["product"]["merchant"])
+
+    def test_buyer_ask_idempotency_replay_stays_public_projected(self):
+        """P1-02：先投影再入库；回放边界二次投影（幂等）不丢 availability_hint，
+        幂等账本本身也不得持有私有字段。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(
+                os.environ,
+                {
+                    "SHOPPING_ADMIN_TOKEN": "test-admin-bootstrap-token",
+                    "SHOPPING_BUYER_BOOTSTRAP_TOKEN": "test-buyer-bootstrap-token",
+                },
+                clear=False,
+            ):
+                self._seed_private_merchant_with_product(db_file)
+                payload = {
+                    "buyer_id": "alice",
+                    "text": "longjing gift delivery today",
+                    "idempotency_key": "ask-alice-p102",
+                    "buyer_bootstrap_token": "test-buyer-bootstrap-token",
+                }
+                first_status, first = handle_request(db_file, "POST", "/buyer/ask", payload)
+                replay_status, replayed = handle_request(db_file, "POST", "/buyer/ask", payload)
+            self.assertEqual((first_status, replay_status), (200, 200))
+            self.assertTrue(replayed["idempotent"])
+            for body in (first, replayed):
+                for product in (body["selected"], body["candidates"][0]):
+                    self.assertNotIn("stock", product)
+                    self.assertEqual(product["availability_hint"], "in_stock")
+                    self.assertNotIn("contact", product["merchant"])
+                    self.assertNotIn("automation_boundaries", product["merchant"])
+            with db_session(db_file) as conn:
+                row = conn.execute(
+                    "select response_json from buyer_request_idempotency where idempotency_key = ?",
+                    ("ask-alice-p102",),
+                ).fetchone()
+            ledger = json.dumps(json.loads(row["response_json"]))
+            self.assertNotIn("contact", ledger)
+            self.assertNotIn("automation_boundaries", ledger)
+            self.assertNotIn('"stock"', ledger)
+
+    def test_channel_message_candidates_and_selected_are_public_projected(self):
+        """P1-02：/channels/messages 的 candidates/selected 同样经公开投影。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(
+                os.environ,
+                {
+                    "SHOPPING_ADMIN_TOKEN": "test-admin-bootstrap-token",
+                    "SHOPPING_CHANNEL_TOKENS": "telegram:test-telegram-channel-token",
+                },
+                clear=False,
+            ):
+                self._seed_private_merchant_with_product(db_file)
+                status, body = handle_request(
+                    db_file,
+                    "POST",
+                    "/channels/messages",
+                    {
+                        "channel": "telegram",
+                        "external_user_id": "@alice",
+                        "external_message_id": "tg-p102-1",
+                        "text": "longjing gift delivery today",
+                        "channel_token": "test-telegram-channel-token",
+                    },
+                )
+            self.assertEqual(status, 200)
+            for product in (body["selected"], body["candidates"][0]):
+                self.assertNotIn("stock", product)
+                self.assertEqual(product["availability_hint"], "in_stock")
+                self.assertNotIn("contact", product["merchant"])
+                self.assertNotIn("automation_boundaries", product["merchant"])
+
     def test_catalog_writes_are_audited(self):
         """catalog 写操作（merchant/product/stock/policy/delivery）记入审计。"""
         with tempfile.TemporaryDirectory() as tmp:
