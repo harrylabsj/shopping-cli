@@ -24,7 +24,7 @@ If a conversation is `waiting_merchant` or `human_required`, treat it as pending
 
 ## Quick Start
 
-Use Python **>=3.11**. On 项目维护者's macOS, system `/usr/bin/python3` may be 3.9 and will fail on PEP 604 type hints; prefer `python3.11` from the Hermes venv when running from source.
+Use Python **>=3.11**. On macOS, the system `/usr/bin/python3` may be older than 3.11 and will fail on PEP 604 type hints; prefer a managed Python 3.11+ environment when running from source.
 
 ```bash
 PY=${PYTHON:-python3.11}
@@ -65,4 +65,3 @@ Use `conversation create/show/list/message/close/human-review/resolve-review` wh
 ## Human Review Rules
 
 Mark the conversation `human_required` for private discounts, bargaining, unclear product references, binding commitments, stock reservation, order confirmation, payment evidence, refunds, disputes, or unsupported promises.
-
