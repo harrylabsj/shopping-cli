@@ -140,7 +140,9 @@ class ShoppingCliMvpTest(unittest.TestCase):
                 )
             )
             self.assertEqual(summary["option"]["sku"], "tea-a")
-            self.assertEqual(summary["option"]["stock"], 5)
+            # 审查 P2-1：公开投影只给 availability_hint，精确 stock 不下发
+            self.assertNotIn("stock", summary["option"])
+            self.assertEqual(summary["option"]["availability_hint"], "in_stock")
             self.assertEqual(summary["option"]["delivery"]["eta_minutes"], 45)
             self.assertTrue(summary["no_order_created"])
             self.assertTrue(summary["no_stock_reserved"])

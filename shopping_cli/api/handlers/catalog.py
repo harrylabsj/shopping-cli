@@ -27,6 +27,7 @@ from .common import (
     result_limit,
     result_offset,
 )
+from shopping_cli.core import catalog_views
 
 
 def health(db_path: str | Path) -> dict[str, Any]:
@@ -349,30 +350,66 @@ def update_product(
         return {"ok": True, "product": product}
 
 
-def get_product(db_path: str | Path, sku: str) -> dict[str, Any]:
+def _owner_merchant_from_payload(conn: Any, payload: dict[str, Any] | None) -> str:
+    """从 Authorization Bearer token 解析合法商户/agent 身份的 merchant_id。
+
+    读路径（GET /products/{sku}、/search/products）的精确库存只向商品所属
+    商户本人开放（design v0.3 §7 private inventory，审查 P2-1）。匿名或
+    token 无效/吊销/过期一律返回 ""——公开读继续可用，只是投影降级为
+    availability_hint，不因无效凭据拒绝公开读。
+    """
+    token = str((payload or {}).get("_auth_token") or "")
+    if not token:
+        return ""
+    try:
+        row = token_service.require_api_token(conn, token, "invalid merchant read token")
+    except AuthError:
+        return ""
+    if row is None:
+        return ""
+    try:
+        role = str(row["role"] or "")
+        merchant_id = str(row["merchant_id"] or "")
+    except (KeyError, IndexError):
+        return ""
+    if role not in ("merchant", "agent"):
+        return ""
+    return merchant_id
+
+
+def get_product(db_path: str | Path, sku: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     with db_session(db_path) as conn:
-        return {"ok": True, "product": public_product_summary(catalog.product_summary(conn, sku))}
+        product = catalog.product_summary(conn, sku)
+        owner = _owner_merchant_from_payload(conn, payload)
+        if owner and owner == str(product.get("merchant_id") or ""):
+            return {"ok": True, "product": catalog_views.merchant_product_summary(product)}
+        return {"ok": True, "product": catalog_views.public_product_summary(product)}
 
 
-def search_products(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
+def search_products(
+    db_path: str | Path, query: dict[str, Any], payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     max_price = query.get("max_price")
     with db_session(db_path) as conn:
-        return {
-            "ok": True,
-            "results": [
-                public_product_summary(product)
-                for product in catalog.search_products(
-                    conn,
-                    query=str(query.get("query") or ""),
-                    city=str(query.get("city") or ""),
-                    area=str(query.get("area") or ""),
-                    max_price=max_price if str(max_price or "") else None,
-                    include_out_of_stock=bool_from_query(query.get("include_out_of_stock")),
-                    limit=result_limit(query.get("limit"), default=10),
-                    offset=result_offset(query.get("offset")),
-                )
-            ],
-        }
+        owner = _owner_merchant_from_payload(conn, payload)
+        results = [
+            (
+                catalog_views.merchant_product_summary(product)
+                if owner and owner == str(product.get("merchant_id") or "")
+                else public_product_summary(product)
+            )
+            for product in catalog.search_products(
+                conn,
+                query=str(query.get("query") or ""),
+                city=str(query.get("city") or ""),
+                area=str(query.get("area") or ""),
+                max_price=max_price if str(max_price or "") else None,
+                include_out_of_stock=bool_from_query(query.get("include_out_of_stock")),
+                limit=result_limit(query.get("limit"), default=10),
+                offset=result_offset(query.get("offset")),
+            )
+        ]
+        return {"ok": True, "results": results}
 
 
 def search_merchants(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:

@@ -131,7 +131,12 @@ def summarize(conn: sqlite3.Connection, conversation_id: str) -> dict[str, Any]:
             missing_facts.append("merchant contact")
         if not option["delivery"].get("service_area"):
             missing_facts.append("delivery rule")
-        if option["stock"] <= 0:
+        # 审查 P2-1：公开投影只携带 availability_hint（精确库存不下发）；
+        # 历史快照可能仍是旧形状（stock），两者都按"缺货"语义处理。
+        stock = option.get("stock")
+        if stock is None:
+            stock = 0 if option.get("availability_hint") == "out_of_stock" else 1
+        if stock <= 0:
             warnings.append("Product is out of stock.")
     warnings.extend(status_warnings(conversation))
     for flag in conversation["flags"]:

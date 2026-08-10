@@ -208,8 +208,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _create_product(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/products/{sku}")
-    def get_product(sku: str) -> dict[str, Any]:
-        return _get_product(db_path, sku)
+    def get_product(
+        sku: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        # 审查 P2-1：精确库存仅向商品所属商户本人开放（owner 鉴权在 handler）
+        return _get_product(
+            db_path, sku, api_auth.payload_with_auth({}, authorization)
+        )
 
     @app.patch("/products/{sku}")
     def update_product(
@@ -243,7 +249,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         include_out_of_stock: str = "",
         limit: str = "",
         offset: str = "",
+        authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
+        # 审查 P2-1：精确库存仅向商品所属商户本人开放（owner 鉴权在 handler）
         return _search_products(
             db_path,
             {
@@ -255,6 +263,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
                 "limit": limit,
                 "offset": offset,
             },
+            api_auth.payload_with_auth({}, authorization),
         )
 
     @app.get("/search/merchants")
