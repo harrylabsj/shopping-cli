@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible defect in shopping-cli
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove all credentials, tokens, personal
+        data, private host details, and local filesystem paths before submitting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear, concise description of the defect.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and inputs used. Omit private or local data.
+      placeholder: |
+        1. Run `python3 scripts/shopping.py ...`
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen after following the steps.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, and install method (pip/uv/npm).
+      placeholder: "e.g. macOS 14, Python 3.11, uv sync"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste output with any tokens, credentials, or personal data redacted.
+      render: text
+    validations:
+      required: false
