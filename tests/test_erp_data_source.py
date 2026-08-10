@@ -347,3 +347,15 @@ class ErpDataSourceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_lossy_price_rejected(self) -> None:
+        """审查 BUG-04：price 超出两位小数精度 → 解析期 fail-closed 拒绝
+        （此前 int(round(price*100)) 静默改写进报价）。"""
+        page = {"results": [{"sku": "LOSSY-1", "title": "Bad", "price": 19.995, "stock": 1}]}
+        def fetch_lossy(_url):
+            return (200, json.dumps(page).encode("utf-8"))
+        with self.assertRaises(ErpSourceError) as ctx:
+            sync_erp_products(
+                self.conn, ErpSyncConfig(base_url="https://erp.example"), fetch=fetch_lossy
+            )
+        self.assertIn("2-decimal", str(ctx.exception))

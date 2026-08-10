@@ -70,6 +70,26 @@ def _finite_float(value: Any, message: str) -> float:
     return number
 
 
+def _price_with_precision(value: Any, message: str) -> float:
+    """价格校验：finite + 非负 + 不超过币种两位小数精度。
+
+    审查 BUG-04：float 精度超出最小单位会被静默舍入进报价——Decimal(str())
+    精确判定，lossy 输入 fail-closed 拒绝（商品创建/更新/ERP 导入边界）。
+    """
+    from decimal import Decimal, InvalidOperation
+
+    price = _finite_float(value, message)
+    if price < 0:
+        raise ValidationError(f"{message} (must be non-negative)")
+    try:
+        amount = Decimal(str(price))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValidationError(f"{message} (not a decimal)") from exc
+    if amount * 100 != (amount * 100).to_integral_value():
+        raise ValidationError(f"{message} (exceeds 2-decimal precision, lossy)")
+    return price
+
+
 def _whole_int(value: Any, message: str) -> int:
     if isinstance(value, bool):
         raise ValidationError(message)
@@ -313,10 +333,8 @@ def create_product(
         raise ValidationError("product sku is required")
     if not title:
         raise ValidationError("product title is required")
-    price = _finite_float(price, "--price must be finite")
+    price = _price_with_precision(price, "--price must be finite")
     stock = _whole_int(stock, "--stock must be a whole number")
-    if price < 0:
-        raise ValidationError("--price must be non-negative")
     if stock < 0:
         raise ValidationError("--stock must be non-negative")
     require_merchant(conn, merchant_id)
@@ -379,9 +397,7 @@ def update_product(
     if description is not None:
         description = bounded_text(description, "product description")
     if price is not None:
-        price = _finite_float(price, "--price must be finite")
-    if price is not None and price < 0:
-        raise ValidationError("--price must be non-negative")
+        price = _price_with_precision(price, "--price must be finite")
     if stock is not None:
         stock = _whole_int(stock, "--stock must be a whole number")
     if stock is not None and stock < 0:

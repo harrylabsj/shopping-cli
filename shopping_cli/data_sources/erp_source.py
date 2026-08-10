@@ -314,6 +314,18 @@ def _parse_erp_product(raw: Any, index: int) -> dict[str, Any]:
         raise ErpSourceError(f"erp product at index {index} has invalid price")
     if not math.isfinite(float(price)):
         raise ErpSourceError(f"erp product at index {index} has a non-finite price")
+    # 审查 BUG-04：价格超出币种两位小数精度 → fail-closed 拒绝（float 静默
+    # 舍入会把错误价格写进报价；Decimal(str()) 精确判定）。
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        scaled = Decimal(str(price)) * 100
+    except (InvalidOperation, ValueError) as exc:
+        raise ErpSourceError(f"erp product at index {index} has non-decimal price") from exc
+    if scaled != scaled.to_integral_value():
+        raise ErpSourceError(
+            f"erp product at index {index} price {price!r} exceeds 2-decimal precision (lossy)"
+        )
     if not isinstance(stock, int) or stock < 0:
         raise ErpSourceError(f"erp product at index {index} has invalid stock")
     row = {
