@@ -99,6 +99,31 @@ def enforce_buyer_bootstrap_rate_limit(
     if limit <= 0:
         return
     current = (current or datetime.now()).replace(microsecond=0)
+    # 审查 BUG-11：旧限流窗口行永不清理（每 (token_hash, buyer_id, 60s
+    # window) 一行，持续活跃 1440 行/买家/天）——窗口过期后行即死数据。
+    # 在限流事务内抽样批量删除（updated_at 索引 + LIMIT 上限，避免长写锁）：
+    # 保留最近 2 个窗口（安全缓冲，当前窗口计数不受影响）。
+    try:
+        conn.execute(
+            """
+            delete from buyer_bootstrap_rate_limits
+            where rowid in (
+                select rowid from buyer_bootstrap_rate_limits
+                where updated_at < ?
+                limit 200
+            )
+            """,
+            (
+                datetime.fromtimestamp(
+                    int(current.timestamp()) - 2 * BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS
+                )
+                .replace(microsecond=0)
+                .isoformat(),
+            ),
+        )
+    except sqlite3.OperationalError:
+        # 清理失败不影响限流本身（fail-safe 方向；下次再试）
+        pass
     cursor = conn.execute(
         """
         insert into buyer_bootstrap_rate_limits(token_hash, buyer_id, window_start, request_count, updated_at)
