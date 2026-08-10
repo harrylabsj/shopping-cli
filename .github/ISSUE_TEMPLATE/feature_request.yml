@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose an enhancement or new capability for shopping-cli
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Focus on the problem to solve and
+        the expected behavior, and keep the request free of personal data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What need is not met by the current runtime?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the change in observable behavior rather than implementation details.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, related existing features, or rejected approaches.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Concrete, testable outcomes that would let maintainers close the request.
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: false
