@@ -21,10 +21,15 @@ def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
     出网精确 stock，可逐 SKU 枚举全平台库存）。需要精确库存的商家走
     merchant_product_summary（handler 层 owner 鉴权门）。
 
+    handoff_destination 是商家私有成交入口（谈判达成后由商家 Agent 点对点
+    交给买家），公开/匿名投影一律剥离（审查 P2-B），同款纪律参照
+    public_merchant_summary 剥离 contact；认证商家读走 merchant_product_summary。
+
     对已投影数据幂等：含 ``stock`` 时替换为 availability_hint；不含则保留
     已有 hint（审查 P1-02：幂等回放响应二次投影不丢失 in_stock）。
     """
     summary = dict(product)
+    summary.pop("handoff_destination", None)
     if "stock" in summary:
         stock = summary.pop("stock", None)
         summary["availability_hint"] = (

@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event
@@ -113,6 +114,27 @@ def _whole_int(value: Any, message: str) -> int:
 
 
 # safe_non_negative_int / safe_non_negative_float are imported from core.limits
+
+# 审查 P2-A：可无 ``://`` 出现的危险伪 scheme，一律拒绝（opaque 放行见下）。
+_BLOCKED_HANDOFF_SCHEMES = frozenset({"javascript", "data", "file", "vbscript", "blob"})
+
+
+def _validate_handoff_destination(value: str) -> None:
+    """handoff_destination 形态校验（审查 P2-A）。
+
+    空值允许；值呈现 URL 形态（含 ``://``）必须是合法 http/https origin，
+    拒绝其他一切 scheme；``javascript:``/``data:`` 等危险伪 scheme 即使
+    无 ``://`` 也拒绝；纯 opaque 引用串（chat-id、文档引用等）原样允许。
+    """
+    if not value:
+        return
+    parsed = urlparse(value)
+    scheme = parsed.scheme.lower()
+    if "://" in value:
+        if scheme not in ("http", "https") or not parsed.hostname:
+            raise ValidationError("handoff destination URL must be a valid http(s) origin")
+    elif scheme in _BLOCKED_HANDOFF_SCHEMES:
+        raise ValidationError(f"handoff destination scheme is not allowed: {scheme}")
 
 
 def _audit_catalog(conn: sqlite3.Connection, merchant_id: str, event: str, details: dict) -> None:
@@ -329,6 +351,7 @@ def create_product(
     category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
     currency = bounded_text(currency, "currency", 16)
     handoff_destination = bounded_text(handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS)
+    _validate_handoff_destination(handoff_destination)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not sku:
@@ -405,6 +428,7 @@ def update_product(
         handoff_destination = bounded_text(
             handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS
         )
+        _validate_handoff_destination(handoff_destination)
     if price is not None:
         price = _price_with_precision(price, "--price must be finite")
     if stock is not None:
@@ -606,6 +630,7 @@ def _product_summary_from_search_row(row: sqlite3.Row) -> dict[str, Any]:
         "currency": row["currency"],
         "stock": _safe_non_negative_int(row["stock"]),
         "delivery_attributes": decode_json(row["delivery_attributes_json"], []),
+        "handoff_destination": row["handoff_destination"] or "",
         "merchant": merchant,
         "delivery": merchant["delivery"],
         "warnings": product_warnings(row, merchant),

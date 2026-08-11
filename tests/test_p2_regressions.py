@@ -16,7 +16,8 @@ from shopping_cli.agents.tools import HTTPMerchantAgentTools
 from shopping_cli.api.app import create_app, handle_request
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.limits import MAX_JSON_DEPTH
-from shopping_cli.core.catalog import create_merchant, create_product, search_products
+from shopping_cli.core.catalog import create_merchant, create_product, search_products, update_product
+from shopping_cli.core.errors import ValidationError
 from shopping_cli.core.conversations import (
     append_message,
     ensure_conversation,
@@ -381,6 +382,152 @@ class P2RegressionTest(unittest.TestCase):
             sql = "\n".join(statements).lower()
             self.assertNotIn("not in (select", sql)
             self.assertNotIn("count(*) from product_search_index", sql)
+
+    def test_handoff_destination_rejects_unsafe_schemes(self):
+        """审查 P2-A：handoff_destination 拒绝 javascript:/file:/data: 等非
+        http(s) scheme（create 与 update 同一校验门；API 透传为 400）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-a", "Tea")
+                create_product(conn, "seller-a", "tea-a", "Tea", 1, 1)
+                for index, bad in enumerate(
+                    ("javascript:alert(1)", "file:///etc/passwd", "data:text/html;base64,PHNjcmlwdD4=")
+                ):
+                    with self.assertRaises(ValidationError, msg=bad):
+                        create_product(
+                            conn, "seller-a", f"tea-bad-{index}", "Tea", 1, 1, handoff_destination=bad
+                        )
+                    with self.assertRaises(ValidationError, msg=bad):
+                        update_product(conn, "tea-a", handoff_destination=bad)
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
+                _status, merchant = handle_request(
+                    db_file, "POST", "/merchants", {"id": "seller-b", "name": "Tea", "admin_token": "admin-secret"}
+                )
+                status, body = handle_request(
+                    db_file,
+                    "POST",
+                    "/products",
+                    {
+                        "merchant_id": "seller-b",
+                        "sku": "tea-b",
+                        "title": "Tea",
+                        "price": 1,
+                        "stock": 1,
+                        "merchant_token": merchant["merchant_token"],
+                        "handoff_destination": "javascript:alert(1)",
+                    },
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("handoff destination", body["error"])
+
+    def test_handoff_destination_allows_https_origin_and_opaque_refs(self):
+        """审查 P2-A：合法 http(s) origin 与 opaque 引用串（chat-id、文档引用）
+        原样通过并存储。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                create_merchant(conn, "seller-a", "Tea")
+                for index, good in enumerate(
+                    (
+                        "https://shop.example/checkout/abc",
+                        "http://127.0.0.1:8080/pay",
+                        "wechat:merchant-001",
+                        "po-draft-123",
+                        "",
+                    )
+                ):
+                    product = create_product(
+                        conn, "seller-a", f"tea-{index}", "Tea", 1, 1, handoff_destination=good
+                    )
+                    self.assertEqual(product["handoff_destination"], good)
+                updated = update_product(conn, "tea-0", handoff_destination="https://shop.example/checkout/new")
+                self.assertEqual(updated["handoff_destination"], "https://shop.example/checkout/new")
+
+    def test_public_product_reads_strip_handoff_destination(self):
+        """审查 P2-B：匿名/公开读（/products/{sku}、/search/products）不出网
+        handoff_destination；所属商户本人持有效 token 读保留完整字段。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
+                _status, merchant = handle_request(
+                    db_file, "POST", "/merchants", {"id": "seller-a", "name": "Tea", "admin_token": "admin-secret"}
+                )
+                token = merchant["merchant_token"]
+                status, _created = handle_request(
+                    db_file,
+                    "POST",
+                    "/products",
+                    {
+                        "merchant_id": "seller-a",
+                        "sku": "tea-a",
+                        "title": "Longjing",
+                        "price": 88,
+                        "stock": 5,
+                        "merchant_token": token,
+                        "handoff_destination": "https://shop.example/checkout/tea-a",
+                    },
+                )
+                self.assertEqual(status, 200)
+
+                status, shown = handle_request(db_file, "GET", "/products/tea-a")
+                self.assertEqual(status, 200)
+                self.assertNotIn("handoff_destination", shown["product"])
+                status, search = handle_request(db_file, "GET", "/search/products", query={"query": "longjing"})
+                self.assertEqual(status, 200)
+                self.assertNotIn("handoff_destination", search["results"][0])
+
+                auth = {"_auth_token": token}
+                status, shown = handle_request(db_file, "GET", "/products/tea-a", auth)
+                self.assertEqual(shown["product"]["handoff_destination"], "https://shop.example/checkout/tea-a")
+                status, search = handle_request(db_file, "GET", "/search/products", auth, {"query": "longjing"})
+                self.assertEqual(search["results"][0]["handoff_destination"], "https://shop.example/checkout/tea-a")
+
+    def test_listing_projection_api_strips_handoff_destination_unless_owner(self):
+        """审查 P2-B：匿名 listing-projection 出口（含无 merchant_id 过滤时枚举
+        全部商家投影）剥离 handoff_destination；所属商户本人持 token 保留
+        （kiwi merchant agent 发布/成交取数路径）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
+                _status, merchant = handle_request(
+                    db_file, "POST", "/merchants", {"id": "seller-a", "name": "Tea", "admin_token": "admin-secret"}
+                )
+                token = merchant["merchant_token"]
+                status, _created = handle_request(
+                    db_file,
+                    "POST",
+                    "/products",
+                    {
+                        "merchant_id": "seller-a",
+                        "sku": "tea-a",
+                        "title": "Longjing",
+                        "price": 88,
+                        "stock": 5,
+                        "merchant_token": token,
+                        "handoff_destination": "https://shop.example/checkout/tea-a",
+                    },
+                )
+                self.assertEqual(status, 200)
+
+                status, listed = handle_request(db_file, "GET", "/v1/merchant/listings/projections")
+                self.assertEqual(status, 200)
+                self.assertNotIn("handoff_destination", listed["results"][0])
+                status, listed = handle_request(
+                    db_file, "GET", "/v1/merchant/listings/projections", query={"merchant_id": "seller-a"}
+                )
+                self.assertNotIn("handoff_destination", listed["results"][0])
+                status, single = handle_request(db_file, "GET", "/v1/merchant/listings/tea-a/projection")
+                self.assertEqual(status, 200)
+                self.assertNotIn("handoff_destination", single["projection"])
+
+                auth = {"_auth_token": token}
+                status, listed = handle_request(
+                    db_file, "GET", "/v1/merchant/listings/projections", auth, {"merchant_id": "seller-a"}
+                )
+                self.assertEqual(listed["results"][0]["handoff_destination"], "https://shop.example/checkout/tea-a")
+                status, single = handle_request(db_file, "GET", "/v1/merchant/listings/tea-a/projection", auth)
+                self.assertEqual(single["projection"]["handoff_destination"], "https://shop.example/checkout/tea-a")
 
     def test_current_schema_connection_skips_reinitialization(self):
         with tempfile.TemporaryDirectory() as tmp:
