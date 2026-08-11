@@ -28,8 +28,8 @@ from shopping_cli.api.route_matching import match_path as _match_path
 from shopping_cli.services import tokens as token_service
 
 
-def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> Any:
-    return token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
+def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]) -> None:
+    token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
 
 
 def _resolve_agent_token(conn: Any, merchant_id: str, token: Any = "", token_prefix: Any = "") -> str:
