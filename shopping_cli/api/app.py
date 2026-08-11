@@ -51,6 +51,7 @@ from shopping_cli.core.errors import (
     MethodNotAllowedError,
     NotFoundError,
     PermissionDenied,
+    QuotaExceededError,
     RateLimitError,
     PayloadTooLargeError,
     ShoppingCliError,
@@ -82,6 +83,8 @@ def handle_request(
         return 409, {"ok": False, "error": str(exc)}
     except NotFoundError as exc:
         return 404, {"ok": False, "error": str(exc)}
+    except QuotaExceededError as exc:
+        return 403, {"ok": False, "error": str(exc)}
     except RateLimitError as exc:
         return 429, {"ok": False, "error": str(exc)}
     except PayloadTooLargeError as exc:

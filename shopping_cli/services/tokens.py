@@ -15,8 +15,22 @@ from typing import Any
 
 from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.core.harness import append_audit_event
-from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
+from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_matches, token_prefix, token_suffix
 from shopping_cli.db.session import now_iso
+
+# ── kiwi-catalog 门户代理凭据（免费档商家）──────────────────────────────
+# 配置 KIWI_CATALOG_PROXY_TOKEN 后，kiwi-catalog 门户后端以免密共享密钥作为
+# 免费档商家的 Bearer 调本服务。该凭据只对 mkt_free_ 前缀的临时商家身份有效；
+# 命中后返回 catalog_proxy 哨兵，由 create_product 施加免费商品额度闸门。
+# 未配置/为空时代理分支整体关闭（fail-closed）。
+CATALOG_PROXY_ROLE = "catalog_proxy"
+_CATALOG_PROXY_TOKEN_ENV = "KIWI_CATALOG_PROXY_TOKEN"
+_FREE_MERCHANT_ID_PREFIX = "mkt_free_"
+
+
+def catalog_proxy_token() -> str:
+    """读取门户代理共享密钥；未配置返回 ""（代理分支关闭）。"""
+    return str(os.environ.get(_CATALOG_PROXY_TOKEN_ENV) or "")
 
 # ── 统一令牌（方案A）：catalog 做身份权威 ────────────────────────────────
 # 配置 KIWI_CATALOG_AUTH_URL 后，shopping-cli 的商家 token 校验先查本地，
@@ -196,8 +210,16 @@ def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
             return row
     except AuthError:
         pass
-    # 2) 跨服务：kiwi-catalog owner token（方案A，配置了 KIWI_CATALOG_AUTH_URL 时通用）
-    if _catalog_validate_merchant_token(merchant_id, str(token or "")):
+    # 2) kiwi-catalog 门户代理凭据（免费档商家；仅 mkt_free_ 前缀身份）
+    presented = str(token or "")
+    proxy_secret = catalog_proxy_token()
+    if proxy_secret and presented and token_matches(presented, proxy_secret):
+        if not str(merchant_id).startswith(_FREE_MERCHANT_ID_PREFIX):
+            raise AuthError("invalid merchant token")
+        _ensure_merchant_exists(conn, merchant_id)
+        return {"role": CATALOG_PROXY_ROLE, "merchant_id": merchant_id}
+    # 3) 跨服务：kiwi-catalog owner token（方案A，配置了 KIWI_CATALOG_AUTH_URL 时通用）
+    if _catalog_validate_merchant_token(merchant_id, presented):
         _ensure_merchant_exists(conn, merchant_id)
         return None
     raise AuthError("invalid merchant token")

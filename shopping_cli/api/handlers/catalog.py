@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import hashlib
 import hmac
@@ -13,7 +14,7 @@ from shopping_cli.config import deployment_profile_from, production_config_check
 from shopping_cli.core import catalog
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api import idempotency
-from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict
+from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict, QuotaExceededError
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session
@@ -28,6 +29,39 @@ from .common import (
     result_offset,
 )
 from shopping_cli.core import catalog_views
+
+# ── 免费档商品额度（kiwi-catalog 门户代理凭据）──────────────────────────
+_FREE_PRODUCT_QUOTA_ENV = "SHOPPING_FREE_PRODUCT_QUOTA"
+_DEFAULT_FREE_PRODUCT_QUOTA = 10
+
+
+def free_product_quota() -> int:
+    """免费档商品额度；未配置/非法/非正数一律回落默认值。"""
+    try:
+        quota = int(str(os.environ.get(_FREE_PRODUCT_QUOTA_ENV) or _DEFAULT_FREE_PRODUCT_QUOTA))
+    except ValueError:
+        return _DEFAULT_FREE_PRODUCT_QUOTA
+    return quota if quota > 0 else _DEFAULT_FREE_PRODUCT_QUOTA
+
+
+def _enforce_free_product_quota(conn: Any, merchant_id: str) -> None:
+    """免费档额度闸门：同一事务内「计数 + 插入」原子执行。
+
+    conn 尚未持写锁时先 begin immediate，把并发 create 串行化，避免两个
+    并发请求同时读到「额度未满」而双双超发。
+    """
+    if not conn.in_transaction:
+        conn.execute("begin immediate")
+    quota = free_product_quota()
+    row = conn.execute(
+        "select count(*) from products where merchant_id = ? and active = 1",
+        (merchant_id,),
+    ).fetchone()
+    count = int(row[0] or 0) if row is not None else 0
+    if count >= quota:
+        raise QuotaExceededError(
+            f"免费额度（{quota} 件商品）已用完——请到 Kiwi Catalog 门户「我的账户」申请商家令牌"
+        )
 
 
 def health(db_path: str | Path) -> dict[str, Any]:
@@ -307,7 +341,9 @@ def create_product(
 ) -> dict[str, Any]:
     with db_session(db_path) as conn:
         merchant_id = str(require_field(payload, "merchant_id"))
-        require_merchant_token(conn, merchant_id, payload)
+        token_row = require_merchant_token(conn, merchant_id, payload)
+        if isinstance(token_row, dict) and token_row.get("role") == token_service.CATALOG_PROXY_ROLE:
+            _enforce_free_product_quota(conn, merchant_id)
         product = catalog.create_product(
             conn,
             merchant_id=merchant_id,

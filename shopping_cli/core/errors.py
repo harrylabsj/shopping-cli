@@ -35,6 +35,10 @@ class RateLimitError(ShoppingCliError):
     """Raised when a caller exceeds an API rate limit."""
 
 
+class QuotaExceededError(ShoppingCliError):
+    """Raised when a caller exceeds a usage quota (e.g. free-tier product cap)."""
+
+
 class PayloadTooLargeError(ShoppingCliError):
     """Raised when a request exceeds the configured byte limit."""
 
