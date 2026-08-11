@@ -320,6 +320,7 @@ def create_product(
             tags=payload.get("tags") or [],
             description=str(payload.get("description") or ""),
             delivery_attributes=payload.get("delivery_attributes") or [],
+            handoff_destination=str(payload.get("handoff_destination") or ""),
         )
         return {"ok": True, "product": product}
 
@@ -346,6 +347,9 @@ def update_product(
             tags=payload.get("tags") if "tags" in payload else None,
             description=payload.get("description"),
             delivery_attributes=payload.get("delivery_attributes") if "delivery_attributes" in payload else None,
+            handoff_destination=payload.get("handoff_destination")
+            if "handoff_destination" in payload
+            else None,
         )
         return {"ok": True, "product": product}
 
