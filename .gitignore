@@ -25,3 +25,6 @@ dist/
 .coverage.*
 htmlcov/
 .pytest_cache/
+
+# 代理工作目录（Claude/Kimi 等编码代理的本地状态）
+.claude/
