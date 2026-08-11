@@ -226,12 +226,21 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _update_product(db_path, sku, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/v1/merchant/listings/projections")
-    def merchant_listing_projections(merchant_id: str = "") -> dict[str, Any]:
-        return _list_listing_projections(db_path, {"merchant_id": merchant_id})
+    def merchant_listing_projections(
+        merchant_id: str = "",
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        # 审查 P2-B：handoff_destination 仅向所属商户本人开放（owner 判定在 handler）
+        return _list_listing_projections(
+            db_path, {"merchant_id": merchant_id}, api_auth.payload_with_auth({}, authorization)
+        )
 
     @app.get("/v1/merchant/listings/{sku}/projection")
-    def merchant_listing_projection(sku: str) -> dict[str, Any]:
-        return _get_listing_projection(db_path, sku)
+    def merchant_listing_projection(
+        sku: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_listing_projection(db_path, sku, api_auth.payload_with_auth({}, authorization))
 
     @app.post("/v1/merchant/erp/sync")
     def merchant_erp_sync(

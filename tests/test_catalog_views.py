@@ -31,3 +31,19 @@ def test_public_product_summary_hides_exact_stock() -> None:
     merchant_view = merchant_product_summary(product)
     assert merchant_view["stock"] == 42
     assert "availability_hint" not in merchant_view
+
+
+def test_public_product_summary_strips_handoff_destination() -> None:
+    """审查 P2-B：handoff_destination 是商家私有成交入口（谈判达成后由商家
+    Agent 点对点交给买家），公开/匿名投影一律剥离；认证商家读
+    （merchant_product_summary）保留完整字段。"""
+    product = {
+        "sku": "sku-1",
+        "stock": 3,
+        "handoff_destination": "https://shop.example/checkout/abc",
+    }
+    public = public_product_summary(product)
+    assert "handoff_destination" not in public
+    assert product["handoff_destination"] == "https://shop.example/checkout/abc"
+    merchant_view = merchant_product_summary(product)
+    assert merchant_view["handoff_destination"] == "https://shop.example/checkout/abc"
