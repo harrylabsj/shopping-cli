@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-import secrets
+import hashlib
+import json
 import os
+import secrets
+import threading
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -11,6 +17,43 @@ from shopping_cli.core.errors import AuthError, ValidationError
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 from shopping_cli.db.session import now_iso
+
+# ── 统一令牌（方案A）：catalog 做身份权威 ────────────────────────────────
+# 配置 KIWI_CATALOG_AUTH_URL 后，shopping-cli 的商家 token 校验先查本地，
+# 未命中则调 kiwi-catalog 的 /v1/merchants/{id}/token/validate（商家 owner
+# token 通用）。带进程内缓存（TTL 内轮换/吊销有延迟，可接受）。
+_CATALOG_AUTH_URL_ENV = "KIWI_CATALOG_AUTH_URL"
+_CATALOG_CACHE_TTL_SECONDS = 300
+_catalog_validation_cache: dict[str, tuple[float, bool]] = {}
+_catalog_validation_lock = threading.Lock()
+
+
+def _catalog_validate_merchant_token(merchant_id: str, token: str) -> bool:
+    """调 kiwi-catalog 校验 owner token；带缓存；未配置/不可达 → False。"""
+    base = (os.environ.get(_CATALOG_AUTH_URL_ENV) or "").rstrip("/")
+    if not base or not token:
+        return False
+    key = f"{merchant_id}:{hashlib.sha256(str(token).encode()).hexdigest()}"
+    now = time.monotonic()
+    with _catalog_validation_lock:
+        hit = _catalog_validation_cache.get(key)
+        if hit is not None and now - hit[0] < _CATALOG_CACHE_TTL_SECONDS:
+            return hit[1]
+    req = urllib.request.Request(
+        f"{base}/v1/merchants/{urllib.parse.quote(merchant_id)}/token/validate",
+        data=json.dumps({"token": str(token)}).encode("utf-8"),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+            valid = bool(body.get("ok") and body.get("valid"))
+    except Exception:  # noqa: BLE001 —— 网络/解析失败按无效处理（fail-closed）
+        valid = False
+    with _catalog_validation_lock:
+        _catalog_validation_cache[key] = (now, valid)
+    return valid
 
 DEFAULT_BUYER_TOKEN_TTL_SECONDS = 86400
 DEFAULT_MERCHANT_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -128,10 +171,17 @@ def require_api_token(conn: Any, token: Any, missing_error: str = "authorization
 
 
 def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
-    row = require_api_token(conn, token, "merchant token required")
-    if row is None or row["role"] != "merchant" or row["merchant_id"] != merchant_id:
-        raise AuthError("invalid merchant token")
-    return row
+    # 1) 本地 merchant token（shopping-cli 自身签发）
+    try:
+        row = require_api_token(conn, token, "merchant token required")
+        if row is not None and row["role"] == "merchant" and row["merchant_id"] == merchant_id:
+            return row
+    except AuthError:
+        pass
+    # 2) 跨服务：kiwi-catalog owner token（方案A，配置了 KIWI_CATALOG_AUTH_URL 时通用）
+    if _catalog_validate_merchant_token(merchant_id, str(token or "")):
+        return None
+    raise AuthError("invalid merchant token")
 
 
 def require_agent_or_merchant_token(conn: Any, merchant_id: str, agent_id: str, token: Any) -> Any:
