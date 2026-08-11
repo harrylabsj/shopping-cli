@@ -170,6 +170,24 @@ def require_api_token(conn: Any, token: Any, missing_error: str = "authorization
     return row
 
 
+def _ensure_merchant_exists(conn: Any, merchant_id: str) -> None:
+    """catalog 背书的商家在 shopping-cli 不存在时补建最小商家行（方案A 引导）。
+
+    商家在 catalog 审批后即合法；首次用 owner token 管理商品时自动落一个
+    shopping-cli 商家行，避免「Unknown merchant」404。
+    """
+    row = conn.execute("select 1 from merchants where id = ?", (merchant_id,)).fetchone()
+    if row is not None:
+        return
+    now = now_iso()
+    conn.execute(
+        "insert into merchants(id, name, city, service_area, contact, hours,"
+        " automation_boundaries, tags_json, created_at, updated_at)"
+        " values (?, ?, '', '', '', '', '', '[]', ?, ?)",
+        (merchant_id, merchant_id, now, now),
+    )
+
+
 def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
     # 1) 本地 merchant token（shopping-cli 自身签发）
     try:
@@ -180,6 +198,7 @@ def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
         pass
     # 2) 跨服务：kiwi-catalog owner token（方案A，配置了 KIWI_CATALOG_AUTH_URL 时通用）
     if _catalog_validate_merchant_token(merchant_id, str(token or "")):
+        _ensure_merchant_exists(conn, merchant_id)
         return None
     raise AuthError("invalid merchant token")
 
