@@ -20,12 +20,12 @@ from shopping_cli.db.session import now_iso
 
 # ── kiwi-catalog 门户代理凭据（免费档商家）──────────────────────────────
 # 配置 KIWI_CATALOG_PROXY_TOKEN 后，kiwi-catalog 门户后端以免密共享密钥作为
-# 免费档商家的 Bearer 调本服务。该凭据只对 mkt_free_ 前缀的临时商家身份有效；
-# 命中后返回 catalog_proxy 哨兵，由 create_product 施加免费商品额度闸门。
+# 免费档商家的 Bearer 调本服务。catalog 是身份权威且为受信服务，该凭据可对
+# 任意 merchant_id 生效（免费档商家 id 与审批商家同一 id 空间）；命中后返回
+# catalog_proxy 哨兵，由 create_product 施加免费商品额度闸门。
 # 未配置/为空时代理分支整体关闭（fail-closed）。
 CATALOG_PROXY_ROLE = "catalog_proxy"
 _CATALOG_PROXY_TOKEN_ENV = "KIWI_CATALOG_PROXY_TOKEN"
-_FREE_MERCHANT_ID_PREFIX = "mkt_free_"
 
 
 def catalog_proxy_token() -> str:
@@ -210,12 +210,10 @@ def require_merchant_token(conn: Any, merchant_id: str, token: Any) -> Any:
             return row
     except AuthError:
         pass
-    # 2) kiwi-catalog 门户代理凭据（免费档商家；仅 mkt_free_ 前缀身份）
+    # 2) kiwi-catalog 门户代理凭据（免费档商家；任意 merchant_id）
     presented = str(token or "")
     proxy_secret = catalog_proxy_token()
     if proxy_secret and presented and token_matches(presented, proxy_secret):
-        if not str(merchant_id).startswith(_FREE_MERCHANT_ID_PREFIX):
-            raise AuthError("invalid merchant token")
         _ensure_merchant_exists(conn, merchant_id)
         return {"role": CATALOG_PROXY_ROLE, "merchant_id": merchant_id}
     # 3) 跨服务：kiwi-catalog owner token（方案A，配置了 KIWI_CATALOG_AUTH_URL 时通用）

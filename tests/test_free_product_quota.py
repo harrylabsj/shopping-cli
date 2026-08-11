@@ -14,7 +14,7 @@ from shopping_cli.db.session import db_session
 from shopping_cli.services import tokens as token_service
 
 PROXY_SECRET = "test-catalog-proxy-secret"
-FREE_MERCHANT = "mkt_free_seller-a"
+FREE_MERCHANT = "mkt_smoke1"
 GUIDANCE = "免费额度（10 件商品）已用完——请到 Kiwi Catalog 门户「我的账户」申请商家令牌"
 
 
@@ -109,13 +109,17 @@ class FreeProductQuotaTest(unittest.TestCase):
                 status, body = self._create_product(db_file, "sku-10")
                 self.assertEqual(status, 200, body)
 
-    def test_proxy_secret_rejects_non_free_merchant_id(self):
+    def test_proxy_secret_allows_regular_merchant_id(self):
+        # catalog 是身份权威：代理凭据可对任意格式的 merchant_id 生效，
+        # 且新注册商家尚无本地行时自动补建。
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             with patch.dict(os.environ, _proxy_env(), clear=False):
-                status, body = self._create_product(db_file, "sku-0", merchant_id="seller-a")
-            self.assertEqual(status, 403)
-            self.assertEqual(body["error"], "invalid merchant token")
+                status, body = self._create_product(db_file, "sku-0", merchant_id="seller-b")
+                self.assertEqual(status, 200, body)
+                with db_session(db_file) as conn:
+                    row = conn.execute("select id from merchants where id = 'seller-b'").fetchone()
+            self.assertIsNotNone(row)
 
     def test_proxy_token_rejected_when_env_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
