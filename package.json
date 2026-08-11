@@ -1,6 +1,6 @@
 {
   "name": "shopping-cli",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Standalone SQLite-backed local commerce AI consultation marketplace runtime.",
   "files": [
     "agents/openai.yaml",
