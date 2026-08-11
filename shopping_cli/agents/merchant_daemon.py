@@ -180,11 +180,15 @@ class _PidFileLock:
 
     def __enter__(self) -> "_PidFileLock":
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # 审查 P3-03：与日志/stop 文件对齐 0600（此前 0644）；os.open 的
+        # mode 只在新建时生效，已存在的遗留文件也显式 chmod（同
+        # _open_log_append 的 P2-07 模式）。
         self._fd = os.open(
             str(self.lock_path),
             os.O_RDWR | os.O_CREAT,
-            0o644,
+            0o600,
         )
+        os.chmod(self.lock_path, 0o600)
         if fcntl is not None:
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_EX)

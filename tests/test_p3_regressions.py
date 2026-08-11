@@ -1,9 +1,14 @@
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from shopping_cli.api.app import _ROUTE_TABLE
+from shopping_cli.api.app import _ROUTE_TABLE, handle_request
 from shopping_cli.api.route_registry import route_info
+from shopping_cli.db.migrations import migration_023_remove_scheme_a_stub_merchants
+from shopping_cli.db.session import db_session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +76,110 @@ class P3RegressionTest(unittest.TestCase):
         self.assertIn("python3 -m venv", script)
         self.assertIn("pip install --no-deps", script)
         self.assertIn("shopping-cli-api", script)
+
+    def test_listing_projection_list_requires_merchant_id(self):
+        """审查 P3-01：list 出口必须带 merchant_id 过滤——无过滤的匿名枚举
+        返回 400，跨商家枚举不再可能；带 merchant_id 的匿名读保持公开且不含
+        handoff_destination，owner token 读保留完整字段（P2-B 逻辑不动）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
+                _status, merchant = handle_request(
+                    db_file, "POST", "/merchants", {"id": "seller-a", "name": "Tea", "admin_token": "admin-secret"}
+                )
+                token = merchant["merchant_token"]
+                status, _created = handle_request(
+                    db_file,
+                    "POST",
+                    "/products",
+                    {
+                        "merchant_id": "seller-a",
+                        "sku": "tea-a",
+                        "title": "Longjing",
+                        "price": 88,
+                        "stock": 5,
+                        "merchant_token": token,
+                        "handoff_destination": "https://shop.example/checkout/tea-a",
+                    },
+                )
+                self.assertEqual(status, 200)
+
+                status, denied = handle_request(db_file, "GET", "/v1/merchant/listings/projections")
+                self.assertEqual(status, 400)
+                self.assertFalse(denied["ok"])
+
+                status, listed = handle_request(
+                    db_file, "GET", "/v1/merchant/listings/projections", query={"merchant_id": "seller-a"}
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(listed["count"], 1)
+                self.assertNotIn("handoff_destination", listed["results"][0])
+
+                auth = {"_auth_token": token}
+                status, listed = handle_request(
+                    db_file, "GET", "/v1/merchant/listings/projections", auth, {"merchant_id": "seller-a"}
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(
+                    listed["results"][0]["handoff_destination"], "https://shop.example/checkout/tea-a"
+                )
+
+    def test_migration_023_removes_scheme_a_stub_merchants(self):
+        """审查 P3-02：方案A stub 商家行（name == id、无 api_tokens）被迁移
+        删除；正常商家、有 token 行的商家、名下有业务行的 stub 均保留
+        （后者记 audit_events，不静默丢业务数据）。"""
+        now = "2026-08-11T00:00:00"
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with db_session(db_file) as conn:
+                conn.execute(
+                    "insert into merchants(id, name, created_at, updated_at)"
+                    " values ('stub-1', 'stub-1', ?, ?)",
+                    (now, now),
+                )
+                conn.execute(
+                    "insert into merchants(id, name, created_at, updated_at)"
+                    " values ('seller-a', 'West Lake Tea', ?, ?)",
+                    (now, now),
+                )
+                # name == id 但持 token 行：正常商家，不删
+                conn.execute(
+                    "insert into merchants(id, name, created_at, updated_at)"
+                    " values ('legacy', 'legacy', ?, ?)",
+                    (now, now),
+                )
+                conn.execute(
+                    "insert into api_tokens(token, role, merchant_id, created_at)"
+                    " values ('digest-x', 'merchant', 'legacy', ?)",
+                    (now,),
+                )
+                # stub 但名下有 products：跳过并记录
+                conn.execute(
+                    "insert into merchants(id, name, created_at, updated_at)"
+                    " values ('stub-busy', 'stub-busy', ?, ?)",
+                    (now, now),
+                )
+                conn.execute(
+                    "insert into products(sku, merchant_id, title, price, stock, created_at, updated_at)"
+                    " values ('tea-1', 'stub-busy', 'Tea', 88, 5, ?, ?)",
+                    (now, now),
+                )
+
+                migration_023_remove_scheme_a_stub_merchants(conn)
+
+                remaining = {row["id"] for row in conn.execute("select id from merchants")}
+                self.assertEqual(remaining, {"seller-a", "legacy", "stub-busy"})
+                audits = conn.execute(
+                    "select details_json from audit_events where event = 'stub_merchant_retained'"
+                ).fetchall()
+                self.assertEqual(len(audits), 1)
+                details = json.loads(audits[0]["details_json"])
+                self.assertEqual(details["merchant_id"], "stub-busy")
+                self.assertEqual(details["dependents"], {"products": 1})
+                # 重跑不误删保留行（迁移本身按 user_version 只执行一次）
+                migration_023_remove_scheme_a_stub_merchants(conn)
+                remaining = {row["id"] for row in conn.execute("select id from merchants")}
+                self.assertEqual(remaining, {"seller-a", "legacy", "stub-busy"})
 
 
 if __name__ == "__main__":

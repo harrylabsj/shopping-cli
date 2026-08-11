@@ -484,9 +484,9 @@ class P2RegressionTest(unittest.TestCase):
                 self.assertEqual(search["results"][0]["handoff_destination"], "https://shop.example/checkout/tea-a")
 
     def test_listing_projection_api_strips_handoff_destination_unless_owner(self):
-        """审查 P2-B：匿名 listing-projection 出口（含无 merchant_id 过滤时枚举
-        全部商家投影）剥离 handoff_destination；所属商户本人持 token 保留
-        （kiwi merchant agent 发布/成交取数路径）。"""
+        """审查 P2-B：匿名 listing-projection 出口剥离 handoff_destination；
+        所属商户本人持 token 保留（kiwi merchant agent 发布/成交取数路径）。
+        无 merchant_id 过滤的枚举在 P3-01 起被拒（见 test_p3_regressions）。"""
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"
             with patch.dict(os.environ, {"SHOPPING_ADMIN_TOKEN": "admin-secret"}, clear=False):
@@ -510,9 +510,6 @@ class P2RegressionTest(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
 
-                status, listed = handle_request(db_file, "GET", "/v1/merchant/listings/projections")
-                self.assertEqual(status, 200)
-                self.assertNotIn("handoff_destination", listed["results"][0])
                 status, listed = handle_request(
                     db_file, "GET", "/v1/merchant/listings/projections", query={"merchant_id": "seller-a"}
                 )
