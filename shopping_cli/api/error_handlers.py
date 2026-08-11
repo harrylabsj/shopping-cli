@@ -23,6 +23,7 @@ from shopping_cli.core.errors import (
     NotFoundError,
     PayloadTooLargeError,
     PermissionDenied,
+    QuotaExceededError,
     RateLimitError,
     ShoppingCliError,
     ValidationError,
@@ -76,6 +77,10 @@ def register_error_handlers(
     @app.exception_handler(NotFoundError)
     def not_found_error_handler(_request: Any, exc: NotFoundError) -> Any:
         return _json_error_response(json_response, 404, str(exc))
+
+    @app.exception_handler(QuotaExceededError)
+    def quota_exceeded_handler(_request: Any, exc: QuotaExceededError) -> Any:
+        return _json_error_response(json_response, 403, str(exc))
 
     @app.exception_handler(RateLimitError)
     def rate_limit_error_handler(_request: Any, exc: RateLimitError) -> Any:
