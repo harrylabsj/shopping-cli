@@ -290,7 +290,7 @@ class DbSessionTest(unittest.TestCase):
 
             self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 22)
+            self.assertEqual(CURRENT_SCHEMA_VERSION, 23)
 
             # The installed index enforces uniqueness for new open reuse rows.
             with self.assertRaises(sqlite3.IntegrityError) as raised:

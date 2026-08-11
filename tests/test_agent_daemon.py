@@ -990,6 +990,17 @@ class AgentDaemonFilePermissionsTest(unittest.TestCase):
             self.assertEqual(self.file_mode(paths["stop_file"]), 0o600)
             self.assertEqual(paths["stop_file"].read_text(encoding="utf-8"), "rotated-token")
 
+    def test_pid_lock_file_0600(self):
+        # P3-03：_PidFileLock 锁文件与日志/stop 文件对齐 0600（此前 0644），
+        # 已存在的遗留世界可读锁文件也显式 chmod
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "agent.pid"
+            with merchant_daemon._PidFileLock(pid_file) as lock:
+                self.assertEqual(self.file_mode(lock.lock_path), 0o600)
+            os.chmod(pid_file.with_suffix(".pid.lock"), 0o644)
+            with merchant_daemon._PidFileLock(pid_file) as lock:
+                self.assertEqual(self.file_mode(lock.lock_path), 0o600)
+
     def test_start_agent_creates_0600_log_and_credential_files(self):
         from shopping_cli.core.catalog import create_merchant
         from shopping_cli.db.session import db_session

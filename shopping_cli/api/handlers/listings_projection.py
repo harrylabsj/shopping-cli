@@ -31,10 +31,13 @@ def list_listing_projections(
 ) -> dict[str, Any]:
     """GET /v1/merchant/listings/projections —— 可发布投影（public-only）。
 
-    匿名或 token 不属于 ``merchant_id`` 过滤的商户本人时剥离
-    handoff_destination（审查 P2-B：匿名无过滤可枚举全部商家投影）。
+    必须带 ``merchant_id`` 过滤（审查 P3-01：无过滤的匿名枚举会暴露全部
+    商家的可发布投影）；匿名或 token 不属于该商户本人时剥离
+    handoff_destination（审查 P2-B）。
     """
     merchant_id = str(query.get("merchant_id") or "").strip()
+    if not merchant_id:
+        raise ValidationError("merchant_id is required")
     with db_session(db_path) as conn:
         owner = _owner_merchant_from_payload(conn, payload)
         projections = list_publishable_listings(conn, merchant_id=merchant_id)

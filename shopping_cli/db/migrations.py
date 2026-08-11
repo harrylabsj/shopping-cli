@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 
 @dataclass(frozen=True)
@@ -386,6 +386,62 @@ def migration_022_product_handoff_destination(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "products", "handoff_destination", "text not null default ''")
 
 
+def migration_023_remove_scheme_a_stub_merchants(conn: sqlite3.Connection) -> None:
+    """方案A 窗口期 stub 商家行清理（审查 P3-02）。
+
+    已拆除的方案A ``_ensure_merchant_exists``（5ad9ec8 移除）曾插入
+    ``name == id``、无任何 api_tokens 行的 stub 商家：这些行无法认证，却挡
+    ``POST /merchants`` 同 id 重建（ConflictError）。删除无 token 且名下无
+    业务行的 stub；仍有 products/policies/delivery_rules/conversations 行的
+    跳过并记 audit_events——外键无 ON DELETE CASCADE，不静默丢业务数据。
+    """
+    child_tables = ("products", "policies", "delivery_rules", "conversations")
+    rows = conn.execute(
+        """
+        select id from merchants
+        where name = id
+          and not exists (
+              select 1 from api_tokens where api_tokens.merchant_id = merchants.id
+          )
+        """
+    ).fetchall()
+    now = datetime.now().replace(microsecond=0).isoformat()
+    for row in rows:
+        merchant_id = str(row["id"])
+        dependents = {
+            table: int(
+                conn.execute(
+                    f"select count(*) from {table} where merchant_id = ?", (merchant_id,)
+                ).fetchone()[0]
+            )
+            for table in child_tables
+        }
+        dependents = {table: count for table, count in dependents.items() if count}
+        if dependents:
+            conn.execute(
+                """
+                insert into audit_events(conversation_id, actor, event, details_json, created_at)
+                values ('', 'system', 'stub_merchant_retained', ?, ?)
+                """,
+                (
+                    json.dumps(
+                        {
+                            "event_type": "stub_merchant_retained",
+                            "merchant_id": merchant_id,
+                            "dependents": dependents,
+                            "reason": "scheme_a_stub_with_business_rows",
+                            "source": "migration_023_remove_scheme_a_stub_merchants",
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+            continue
+        conn.execute("delete from merchants where id = ?", (merchant_id,))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -402,6 +458,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(20, "buyer_ledger_buyer_dimension", migration_020_buyer_ledger_buyer_dimension),
     Migration(21, "channel_ingress_stale_marker", migration_021_channel_ingress_stale_marker),
     Migration(22, "product_handoff_destination", migration_022_product_handoff_destination),
+    Migration(23, "remove_scheme_a_stub_merchants", migration_023_remove_scheme_a_stub_merchants),
 )
 
 
