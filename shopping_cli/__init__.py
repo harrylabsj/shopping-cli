@@ -1,3 +1,3 @@
 """Standalone shopping-cli consultation runtime."""
 
-VERSION = "3.0.2"
+VERSION = "3.1.0"
