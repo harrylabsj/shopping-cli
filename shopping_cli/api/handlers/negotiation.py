@@ -6,14 +6,50 @@ fallback ASGI router dispatch here, so no business logic is duplicated.
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api.handlers.common import positive_whole_int, require_field
 from shopping_cli.core import negotiation as protocol
+from shopping_cli.core.errors import RateLimitError
 from shopping_cli.db.session import db_session
 from shopping_cli.services import negotiation as negotiation_service
+
+# 审查 S-M2：merchant/agent/negotiation/human-review 端点此前均无限流——已泄露/
+# 低熵 token 的滥用无节流。对磋商决策提交（写路径，追加磋商消息）加 per-owner
+# 固定窗口限流：进程内（单进程部署前提，与 ERP sync 限流同款）。env 可覆盖
+# （调用时读取，便于测试注入）。
+_NEGOTIATION_DECISION_WINDOW_SECONDS = 60
+_DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE = 600
+_decision_buckets: dict[str, tuple[float, int]] = {}
+_decision_buckets_lock = threading.Lock()
+
+
+def _decision_rate_limit_per_minute() -> int:
+    raw = os.environ.get("SHOPPING_NEGOTIATION_DECISION_RATE_LIMIT_PER_MINUTE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE
+    return value if value > 0 else _DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE
+
+
+def _enforce_decision_rate_limit(owner_id: str) -> None:
+    limit = _decision_rate_limit_per_minute()
+    now = time.monotonic()
+    with _decision_buckets_lock:
+        window_start, count = _decision_buckets.get(owner_id, (0.0, 0))
+        if now - window_start >= _NEGOTIATION_DECISION_WINDOW_SECONDS:
+            window_start, count = now, 0
+        if count >= limit:
+            raise RateLimitError(
+                f"negotiation decision rate limit exceeded ({limit}/minute)"
+            )
+        _decision_buckets[owner_id] = (window_start, count + 1)
 
 
 def _actor(conn: Any, payload: dict[str, Any]) -> negotiation_service.NegotiationActor:
@@ -60,6 +96,8 @@ def get_snapshot(db_path: str | Path, payload: dict[str, Any], query: dict[str, 
 def submit_decision(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
         actor = _actor(conn, payload)
+        # 审查 S-M2：per-owner 固定窗口限流（决策提交=磋商消息追加，滥用最直接）。
+        _enforce_decision_rate_limit(actor.owner_id)
         policy_result = negotiation_service.submit_decision(
             conn,
             actor,

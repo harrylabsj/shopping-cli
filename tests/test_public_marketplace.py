@@ -603,6 +603,57 @@ class PublicMarketplaceTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertFalse(bob_ok["idempotent"])
 
+    def test_buyer_bootstrap_global_rate_limit_cannot_be_bypassed_by_rotating_buyer_id(self):
+        """审查 S-M1：共享 token 下轮换 buyer_id 无法绕过全局硬上限。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+            status, merchant = self.request(
+                app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"}
+            )
+            self.assertEqual(status, 200)
+            status, _product = self.request(
+                app,
+                "POST",
+                "/products",
+                {
+                    "merchant_id": "seller-a",
+                    "sku": "tea-a",
+                    "title": "Longjing Gift Box",
+                    "price": 88,
+                    "stock": 5,
+                    "tags": ["longjing"],
+                    "merchant_token": merchant["merchant_token"],
+                },
+            )
+            self.assertEqual(status, 200)
+            # 单买家预算 10/min，全局倍数=1 → 全局硬上限 10/min。轮换 buyer_id
+            # 让每个买家都不超单买家预算，但全局桶（保留 sentinel）逐请求计数。
+            with patch.dict(
+                os.environ,
+                {
+                    "SHOPPING_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE": "10",
+                    "SHOPPING_BUYER_BOOTSTRAP_GLOBAL_LIMIT_MULTIPLIER": "1",
+                },
+                clear=False,
+            ):
+                for i in range(10):
+                    status, resp = self.request(
+                        app,
+                        "POST",
+                        "/buyer/ask",
+                        {"buyer_id": f"buyer-{i}", "text": "longjing", "idempotency_key": f"g-{i}"},
+                    )
+                    self.assertEqual(status, 200, f"request {i}: {resp}")
+                # 第 11 个不同 buyer_id 仍被全局上限拦截（此前轮换可无限绕过）
+                status, limited = self.request(
+                    app,
+                    "POST",
+                    "/buyer/ask",
+                    {"buyer_id": "buyer-10", "text": "longjing", "idempotency_key": "g-10"},
+                )
+                self.assertEqual(status, 429)
+                self.assertIn("global", limited["error"])
 
     def test_rate_limit_old_windows_are_pruned(self):
         """审查 BUG-11：过期限流窗口行被批量清理（当前窗口计数不受影响）。"""

@@ -46,12 +46,17 @@ def project_product_listing(
     sku: str,
     *,
     merchant_id: str = "",
+    include_private: bool = False,
 ) -> dict[str, Any]:
     """ProductListing projection（v0.4 §4 wire 形状的 public-only 子集）。
 
     Returns canonical publish payload（原 kiwi-catalog POST /v1/listings/publish 输入；
     的输入；owner_agent_id 由发布方（Merchant Kiwi）在 publish 时绑定——
     projection 不持有 agent 身份）。
+
+    审查 S-M3：``handoff_destination``（KTH 成交入口）是商家私有字段，投影层
+    **缺省剥离**（``include_private=False``），仅 owner 显式 opt-in 保留。此前
+    剥离依赖调用方，CLI ``--format json`` 原样输出即泄漏成交入口。
     """
     row = _product_row(conn, sku)
     if merchant_id and row["merchant_id"] != merchant_id:
@@ -75,10 +80,12 @@ def project_product_listing(
             "moq": 1,
             "supports_bulk_quote": True,
         },
-        # 每商品成交入口（KTH destination_ref）：商家自行维护，publish 时同步进
-        # catalog listing 的 handoff_destination_ref。
-        "handoff_destination": str(row.get("handoff_destination") or ""),
     }
+    # 每商品成交入口（KTH destination_ref）：商家自行维护，publish 时同步进
+    # catalog listing 的 handoff_destination_ref。审查 S-M3：私有字段，缺省
+    # 剥离；仅 owner（include_private=True）保留。
+    if include_private:
+        projection["handoff_destination"] = str(row.get("handoff_destination") or "")
     description = str(row.get("description") or "")
     if description:
         projection["summary"] = description
@@ -133,10 +140,12 @@ def list_publishable_listings(
     conn: sqlite3.Connection,
     *,
     merchant_id: str = "",
+    include_private: bool = False,
 ) -> list[dict[str, Any]]:
     """可发布的商品清单（active=1；products.active=0 即 withdraw 信号，DoD #5）。
 
-    Returns projection dicts（不含 withdraw 项）。
+    Returns projection dicts（不含 withdraw 项）。审查 S-M3：私有字段
+    （handoff_destination）缺省剥离，owner 显式 include_private=True 保留。
     """
     rows = conn.execute(
         "select * from products where active = 1 order by sku",
@@ -146,6 +155,8 @@ def list_publishable_listings(
         if merchant_id and row["merchant_id"] != merchant_id:
             continue
         projections.append(
-            project_product_listing(conn, row["sku"], merchant_id=merchant_id)
+            project_product_listing(
+                conn, row["sku"], merchant_id=merchant_id, include_private=include_private
+            )
         )
     return projections
