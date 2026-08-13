@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24
 
 
 @dataclass(frozen=True)
@@ -386,6 +386,70 @@ def migration_022_product_handoff_destination(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "products", "handoff_destination", "text not null default ''")
 
 
+def migration_024_product_source_csv_excel(conn: sqlite3.Connection) -> None:
+    """products.source CHECK 扩展：允许 'csv_excel'（Issue 14 / Adapter SDK 首条路径）。
+
+    v16 的 CHECK 只允许 ('local','erp')；CSV/Excel 适配器新增 source='csv_excel'
+    （UPSTREAM_PROXY，同 ERP 权威语义）。SQLite 不能 ALTER CHECK，故重建表
+    （复制全列 + 数据 + 索引），幂等：schema 已含 csv_excel 时跳过。
+    """
+    row = conn.execute(
+        "select sql from sqlite_master where type='table' and name='products'"
+    ).fetchone()
+    if row is None or "csv_excel" in (row[0] or ""):
+        return
+    conn.execute(
+        """
+        create table products_v24 (
+            sku text primary key,
+            merchant_id text not null,
+            title text not null,
+            description text not null default '',
+            category text not null default '',
+            tags_json text not null default '[]',
+            price real not null,
+            currency text not null default 'CNY',
+            stock integer not null,
+            delivery_attributes_json text not null default '[]',
+            handoff_destination text not null default '',
+            active integer not null default 1,
+            source text not null default 'local'
+                check(source in ('local','erp','csv_excel')),
+            source_revision text not null default '',
+            observed_at text not null default '',
+            fresh_until text not null default '',
+            created_at text not null,
+            updated_at text not null,
+            foreign key (merchant_id) references merchants(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        insert into products_v24(
+            sku, merchant_id, title, description, category, tags_json,
+            price, currency, stock, delivery_attributes_json, handoff_destination,
+            active, source, source_revision, observed_at, fresh_until,
+            created_at, updated_at
+        )
+        select
+            sku, merchant_id, title, description, category, tags_json,
+            price, currency, stock, delivery_attributes_json, handoff_destination,
+            active, source, source_revision, observed_at, fresh_until,
+            created_at, updated_at
+        from products
+        """
+    )
+    conn.execute("drop table products")
+    conn.execute("alter table products_v24 rename to products")
+    conn.execute(
+        "create index if not exists idx_products_active_merchant on products(active, merchant_id)"
+    )
+    conn.execute(
+        "create index if not exists idx_products_active_stock_price on products(active, stock, price, sku)"
+    )
+
+
 def migration_023_remove_scheme_a_stub_merchants(conn: sqlite3.Connection) -> None:
     """方案A 窗口期 stub 商家行清理（审查 P3-02）。
 
@@ -459,6 +523,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(21, "channel_ingress_stale_marker", migration_021_channel_ingress_stale_marker),
     Migration(22, "product_handoff_destination", migration_022_product_handoff_destination),
     Migration(23, "remove_scheme_a_stub_merchants", migration_023_remove_scheme_a_stub_merchants),
+    Migration(24, "product_source_csv_excel", migration_024_product_source_csv_excel),
 )
 
 

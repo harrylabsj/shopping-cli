@@ -42,7 +42,7 @@ SCHEMA = [
         handoff_destination text not null default '',
         active integer not null default 1,
         source text not null default 'local'
-            check(source in ('local','erp')),
+            check(source in ('local','erp','csv_excel')),
         -- v17 — per-field provenance（shopping-cli v0.3 §5）：
         -- source_revision = 权威源版本（ERP 同步批次/etag）；observed_at =
         -- 观察时间；fresh_until = 该事实的 TTL 上限（过期后 projection 标注

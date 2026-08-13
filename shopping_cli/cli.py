@@ -65,6 +65,7 @@ from shopping_cli.cli_conversation_commands import (
 )
 from shopping_cli.cli_erp_commands import cmd_erp_sync
 from shopping_cli.cli_listing_commands import cmd_listing_projections_list
+from shopping_cli.cli_adapter_commands import cmd_adapters_list, cmd_import_csv_excel
 from shopping_cli.config import ConfigError, DEFAULT_DB_PATH, validate_production_config
 from shopping_cli.core.catalog import require_merchant
 from shopping_cli.core.conversations import merchant_conversations
@@ -853,6 +854,23 @@ def build_parser() -> argparse.ArgumentParser:
     erp_sync.add_argument("--timeout", type=int, default=15, help="HTTP timeout seconds (1-60)")
     erp_sync.add_argument("--format", choices=["text", "json"], default="text")
     erp_sync.set_defaults(func=cmd_erp_sync)
+
+    # ── adapters（Issue 14 / §6.3：Adapter SDK 注册表）────────────────────
+    adapters = subparsers.add_parser("adapters", help="Registered data source adapters (Adapter SDK)")
+    adapters_sub = adapters.add_subparsers(dest="adapters_command", required=True)
+    adapters_list = adapters_sub.add_parser("list", help="List registered adapters")
+    adapters_list.add_argument("--format", choices=["text", "json"], default="text")
+    adapters_list.set_defaults(func=cmd_adapters_list)
+
+    # ── import-csv-excel（Issue 14 / §6.3：首条接入路径）─────────────────
+    import_csv = subparsers.add_parser(
+        "import-csv-excel", help="Import product facts from CSV / Excel (.xlsx) into the local store"
+    )
+    import_csv.add_argument("--file", required=True, help="Path to .csv / .tsv / .xlsx file")
+    import_csv.add_argument("--merchant", default="", dest="merchant", help="Owning merchant id (required, FK guard)")
+    import_csv.add_argument("--allowed-merchant", default="", dest="allowed_merchant", help="Tenant boundary: only rows of this merchant are written")
+    import_csv.add_argument("--format", choices=["text", "json"], default="text")
+    import_csv.set_defaults(func=cmd_import_csv_excel)
 
     # ── listings（shopping-cli v0.3 §14：PublicListingProjection 只读预览）───
     listings = subparsers.add_parser("listings", help="Product-first listing projections (read-only preview)")
