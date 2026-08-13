@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import sqlite3
 from datetime import datetime
 from typing import Any
@@ -15,6 +16,11 @@ from shopping_cli.db.session import decode_json, encode_json, now_iso
 
 DEFAULT_BUYER_BOOTSTRAP_RATE_LIMIT_PER_MINUTE = 60
 BUYER_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = 60
+# 审查 S-M1：保留桶（sentinel buyer_id）承载共享 token 的全局硬上限——
+# buyer_id 完全客户端声明，轮换即可绕过单买家限流；全局桶任何请求都计数。
+BUYER_BOOTSTRAP_GLOBAL_BUCKET = "__global__"
+# 全局硬上限 = 单买家上限 × 该倍数（轮换 buyer_id 无法越过的兜底）。
+DEFAULT_BUYER_BOOTSTRAP_GLOBAL_LIMIT_MULTIPLIER = 100
 MAX_IDEMPOTENCY_KEY_LENGTH = 160
 MAX_SQLITE_INTEGER = 2**63 - 1
 
@@ -87,6 +93,41 @@ def rate_limit_window_start(current: datetime) -> str:
     return datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
 
 
+def _buyer_bootstrap_global_limit_multiplier() -> int:
+    """全局硬上限倍数（env 可覆盖，测试注入用；非法/非正回退缺省）。"""
+    raw = os.environ.get("SHOPPING_BUYER_BOOTSTRAP_GLOBAL_LIMIT_MULTIPLIER", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_BUYER_BOOTSTRAP_GLOBAL_LIMIT_MULTIPLIER
+    return value if value > 0 else DEFAULT_BUYER_BOOTSTRAP_GLOBAL_LIMIT_MULTIPLIER
+
+
+def _bump_window(
+    conn: Any,
+    token_hash: str,
+    bucket: str,
+    window_start: str,
+    limit: int,
+    current: datetime,
+    label: str,
+) -> None:
+    """给 (token_hash, bucket, window) 计数 +1；超过 limit 抛 RateLimitError。"""
+    cursor = conn.execute(
+        """
+        insert into buyer_bootstrap_rate_limits(token_hash, buyer_id, window_start, request_count, updated_at)
+        values (?, ?, ?, 1, ?)
+        on conflict(token_hash, buyer_id, window_start) do update set
+            request_count = buyer_bootstrap_rate_limits.request_count + 1,
+            updated_at = excluded.updated_at
+        where buyer_bootstrap_rate_limits.request_count < ?
+        """,
+        (token_hash, bucket, window_start, current.isoformat(), limit),
+    )
+    if cursor.rowcount != 1:
+        raise RateLimitError(f"{label} rate limit exceeded ({limit}/minute)")
+
+
 def enforce_buyer_bootstrap_rate_limit(
     conn: Any,
     bootstrap_token_hash: str,
@@ -124,19 +165,24 @@ def enforce_buyer_bootstrap_rate_limit(
     except sqlite3.OperationalError:
         # 清理失败不影响限流本身（fail-safe 方向；下次再试）
         pass
-    cursor = conn.execute(
-        """
-        insert into buyer_bootstrap_rate_limits(token_hash, buyer_id, window_start, request_count, updated_at)
-        values (?, ?, ?, 1, ?)
-        on conflict(token_hash, buyer_id, window_start) do update set
-            request_count = buyer_bootstrap_rate_limits.request_count + 1,
-            updated_at = excluded.updated_at
-        where buyer_bootstrap_rate_limits.request_count < ?
-        """,
-        (bootstrap_token_hash, buyer_id, rate_limit_window_start(current), current.isoformat(), limit),
+    window_start = rate_limit_window_start(current)
+    # 单买家窗口（买家维度预算隔离）
+    _bump_window(
+        conn, bootstrap_token_hash, buyer_id, window_start, limit, current, "buyer bootstrap"
     )
-    if cursor.rowcount != 1:
-        raise RateLimitError(f"buyer bootstrap rate limit exceeded ({limit}/minute)")
+    # 全局硬上限（审查 S-M1）：同一 token 的全部请求（无论 buyer_id）都计入
+    # 保留桶——buyer_id 完全客户端声明、轮换即可绕过单买家限流，全局桶轮换
+    # 无法绕过。
+    global_limit = limit * _buyer_bootstrap_global_limit_multiplier()
+    _bump_window(
+        conn,
+        bootstrap_token_hash,
+        BUYER_BOOTSTRAP_GLOBAL_BUCKET,
+        window_start,
+        global_limit,
+        current,
+        "buyer bootstrap global",
+    )
 
 
 def idempotency_row(

@@ -74,7 +74,9 @@ def append_conversation_message(db_path: str | Path, conversation_id: str, paylo
 def close_conversation(db_path: str | Path, conversation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
         conversation = conversation_summary(conn, conversation_id)
-        sender = str(payload.get("sender") or "operator")
+        # 审查 S-H1：sender 缺省不得是 "operator"——商家用自己 token 不带
+        # sender 关会话会被误记为 operator。缺省回落到最诚实的 "merchant"。
+        sender = str(payload.get("sender") or "merchant")
         if sender in {"buyer", "buyer_cli"}:
             token_service.require_buyer_conversation_token(conn, conversation, _payload_token(payload))
         elif sender == "merchant":

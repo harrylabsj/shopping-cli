@@ -75,9 +75,15 @@ class ListingProjectionTest(unittest.TestCase):
             stock=5,
             handoff_destination="https://merchant.example/checkout/sku-hd",
         )
-        projection = project_product_listing(self.conn, "SKU-HD", merchant_id=MERCHANT)
+        # 审查 S-M3：handoff_destination 私有字段缺省剥离（此前投影恒携带，
+        # CLI --format json 路径泄漏成交入口）；owner include_private 保留。
+        public = project_product_listing(self.conn, "SKU-HD", merchant_id=MERCHANT)
+        self.assertNotIn("handoff_destination", public)
+        owner = project_product_listing(
+            self.conn, "SKU-HD", merchant_id=MERCHANT, include_private=True
+        )
         self.assertEqual(
-            projection["handoff_destination"], "https://merchant.example/checkout/sku-hd"
+            owner["handoff_destination"], "https://merchant.example/checkout/sku-hd"
         )
 
     def test_projection_is_public_only_doD2(self) -> None:

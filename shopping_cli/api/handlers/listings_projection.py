@@ -40,10 +40,12 @@ def list_listing_projections(
         raise ValidationError("merchant_id is required")
     with db_session(db_path) as conn:
         owner = _owner_merchant_from_payload(conn, payload)
-        projections = list_publishable_listings(conn, merchant_id=merchant_id)
-        if not (owner and owner == merchant_id):
-            for projection in projections:
-                projection.pop("handoff_destination", None)
+        is_owner = bool(owner and owner == merchant_id)
+        # 审查 S-M3：私有剥离收进投影层（include_private）——此前调用方手动
+        # pop，CLI --format json 路径漏剥。
+        projections = list_publishable_listings(
+            conn, merchant_id=merchant_id, include_private=is_owner
+        )
         return {"ok": True, "results": projections, "count": len(projections)}
 
 
@@ -53,12 +55,14 @@ def get_listing_projection(db_path: str | Path, sku: str, payload: dict[str, Any
     if not sku:
         raise ValidationError("sku is required")
     with db_session(db_path) as conn:
+        row = conn.execute("select merchant_id from products where sku = ?", (sku,)).fetchone()
+        owner = _owner_merchant_from_payload(conn, payload)
+        is_owner = bool(
+            owner and row is not None and owner == str(row["merchant_id"] or "")
+        )
         try:
-            projection = project_product_listing(conn, sku)
+            # 审查 S-M3：私有剥离收进投影层（include_private）。
+            projection = project_product_listing(conn, sku, include_private=is_owner)
         except ProjectionError as exc:
             raise NotFoundError(str(exc)) from exc
-        owner = _owner_merchant_from_payload(conn, payload)
-        row = conn.execute("select merchant_id from products where sku = ?", (sku,)).fetchone()
-        if not (owner and row is not None and owner == str(row["merchant_id"] or "")):
-            projection.pop("handoff_destination", None)
         return {"ok": True, "projection": projection}

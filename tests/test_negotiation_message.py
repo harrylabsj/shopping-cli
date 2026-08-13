@@ -16,8 +16,10 @@ that ``submit_decision`` writes exactly what the leaf projects.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -261,6 +263,70 @@ class SubmitDecisionDelegationTest(unittest.TestCase):
             written["structured_payload"],
             message_leaf.decision_structured_payload(agent_id, role, decision, idempotency_key),
         )
+
+    def test_merchant_decision_rate_limit_per_owner(self) -> None:
+        """审查 S-M2：磋商决策提交加 per-owner 固定窗口限流（此前无限流）。"""
+        # 自包含 fresh merchant（限流桶按 owner_id 键，隔离其他测试）。
+        with db_session(self.db_file) as conn:
+            create_merchant(
+                conn,
+                merchant_id="seller-ratelimit",
+                name="Rate Limited Tea",
+                automation_boundaries=FLOOR_BOUNDARIES,
+                delivery_eta_minutes=60,
+            )
+            create_product(
+                conn,
+                merchant_id="seller-ratelimit",
+                sku="cup-rl",
+                title="茶杯",
+                price=88.0,
+                stock=5,
+            )
+            rl_token = token_service.issue_merchant_token(conn, "seller-ratelimit")
+            rl_conversation = ensure_conversation(
+                conn, buyer_id="buyer-rl", merchant_id="seller-ratelimit", sku="cup-rl"
+            )
+            msg = append_message(
+                conn, rl_conversation["id"], "buyer", "ask_price", "便宜点？"
+            )
+        rl_message_id = int(msg["id"])
+        with patch.dict(
+            os.environ, {"SHOPPING_NEGOTIATION_DECISION_RATE_LIMIT_PER_MINUTE": "1"}, clear=False
+        ):
+            status, payload = self.call(
+                "POST",
+                "/negotiation/claims",
+                {
+                    "conversation_id": rl_conversation["id"],
+                    "message_id": rl_message_id,
+                    "idempotency_key": "rl:claim",
+                },
+                token=rl_token,
+            )
+            self.assertEqual(status, 200, payload)
+            status, first = self.call(
+                "POST",
+                "/negotiation/decisions",
+                {
+                    "idempotency_key": "rl:1",
+                    "decision": make_decision(rl_conversation["id"], rl_message_id, action="counter"),
+                },
+                token=rl_token,
+            )
+            self.assertEqual(status, 200, first)
+            # 第 2 个决策提交超出 per-owner 1/min 限流（此前无限流可任意刷）
+            status, limited = self.call(
+                "POST",
+                "/negotiation/decisions",
+                {
+                    "idempotency_key": "rl:2",
+                    "decision": make_decision(rl_conversation["id"], rl_message_id, action="counter"),
+                },
+                token=rl_token,
+            )
+            self.assertEqual(status, 429)
+            self.assertIn("rate limit", limited["error"])
 
     def test_merchant_counter_writes_leaf_projected_message(self) -> None:
         decision = make_decision(self.conversation_id, self.buyer_message_id, action="counter")
