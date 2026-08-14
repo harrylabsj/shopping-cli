@@ -10,6 +10,8 @@ from pathlib import Path
 
 from shopping_cli.data_sources.adapter import AdapterError, SyncContext, run
 from shopping_cli.data_sources.csv_excel_source import (
+    MAX_IMPORT_CELL_CHARS,
+    MAX_IMPORT_FILE_BYTES,
     SOURCE_CSV_EXCEL,
     CsvExcelSyncConfig,
     read_rows,
@@ -102,6 +104,24 @@ class CsvImportTest(unittest.TestCase):
         path = _write(self.tmp, "p.csv", CSV_GOOD)
         with self.assertRaises(AdapterError):
             sync_csv_excel(self.conn, CsvExcelSyncConfig(path=path, default_merchant_id="nope"), now=lambda: NOW)
+
+    def test_file_size_limit_is_enforced_before_parse(self) -> None:
+        path = Path(self.tmp) / "oversized.csv"
+        path.write_bytes(b"x" * (MAX_IMPORT_FILE_BYTES + 1))
+        with self.assertRaisesRegex(AdapterError, "exceeds"):
+            read_rows(str(path))
+
+    def test_csv_cell_limit_is_fail_closed(self) -> None:
+        path = _write(
+            self.tmp,
+            "large-cell.csv",
+            f"sku,title,price,stock\nSKU-001,{'x' * (MAX_IMPORT_CELL_CHARS + 1)},1,1\n",
+        )
+        # 超长 cell 由 csv.field_size_limit(MAX_IMPORT_CELL_CHARS) 在读取时拒绝
+        # （csv.Error → AdapterError，"field larger than field limit"）；per-cell
+        # "characters" 检查是冗余防线。断言 fail-closed（AdapterError）即可。
+        with self.assertRaises(AdapterError):
+            read_rows(path)
 
 
 class XlsxImportTest(unittest.TestCase):
