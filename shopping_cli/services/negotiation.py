@@ -92,10 +92,14 @@ class NegotiationActor:
     owner_id: str  # buyer_id or merchant_id bound to the token
     agent_id: str  # claim identity used in agent_message_processes
     conversation_id: str = ""  # buyer tokens are bound to one conversation
+    token_hash: str = ""  # 审查 S-M2 补强：token 摘要（服务端派生）——决策限流按
+    # 凭证（token）键控而非客户端声明的 owner_id，buyer 轮换 buyer_id 无法用
+    # 同一 token 重置限流桶。
 
 
 def require_negotiation_actor(conn: sqlite3.Connection, token: Any) -> NegotiationActor:
     row = token_service.require_api_token(conn, token, "negotiation token required")
+    token_hash = str(row["token_hash"] or "")
     role = str(row["role"] or "")
     if role == "buyer":
         buyer_id = str(row["buyer_id"] or "")
@@ -107,6 +111,7 @@ def require_negotiation_actor(conn: sqlite3.Connection, token: Any) -> Negotiati
             owner_id=buyer_id,
             agent_id=protocol.buyer_agent_identity(buyer_id),
             conversation_id=conversation_id,
+            token_hash=token_hash,
         )
     if role == "merchant":
         merchant_id = str(row["merchant_id"] or "")
@@ -116,13 +121,14 @@ def require_negotiation_actor(conn: sqlite3.Connection, token: Any) -> Negotiati
             role="merchant",
             owner_id=merchant_id,
             agent_id=token_service.default_merchant_agent_id(merchant_id),
+            token_hash=token_hash,
         )
     if role == "agent":
         merchant_id = str(row["merchant_id"] or "")
         agent_id = str(row["agent_id"] or "")
         if not merchant_id or agent_id != token_service.default_merchant_agent_id(merchant_id):
             raise AuthError("agent token cannot act as a negotiation merchant agent")
-        return NegotiationActor(role="merchant", owner_id=merchant_id, agent_id=agent_id)
+        return NegotiationActor(role="merchant", owner_id=merchant_id, agent_id=agent_id, token_hash=token_hash)
     raise AuthError("token role cannot negotiate")
 
 
@@ -504,7 +510,10 @@ def _merchant_gate(
     proposal = decision.get("proposal")
     if decision["action"] in {"propose", "counter"} and proposal is None:
         return _reject("missing_proposal", "propose/counter 必须携带结构化 proposal。")
-    product = product_summary(conn, str(conversation["sku"]))
+    # 审查 M7：此前直接 product_summary(sku) 取地板价，未校验商品归属本会话商家——
+    # SKU 复用/重建时会对错误商家的 automation_boundaries 做 floor/折扣判断。
+    # 换用 _load_conversation_product（带归属校验，fail-closed）。
+    product = _load_conversation_product(conn, conversation)
     floor_str = merchant_agent._authorized_bargain_amount(product)
     # 泄漏守卫对每个 merchant 决策运行——ask/decline 等无 proposal 的决策
     # 也可能携带泄露底价的 public_message（此前该分支直接放行）。
@@ -697,6 +706,38 @@ def submit_decision(
     sender = _decision_sender(actor.role)
     status = _decision_status(actor.role, decision["action"])
     structured_payload = _decision_structured_payload(actor.agent_id, actor.role, decision, idempotency_key)
+    # 幂等 claim：DB 唯一约束兜底并发（审查 H2）。两个并发相同 key 的请求只
+    # 有一个能插入成功；另一个在此拿到 IntegrityError，此时对方已提交，回查
+    # messages 走重放/冲突。与顶部 _find_decision_replay（服务"丢响应后回合已
+    # 推进再重试"的串行幂等）互补，共同覆盖并发 + 串行两条重试路径。
+    try:
+        conn.execute(
+            """
+            insert into negotiation_decision_idempotency(
+                conversation_id, agent_id, idempotency_key, created_at
+            )
+            values (?, ?, ?, ?)
+            """,
+            (conversation_id, actor.agent_id, idempotency_key, now_iso()),
+        )
+    except sqlite3.IntegrityError:
+        replay = _find_decision_replay(conn, actor, conversation_id, idempotency_key)
+        if replay is not None:
+            if protocol.canonical_json(replay["decision"]) != protocol.canonical_json(decision):
+                raise IdempotencyConflict(
+                    f"idempotency key {idempotency_key} was already used with a different decision"
+                )
+            refreshed = require_conversation(conn, conversation_id)
+            return _policy_result(
+                conversation_id,
+                "accepted",
+                protocol.snapshot_next_actor(str(refreshed["next_actor"] or "")),
+                list(decision["reason_codes"]),
+                "决策已接受并写入会话（幂等重放，未重复写入）。",
+                0,
+                message_id=int(replay["message_id"]),
+            )
+        raise IdempotencyConflict(f"idempotency key {idempotency_key} was already used")
     message = append_message(
         conn,
         conversation_id,
@@ -705,6 +746,20 @@ def submit_decision(
         text=public_message,
         structured_payload=structured_payload,
         status=status,
+    )
+    conn.execute(
+        """
+        update negotiation_decision_idempotency
+        set message_id = ?, decision_json = ?
+        where conversation_id = ? and agent_id = ? and idempotency_key = ?
+        """,
+        (
+            int(message["id"]),
+            protocol.canonical_json(decision),
+            conversation_id,
+            actor.agent_id,
+            idempotency_key,
+        ),
     )
     if status == "closed":
         append_conversation_closed_audit(conn, conversation_id, sender, "")

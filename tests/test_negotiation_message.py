@@ -265,8 +265,8 @@ class SubmitDecisionDelegationTest(unittest.TestCase):
         )
 
     def test_merchant_decision_rate_limit_per_owner(self) -> None:
-        """审查 S-M2：磋商决策提交加 per-owner 固定窗口限流（此前无限流）。"""
-        # 自包含 fresh merchant（限流桶按 owner_id 键，隔离其他测试）。
+        """审查 S-M2：磋商决策提交加固定窗口限流（此前无限流）。"""
+        # 自包含 fresh merchant（限流桶按 token 键，隔离其他测试）。
         with db_session(self.db_file) as conn:
             create_merchant(
                 conn,
@@ -315,7 +315,7 @@ class SubmitDecisionDelegationTest(unittest.TestCase):
                 token=rl_token,
             )
             self.assertEqual(status, 200, first)
-            # 第 2 个决策提交超出 per-owner 1/min 限流（此前无限流可任意刷）
+            # 第 2 个决策提交超出 1/min 限流（此前无限流可任意刷）
             status, limited = self.call(
                 "POST",
                 "/negotiation/decisions",
@@ -325,6 +325,29 @@ class SubmitDecisionDelegationTest(unittest.TestCase):
                 },
                 token=rl_token,
             )
+            self.assertEqual(status, 429)
+            self.assertIn("rate limit", limited["error"])
+
+    def test_buyer_decision_rate_limit_keyed_by_token(self) -> None:
+        """审查 S-M2 补强：buyer 决策限流按凭证（token_hash）键控——限流桶键
+        不再依赖客户端声明的 buyer_id。同一 buyer_token 连续提交超出限流 → 429。"""
+        merchant_decision = make_decision(self.conversation_id, self.buyer_message_id, action="counter")
+        status, payload = self.claim(self.merchant_token, self.buyer_message_id, "rl:merchant:1")
+        self.assertEqual(status, 200, payload)
+        status, payload = self.submit(self.merchant_token, merchant_decision, "rl:merchant:1")
+        self.assertEqual(status, 200, payload)
+        merchant_message_id = int(payload["policy_result"]["message_id"])
+
+        buyer_decision = make_decision(self.conversation_id, merchant_message_id, action="counter", unit_price=88.0)
+        with patch.dict(
+            os.environ, {"SHOPPING_NEGOTIATION_DECISION_RATE_LIMIT_PER_MINUTE": "1"}, clear=False
+        ):
+            status, payload = self.claim(self.buyer_token, merchant_message_id, "rl:buyer:1")
+            self.assertEqual(status, 200, payload)
+            status, first = self.submit(self.buyer_token, buyer_decision, "rl:buyer:1")
+            self.assertEqual(status, 200, first)
+            # 同 token 第 2 个决策提交超出 1/min（per-token 键：同凭证共享一个桶）。
+            status, limited = self.submit(self.buyer_token, buyer_decision, "rl:buyer:2")
             self.assertEqual(status, 429)
             self.assertIn("rate limit", limited["error"])
 

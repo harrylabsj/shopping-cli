@@ -20,9 +20,13 @@ from shopping_cli.db.session import db_session
 from shopping_cli.services import negotiation as negotiation_service
 
 # 审查 S-M2：merchant/agent/negotiation/human-review 端点此前均无限流——已泄露/
-# 低熵 token 的滥用无节流。对磋商决策提交（写路径，追加磋商消息）加 per-owner
-# 固定窗口限流：进程内（单进程部署前提，与 ERP sync 限流同款）。env 可覆盖
-# （调用时读取，便于测试注入）。
+# 低熵 token 的滥用无节流。对磋商决策提交（写路径，追加磋商消息）加固定窗口
+# 限流：进程内（单进程部署前提，与 ERP sync 限流同款）。env 可覆盖（调用时
+# 读取，便于测试注入）。
+# 审查 S-M2 补强：限流键从 per-owner（buyer 的 owner_id 客户端声明，轮换
+# buyer_id 即绕过）改为 per-token（token_hash，服务端派生）——同凭证无论声明
+# 什么 buyer_id 都共享一个桶；轮换新 token 受 S-M1 bootstrap 全局桶（铸造速率）
+# 封顶。merchant/agent 单 token 部署下语义不变。
 _NEGOTIATION_DECISION_WINDOW_SECONDS = 60
 _DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE = 600
 _decision_buckets: dict[str, tuple[float, int]] = {}
@@ -38,18 +42,18 @@ def _decision_rate_limit_per_minute() -> int:
     return value if value > 0 else _DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE
 
 
-def _enforce_decision_rate_limit(owner_id: str) -> None:
+def _enforce_decision_rate_limit(credential_key: str) -> None:
     limit = _decision_rate_limit_per_minute()
     now = time.monotonic()
     with _decision_buckets_lock:
-        window_start, count = _decision_buckets.get(owner_id, (0.0, 0))
+        window_start, count = _decision_buckets.get(credential_key, (0.0, 0))
         if now - window_start >= _NEGOTIATION_DECISION_WINDOW_SECONDS:
             window_start, count = now, 0
         if count >= limit:
             raise RateLimitError(
                 f"negotiation decision rate limit exceeded ({limit}/minute)"
             )
-        _decision_buckets[owner_id] = (window_start, count + 1)
+        _decision_buckets[credential_key] = (window_start, count + 1)
 
 
 def _actor(conn: Any, payload: dict[str, Any]) -> negotiation_service.NegotiationActor:
@@ -96,8 +100,9 @@ def get_snapshot(db_path: str | Path, payload: dict[str, Any], query: dict[str, 
 def submit_decision(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
         actor = _actor(conn, payload)
-        # 审查 S-M2：per-owner 固定窗口限流（决策提交=磋商消息追加，滥用最直接）。
-        _enforce_decision_rate_limit(actor.owner_id)
+        # 审查 S-M2：固定窗口限流（决策提交=磋商消息追加，滥用最直接）。键用
+        # 服务端派生的 token_hash（per-token），空值兜底 owner_id。
+        _enforce_decision_rate_limit(actor.token_hash or actor.owner_id)
         policy_result = negotiation_service.submit_decision(
             conn,
             actor,
