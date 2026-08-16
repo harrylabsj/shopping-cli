@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25
 
 
 @dataclass(frozen=True)
@@ -506,6 +506,29 @@ def migration_023_remove_scheme_a_stub_merchants(conn: sqlite3.Connection) -> No
         conn.execute("delete from merchants where id = ?", (merchant_id,))
 
 
+def migration_025_negotiation_decision_idempotency(conn: sqlite3.Connection) -> None:
+    """协商决策幂等账本（审查 H2 2026-08-16）。
+
+    ``submit_decision`` 此前靠"先扫描 messages 再 append"判断幂等，并发相同
+    idempotency_key 的两个请求都能通过预读并各自写入决策消息（违反冻结协议
+    "同 key 重放绝不重复"）。新增 (conversation_id, agent_id, idempotency_key)
+    唯一表，claim 时由唯一约束兜底并发——与 buyer_request_idempotency 同模式。
+    """
+    conn.execute(
+        """
+        create table if not exists negotiation_decision_idempotency (
+            conversation_id text not null,
+            agent_id text not null,
+            idempotency_key text not null,
+            message_id integer not null default 0,
+            decision_json text not null default '{}',
+            created_at text not null,
+            primary key (conversation_id, agent_id, idempotency_key)
+        )
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -524,6 +547,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(22, "product_handoff_destination", migration_022_product_handoff_destination),
     Migration(23, "remove_scheme_a_stub_merchants", migration_023_remove_scheme_a_stub_merchants),
     Migration(24, "product_source_csv_excel", migration_024_product_source_csv_excel),
+    Migration(25, "negotiation_decision_idempotency", migration_025_negotiation_decision_idempotency),
 )
 
 

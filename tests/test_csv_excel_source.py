@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import tempfile
 import unittest
 import zipfile
@@ -169,6 +168,101 @@ class XlsxImportTest(unittest.TestCase):
         rows = read_rows(path)
         self.assertEqual(rows[0]["sku"], "SKU-X1")
         self.assertEqual(rows[0]["title"], "Mug")
+
+    def _make_xlsx_sheet(self, sheet_xml: str, shared_xml: str | None = None) -> str:
+        """按给定 sheet1/sharedStrings XML 构造 .xlsx（审查 S-M5 用例用）。"""
+        p = Path(self.tmp) / "s.xlsx"
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            )
+            z.writestr(
+                "xl/workbook.xml",
+                f'<workbook xmlns="{ns}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></sheets></workbook>',
+            )
+            if shared_xml is not None:
+                z.writestr("xl/sharedStrings.xml", shared_xml)
+            z.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        return str(p)
+
+    def test_xlsx_empty_cell_does_not_shift_columns(self) -> None:
+        # 审查 S-M5：中间可选列（category）为空单元格（真实 Excel 会省略或只带
+        # 样式）——按文档顺序对齐会把 price 左移到 category 位、stock 左移到
+        # price 位，静默写坏数据（本用例 6 列下旧代码会静默写入 price=8/stock=10）。
+        # 修复后按 r 属性定位，空列补 ""，值落在正确列。
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        sheet = (
+            f'<worksheet xmlns="{ns}"><sheetData>'
+            f'<row r="1"><c r="A1" t="inlineStr"><is><t>sku</t></is></c><c r="B1" t="inlineStr"><is><t>title</t></is></c><c r="C1" t="inlineStr"><is><t>category</t></is></c><c r="D1" t="inlineStr"><is><t>price</t></is></c><c r="E1" t="inlineStr"><is><t>stock</t></is></c><c r="F1" t="inlineStr"><is><t>note</t></is></c></row>'
+            f'<row r="2"><c r="A2" t="inlineStr"><is><t>SKU-E1</t></is></c><c r="B2" t="inlineStr"><is><t>Mug</t></is></c><c r="C2"/><c r="D2"><v>55</v></c><c r="E2"><v>8</v></c><c r="F2" t="inlineStr"><is><t>10</t></is></c></row>'
+            f"</sheetData></worksheet>"
+        )
+        path = self._make_xlsx_sheet(sheet)
+        rows = read_rows(path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sku"], "SKU-E1")
+        self.assertEqual(rows[0]["title"], "Mug")
+        self.assertEqual(rows[0]["category"], "")
+        self.assertEqual(rows[0]["price"], "55")
+        self.assertEqual(rows[0]["stock"], "8")
+        self.assertEqual(rows[0]["note"], "10")
+        # 端到端：price/stock 必须落在正确列（旧代码此场景静默写 8/10）。
+        report = sync_csv_excel(
+            self.conn, CsvExcelSyncConfig(path=path, default_merchant_id="merchant-1"), now=lambda: NOW
+        )
+        self.assertEqual(report.upserted, 1)
+        row = self.conn.execute("select title, category, price, stock from products where sku='SKU-E1'").fetchone()
+        self.assertEqual(row[0], "Mug")
+        self.assertEqual(row[1], "")
+        self.assertEqual(row[2], 55.0)
+        self.assertEqual(row[3], 8)
+
+    def test_xlsx_sparse_cells_align_by_r_attribute(self) -> None:
+        # 稀疏单元格（A/C 有值、B 省略 + 末尾多列）：r 属性定位必须与表头对齐。
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        sheet = (
+            f'<worksheet xmlns="{ns}"><sheetData>'
+            f'<row r="1"><c r="A1" t="inlineStr"><is><t>sku</t></is></c><c r="B1" t="inlineStr"><is><t>title</t></is></c><c r="C1" t="inlineStr"><is><t>price</t></is></c><c r="D1" t="inlineStr"><is><t>stock</t></is></c><c r="E1" t="inlineStr"><is><t>note</t></is></c></row>'
+            f'<row r="2"><c r="A2" t="inlineStr"><is><t>SKU-E2</t></is></c><c r="C2"><v>9</v></c></row>'
+            f"</sheetData></worksheet>"
+        )
+        path = self._make_xlsx_sheet(sheet)
+        rows = read_rows(path)
+        self.assertEqual(rows[0]["sku"], "SKU-E2")
+        self.assertEqual(rows[0]["title"], "")
+        self.assertEqual(rows[0]["price"], "9")
+        self.assertEqual(rows[0]["stock"], "")
+        self.assertEqual(rows[0]["note"], "")
+
+    def test_xlsx_shared_string_bad_index_fails_closed(self) -> None:
+        # 审查 L-1：非整数共享字符串索引不再抛裸 ValueError（→ AdapterError）。
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        sheet = (
+            f'<worksheet xmlns="{ns}"><sheetData>'
+            f'<row r="1"><c r="A1" t="inlineStr"><is><t>sku</t></is></c><c r="B1" t="inlineStr"><is><t>title</t></is></c></row>'
+            f'<row r="2"><c r="A2" t="s"><v>abc</v></c></row>'
+            f"</sheetData></worksheet>"
+        )
+        shared = f'<sst xmlns="{ns}"><si><t>SKU-BAD</t></si></sst>'
+        path = self._make_xlsx_sheet(sheet, shared)
+        with self.assertRaisesRegex(AdapterError, "shared string index"):
+            read_rows(path)
+
+    def test_xlsx_shared_string_out_of_range_fails_closed(self) -> None:
+        # 越界共享字符串索引不再静默给 ""（fail-closed）。
+        ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        sheet = (
+            f'<worksheet xmlns="{ns}"><sheetData>'
+            f'<row r="1"><c r="A1" t="inlineStr"><is><t>sku</t></is></c><c r="B1" t="inlineStr"><is><t>title</t></is></c></row>'
+            f'<row r="2"><c r="A2" t="s"><v>99</v></c></row>'
+            f"</sheetData></worksheet>"
+        )
+        shared = f'<sst xmlns="{ns}"><si><t>SKU-OK</t></si></sst>'
+        path = self._make_xlsx_sheet(sheet, shared)
+        with self.assertRaisesRegex(AdapterError, "out of range"):
+            read_rows(path)
 
 
 class AdapterSdkTest(unittest.TestCase):

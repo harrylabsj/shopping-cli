@@ -168,7 +168,7 @@ def _begin_channel_ingress(
             return _existing_ingress_response(conn, row, buyer_id, channel)
         # stale_at 非空 → 落 INSERT ON CONFLICT 覆盖旧行（重处理幂等）
     try:
-        conn.execute(
+        cursor = conn.execute(
             """
             insert into channel_message_ingresses(
                 channel, external_user_id, external_message_id, status,
@@ -181,10 +181,24 @@ def _begin_channel_ingress(
                 message_id = excluded.message_id,
                 stale_at = excluded.stale_at,
                 updated_at = excluded.updated_at
+            where channel_message_ingresses.stale_at != ''
             """,
             (channel, external_user_id, external_message_id, PROCESSING_STATUS, now, now),
         )
     except sqlite3.IntegrityError:
+        row = conn.execute(
+            """
+            select * from channel_message_ingresses
+            where channel = ? and external_user_id = ? and external_message_id = ?
+            """,
+            (channel, external_user_id, external_message_id),
+        ).fetchone()
+        if row is not None:
+            return _existing_ingress_response(conn, row, buyer_id, channel)
+        raise
+    if cursor.rowcount == 0:
+        # 并发重复：另一请求已先落 fresh processing 行（stale_at 为空），DO UPDATE
+        # 被 WHERE 跳过、rowcount=0 → 我们未抢到写权，回查走冲突/幂等分支。
         row = conn.execute(
             """
             select * from channel_message_ingresses

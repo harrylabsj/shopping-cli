@@ -112,7 +112,7 @@ def require_api_token(conn: Any, token: Any, missing_error: str = "authorization
     digest = token_digest(raw_token)
     row = conn.execute(
         """
-        select role, merchant_id, buyer_id, agent_id, conversation_id, revoked_at, expires_at
+        select role, merchant_id, buyer_id, agent_id, conversation_id, revoked_at, expires_at, token_hash
         from api_tokens
         where token_hash = ?
         """,

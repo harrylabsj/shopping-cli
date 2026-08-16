@@ -23,7 +23,7 @@ import math
 import sqlite3
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -132,6 +132,26 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _xlsx_cell_column(ref: str | None, row_index: int, cell_pos: int) -> int:
+    """解析单元格 ``r`` 属性（如 ``C2``）→ 0 基列号。
+
+    Excel 常省略空单元格（留白/样式单元格/合并后空列），按文档顺序对齐会让
+    后续有值单元格左移、静默写坏 price/stock（审查 S-M5）。因此以 ``r`` 属性
+    的列字母定位（A=0 … ZZ=701），缺列由调用方补 ``""``。无 ``r`` 属性
+    （少见）回退文档顺序位置。
+    """
+    if ref:
+        letters = "".join(ch for ch in ref if ch.isalpha()).upper()
+        if letters:
+            col = 0
+            for ch in letters:
+                col = col * 26 + (ord(ch) - ord("A") + 1)
+            if col >= 1:
+                return col - 1
+    # 无 r / 纯数字引用：回退文档顺序位置（保持既有行为）。
+    return cell_pos - 1
+
+
 def _xlsx_read_sheet(zf: zipfile.ZipFile, sheet_path: str, shared: list[str]) -> list[list[str]]:
     root = ET.fromstring(zf.read(sheet_path))
     ns = _XLSX_NS
@@ -140,30 +160,39 @@ def _xlsx_read_sheet(zf: zipfile.ZipFile, sheet_path: str, shared: list[str]) ->
         if row_index > MAX_IMPORT_ROWS:
             raise AdapterError(f"xlsx exceeds {MAX_IMPORT_ROWS} data rows")
         cells: list[str] = []
-        for cell_index, cell in enumerate(row, start=1):
-            if cell_index > MAX_IMPORT_COLUMNS:
+        for cell_pos, cell in enumerate(row, start=1):
+            if cell_pos > MAX_IMPORT_COLUMNS:
                 raise AdapterError(f"xlsx row {row_index} has more than {MAX_IMPORT_COLUMNS} columns")
+            col = _xlsx_cell_column(cell.get("r"), row_index, cell_pos)
+            if col >= MAX_IMPORT_COLUMNS:
+                raise AdapterError(f"xlsx row {row_index} column {col + 1} exceeds {MAX_IMPORT_COLUMNS} columns")
+            # 按 r 属性定位列，跳过的空列补 ""（S-M5：空单元格不得左移错位）。
+            if col >= len(cells):
+                cells.extend("" for _ in range(col + 1 - len(cells)))
             t = cell.get("t", "n")
             v = cell.find(f"{{{ns}}}v")
+            value = ""
             if t == "s" and v is not None:
-                idx = int(v.text or "0")
-                value = shared[idx] if idx < len(shared) else ""
-                if len(value) > MAX_IMPORT_CELL_CHARS:
-                    raise AdapterError(f"xlsx row {row_index} contains a cell over {MAX_IMPORT_CELL_CHARS} characters")
-                cells.append(value)
+                try:
+                    idx = int(v.text or "0")
+                except ValueError as exc:
+                    raise AdapterError(
+                        f"xlsx row {row_index} has invalid shared string index {v.text!r}"
+                    ) from exc
+                if idx < 0 or idx >= len(shared):
+                    raise AdapterError(
+                        f"xlsx row {row_index} shared string index {idx} out of range"
+                    )
+                value = shared[idx]
             elif t == "inlineStr":
                 is_el = cell.find(f"{{{ns}}}is")
-                text = ""
                 if is_el is not None:
-                    text = "".join(tt.text or "" for tt in is_el.iter(f"{{{ns}}}t"))
-                if len(text) > MAX_IMPORT_CELL_CHARS:
-                    raise AdapterError(f"xlsx row {row_index} contains a cell over {MAX_IMPORT_CELL_CHARS} characters")
-                cells.append(text)
+                    value = "".join(tt.text or "" for tt in is_el.iter(f"{{{ns}}}t"))
             elif v is not None:
                 value = str(v.text or "")
-                if len(value) > MAX_IMPORT_CELL_CHARS:
-                    raise AdapterError(f"xlsx row {row_index} contains a cell over {MAX_IMPORT_CELL_CHARS} characters")
-                cells.append(value)
+            if len(value) > MAX_IMPORT_CELL_CHARS:
+                raise AdapterError(f"xlsx row {row_index} contains a cell over {MAX_IMPORT_CELL_CHARS} characters")
+            cells[col] = value
         rows.append(cells)
     return rows
 
@@ -213,6 +242,21 @@ def _read_xlsx_rows(path: Path) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
+_FORMULA_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_formula(value: str) -> str:
+    """防 CSV/Excel 公式注入：以 = + - @ \\t \\r 开头的文本前缀单引号。
+
+    审查 L1：导入的文本字段若被下游重新导出为 CSV/Excel 并打开，公式前缀会被
+    执行（=cmd|... / @SUM(...) 等）。前缀 ' 让 Excel 把单元格视为文本，不破坏
+    合法数据（如 "-5% off"）。
+    """
+    if value.startswith(_FORMULA_INJECTION_PREFIXES):
+        return "'" + value
+    return value
+
+
 def _parse_product(raw: dict[str, str], index: int) -> dict[str, Any]:
     """CSV/Excel 行 → 本地 products 行（sku/title/price/stock 校验，fail-closed）。"""
     sku = (raw.get("sku") or "").strip()
@@ -243,12 +287,12 @@ def _parse_product(raw: dict[str, str], index: int) -> dict[str, Any]:
         raise AdapterError(f"row {index}: invalid stock {stock_raw!r}")
     return {
         "sku": sku,
-        "title": title,
+        "title": _neutralize_formula(title),
         "price": price,
         "stock": stock,
         "currency": (raw.get("currency") or "").strip() or "CNY",
-        "category": (raw.get("category") or "").strip(),
-        "description": (raw.get("description") or "").strip(),
+        "category": _neutralize_formula((raw.get("category") or "").strip()),
+        "description": _neutralize_formula((raw.get("description") or "").strip()),
         "merchant_id": (raw.get("merchant_id") or "").strip(),
     }
 

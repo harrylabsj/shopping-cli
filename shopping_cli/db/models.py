@@ -233,6 +233,17 @@ SCHEMA = [
         primary key (admin_token_hash, idempotency_key)
     )
     """,
+    """
+    create table if not exists negotiation_decision_idempotency (
+        conversation_id text not null,
+        agent_id text not null,
+        idempotency_key text not null,
+        message_id integer not null default 0,
+        decision_json text not null default '{}',
+        created_at text not null,
+        primary key (conversation_id, agent_id, idempotency_key)
+    )
+    """,
 
 ]
 
