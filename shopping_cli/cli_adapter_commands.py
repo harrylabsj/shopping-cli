@@ -11,7 +11,6 @@ import argparse
 from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.data_sources import csv_excel_source  # noqa: F401  # 导入即注册适配器
 from shopping_cli.data_sources.adapter import (
-    AdapterError,
     SyncContext,
     registered_adapters,
     run,
