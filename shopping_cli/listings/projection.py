@@ -1,12 +1,10 @@
 """PublicListingProjection（shopping-cli v0.3 §14/§16；DoD #1-#3）。
 
 public-only 白名单投影：把 products 行压缩为可公开的 discovery projection。
-**绝不输出** cost / floor price / 私密库存 / credentials / 客户特定条款
-（v0.3 §16 不得输出清单；DoD #2 有回归测试锁定）。
-
-availability_hint / price_range_hint 必须携带 provenance 并注明只是
-discovery hint（v0.3 §14）——权威值以本地 products 行为准（v3.0 起
-发布面已随 kiwi-catalog 子系统迁移至独立服务）。
+**绝不输出** cost / floor price / 私密库存 / credentials / 客户特定条款 / 价格 /
+促销 / 底价（v0.3 §16 不得输出清单；DoD #2 有回归测试锁定）。商品 listing 只携带
+名称 + 分类/标签/区域等发现元数据，价格与供应事实以本地 products 行为准
+（v3.0 起发布面已随 kiwi-catalog 子系统迁移至独立服务）。
 """
 
 from __future__ import annotations
@@ -25,11 +23,6 @@ class ProjectionError(Exception):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _hint_price_range(price: float, currency: str) -> str:
-    """price_range_hint：粗粒度公开价格提示（不是报价）。"""
-    return f"{currency} {price:.0f}"
 
 
 def _product_row(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
@@ -74,12 +67,6 @@ def project_product_listing(
         "category": str(row.get("category") or ""),
         "regions": [],
         "tags": json.loads(row.get("tags_json") or "[]"),
-        "commercial_hints": {
-            "price_range_hint": _hint_price_range(float(row["price"]), str(row.get("currency") or "CNY")),
-            "availability_hint": "in_stock" if int(row.get("stock", 0)) > 0 else "out_of_stock",
-            "moq": 1,
-            "supports_bulk_quote": True,
-        },
     }
     # 每商品成交入口（KTH destination_ref）：商家自行维护，publish 时同步进
     # catalog listing 的 handoff_destination_ref。审查 S-M3：私有字段，缺省
@@ -90,14 +77,14 @@ def project_product_listing(
     if description:
         projection["summary"] = description
 
-    # provenance 标注：availability/price 是 discovery hint，不是权威事实（v0.3 §14）。
-    # 只存在于 projection（Merchant Kiwi 可见）（wire commercial_hints 七键白名单，v0.4 §4.1）。
+    # provenance 标注：只存在于 projection（Merchant Kiwi 可见），发布前由
+    # strip_provenance 剥离；商品不再携带价格/库存 hint（名称-only，v0.3 §16）。
     projection["_provenance"] = {
         "authority": authority,
         "source_revision": projection["source_revision"],
         "observed_at": str(row.get("observed_at") or now),
         "fresh_until": str(row.get("fresh_until") or ""),
-        "note": "discovery hint only; authoritative value in the local product record",
+        "note": "name-only discovery projection; authoritative facts in the local product record",
     }
     return projection
 

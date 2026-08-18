@@ -5,8 +5,8 @@
 - DoD #1/#3：projection 带 source_product_ref/source_revision/freshness；
 - active=0 排除（withdraw 信号，DoD #5 前段）；
 - capability projection 不虚构 SKU；
-- availability/price hint 带 provenance 并注明 discovery hint（v0.3 §14）；
-- strip_provenance 发布前剥离（wire commercial_hints 七键白名单）。
+- 商品 projection 为名称-only，不含价格/库存 hint（v0.3 §16）；
+- strip_provenance 发布前剥离 _provenance（wire 只留名称 + 分类/标签）。
 """
 
 from __future__ import annotations
@@ -102,10 +102,9 @@ class ListingProjectionTest(unittest.TestCase):
         provenance = projection["_provenance"]
         self.assertEqual(provenance["authority"], "UPSTREAM_PROXY")
         self.assertIn("fresh_until", provenance)
-        # hint 携带 provenance 并注明 discovery hint（v0.3 §14）
-        self.assertIn("discovery hint only", provenance["note"])
-        self.assertIn("availability_hint", projection["commercial_hints"])
-        self.assertIn("price_range_hint", projection["commercial_hints"])
+        # 商品投影为名称-only，不携带价格/库存 hint（v0.3 §16）
+        self.assertIn("name-only discovery projection", provenance["note"])
+        self.assertNotIn("commercial_hints", projection)
 
     def test_active_zero_excluded_from_publishable(self) -> None:
         _seed_product(self.conn, "SKU-001", active=1)
@@ -132,11 +131,11 @@ class ListingProjectionTest(unittest.TestCase):
         projection = project_product_listing(self.conn, "SKU-001", merchant_id=MERCHANT)
         wire = strip_provenance(projection)
         self.assertNotIn("_provenance", wire)
-        # wire 只含 kiwi-catalog 七键白名单（v0.4 §4.1）
-        self.assertEqual(
-            set(wire["commercial_hints"].keys()),
-            {"price_range_hint", "availability_hint", "moq", "supports_bulk_quote"},
-        )
+        # 商品 wire 为名称-only，不含 commercial_hints（价格/库存不上网络）
+        self.assertNotIn("commercial_hints", wire)
+        self.assertIn("title", wire)
+        self.assertIn("category", wire)
+        self.assertIn("tags", wire)
 
     def test_projection_unknown_sku_fails_closed(self) -> None:
         from shopping_cli.listings.projection import ProjectionError
