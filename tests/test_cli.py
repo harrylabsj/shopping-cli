@@ -3367,6 +3367,21 @@ class ShoppingCliTest(unittest.TestCase):
                 row = conn.execute("select merchant_id, title from products where sku = 'SKU-002'").fetchone()
             self.assertEqual(row, ("seller-b", "Mouse"))
 
+    def test_csv_import_template_writes_ready_to_fill_csv(self):
+        """`shopping import-csv-excel --template <path>` 写出模板且不导入。"""
+        from shopping_cli.cli import build_parser
+        from shopping_cli.cli_adapter_commands import PRODUCTS_TEMPLATE_CSV
+
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "products-template.csv"
+            args = build_parser().parse_args(["import-csv-excel", "--template", str(template_path)])
+            output = StringIO()
+            with redirect_stdout(output):
+                args.func(args)
+            written = template_path.read_text(encoding="utf-8")
+            self.assertEqual(written, PRODUCTS_TEMPLATE_CSV)
+            self.assertIn("CSV 模板已写入", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
