@@ -40,6 +40,14 @@ SCHEMA = [
         -- 交易入口（URL 类为 https URL；联系/会话类为 opaque ref），publish 时
         -- 同步进 catalog listing 的 handoff_destination_ref。
         handoff_destination text not null default '',
+        -- v26 — 商家私有价格边界（结构化字段，替代 automation_boundaries 自由文本）：
+        -- floor_price = 底价（最小成交价，0=未设）；max_discount_percent =
+        -- 最大授权折扣率 0-100（0=无折扣授权）；promotions_json = 结构化促销
+        -- 数组（商家私有）。三者均为私有，买家可见路径（public_product_summary）
+        -- 一律剥离；merchant owner 可见可改。
+        floor_price real not null default 0,
+        max_discount_percent real not null default 0,
+        promotions_json text not null default '[]',
         active integer not null default 1,
         source text not null default 'local'
             check(source in ('local','erp','csv_excel')),

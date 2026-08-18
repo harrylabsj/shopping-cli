@@ -8,9 +8,11 @@ writing, mutating shared state, or changing turn/state transitions.
 
 The merchant gate stays in :mod:`shopping_cli.services.negotiation`: it reads
 the merchant automation boundary floor through
-``merchant_agent._authorized_bargain_amount`` — a cross-module private access
-that a pure leaf must not own. The facade imports ``check_proposal_facts``
-from here so the merchant gate keeps calling the identical shared check.
+``merchant_agent._effective_floor_price`` (structured ``floor_price`` /
+``max_discount_percent`` first, free-text ``automation_boundaries`` fallback) —
+a cross-module private access that a pure leaf must not own. The facade imports
+``check_proposal_facts`` from here so the merchant gate keeps calling the
+identical shared check.
 """
 
 from __future__ import annotations

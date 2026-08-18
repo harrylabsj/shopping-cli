@@ -320,6 +320,9 @@ def create_product(
             description=str(payload.get("description") or ""),
             delivery_attributes=payload.get("delivery_attributes") or [],
             handoff_destination=str(payload.get("handoff_destination") or ""),
+            floor_price=payload.get("floor_price", 0.0),
+            max_discount_percent=payload.get("max_discount_percent", 0.0),
+            promotions=payload.get("promotions"),
         )
         return {"ok": True, "product": product}
 
@@ -349,6 +352,9 @@ def update_product(
             handoff_destination=payload.get("handoff_destination")
             if "handoff_destination" in payload
             else None,
+            floor_price=payload.get("floor_price"),
+            max_discount_percent=payload.get("max_discount_percent"),
+            promotions=payload.get("promotions") if "promotions" in payload else None,
         )
         return {"ok": True, "product": product}
 

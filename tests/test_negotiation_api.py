@@ -470,6 +470,35 @@ class NegotiationApiTest(unittest.TestCase):
         self.assertEqual(payload["policy_result"]["result"], "human_required")
         self.assertEqual(payload["policy_result"]["reason_codes"], ["unauthorized_discount"])
 
+    def test_structured_floor_price_triggers_below_floor(self):
+        # v26：结构化 floor_price（非 automation_boundaries）同样触发 below_floor。
+        with db_session(self.db_file) as conn:
+            conn.execute("update products set floor_price = 80 where sku = 'cup-1'")
+            conn.execute("update merchants set automation_boundaries = '' where id = 'seller-a'")
+        status, payload = self.merchant_accept(unit_price=75.0)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["policy_result"]["result"], "human_required")
+        self.assertEqual(payload["policy_result"]["reason_codes"], ["below_floor"])
+
+    def test_structured_floor_at_boundary_is_accepted(self):
+        # v26：结构化 floor_price=80，报价恰为 80（无阈值语义）→ 接受。
+        with db_session(self.db_file) as conn:
+            conn.execute("update products set floor_price = 80 where sku = 'cup-1'")
+            conn.execute("update merchants set automation_boundaries = '' where id = 'seller-a'")
+        status, payload = self.merchant_accept(unit_price=80.0, public_message="单价 80 元。")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["policy_result"]["result"], "accepted")
+
+    def test_structured_max_discount_percent_triggers_below_floor(self):
+        # v26：max_discount_percent=10 → 有效底价 99*(1-0.1)=89.1；报价 89 低于它 → below_floor。
+        with db_session(self.db_file) as conn:
+            conn.execute("update products set max_discount_percent = 10 where sku = 'cup-1'")
+            conn.execute("update merchants set automation_boundaries = '' where id = 'seller-a'")
+        status, payload = self.merchant_accept(unit_price=89.0)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["policy_result"]["result"], "human_required")
+        self.assertEqual(payload["policy_result"]["reason_codes"], ["below_floor"])
+
     def test_insufficient_stock_is_retryable(self):
         status, payload = self.merchant_accept(quantity=99)
         self.assertEqual(status, 200)

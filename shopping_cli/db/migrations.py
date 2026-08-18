@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26
 
 
 @dataclass(frozen=True)
@@ -529,6 +529,19 @@ def migration_025_negotiation_decision_idempotency(conn: sqlite3.Connection) -> 
     )
 
 
+def migration_026_product_pricing_boundaries(conn: sqlite3.Connection) -> None:
+    """products 商家私有价格边界（结构化字段，替代 automation_boundaries 自由文本）。
+
+    底价/折扣/促销从「商家级自由文本 + 正则解析」迁移为「每商品结构化列」：
+    floor_price（底价，0=未设）、max_discount_percent（最大折扣率 0-100，0=无
+    折扣授权）、promotions_json（结构化促销数组）。三者均私有，买家投影剥离。
+    幂等加列（ensure_column 已存在列跳过）；存量行默认 0/[]，行为向后兼容。
+    """
+    ensure_column(conn, "products", "floor_price", "real not null default 0")
+    ensure_column(conn, "products", "max_discount_percent", "real not null default 0")
+    ensure_column(conn, "products", "promotions_json", "text not null default '[]'")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -548,6 +561,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(23, "remove_scheme_a_stub_merchants", migration_023_remove_scheme_a_stub_merchants),
     Migration(24, "product_source_csv_excel", migration_024_product_source_csv_excel),
     Migration(25, "negotiation_decision_idempotency", migration_025_negotiation_decision_idempotency),
+    Migration(26, "product_pricing_boundaries", migration_026_product_pricing_boundaries),
 )
 
 

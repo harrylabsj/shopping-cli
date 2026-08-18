@@ -30,6 +30,10 @@ def public_product_summary(product: dict[str, Any]) -> dict[str, Any]:
     """
     summary = dict(product)
     summary.pop("handoff_destination", None)
+    # v26 — 商家私有价格边界：底价/折扣率/促销对买家一律剥离（public-only §7）。
+    summary.pop("floor_price", None)
+    summary.pop("max_discount_percent", None)
+    summary.pop("promotions", None)
     if "stock" in summary:
         stock = summary.pop("stock", None)
         summary["availability_hint"] = (
