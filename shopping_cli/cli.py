@@ -867,7 +867,8 @@ def build_parser() -> argparse.ArgumentParser:
         "import-csv-excel", help="Import product facts from CSV / Excel (.xlsx) into the local store"
     )
     import_csv.add_argument("--file", required=True, help="Path to .csv / .tsv / .xlsx file")
-    import_csv.add_argument("--merchant", default="", dest="merchant", help="Owning merchant id (required, FK guard)")
+    import_csv.add_argument("--merchant", default="", dest="merchant", help="Owning merchant id (or SHOPPING_MERCHANT_ID / KIWI_MERCHANT_ID)")
+    import_csv.add_argument("--default-merchant", default="", dest="default_merchant", help=argparse.SUPPRESS)
     import_csv.add_argument("--allowed-merchant", default="", dest="allowed_merchant", help="Tenant boundary: only rows of this merchant are written")
     import_csv.add_argument("--format", choices=["text", "json"], default="text")
     import_csv.set_defaults(func=cmd_import_csv_excel)

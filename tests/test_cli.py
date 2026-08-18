@@ -3318,6 +3318,55 @@ class ShoppingCliTest(unittest.TestCase):
 
             self.assertIn("Conversation CONV-0001 is closed", str(raised.exception))
 
+    def test_csv_import_uses_environment_defaults_for_db_and_merchant(self):
+        from shopping_cli.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            csv_file = Path(tmp) / "products.csv"
+            csv_file.write_text("sku,title,price,stock\nSKU-001,Adapter,99,4\n", encoding="utf-8")
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "Acme")
+
+            with patch.dict(
+                os.environ,
+                {"SHOPPING_DB_PATH": str(db_file), "SHOPPING_MERCHANT_ID": "seller-a"},
+                clear=False,
+            ):
+                args = build_parser().parse_args(["import-csv-excel", "--file", str(csv_file), "--format", "json"])
+                output = StringIO()
+                with redirect_stdout(output):
+                    args.func(args)
+
+            self.assertIn('"upserted": 1', output.getvalue())
+            with sqlite3.connect(db_file) as conn:
+                row = conn.execute("select merchant_id, title from products where sku = 'SKU-001'").fetchone()
+            self.assertEqual(row, ("seller-a", "Adapter"))
+
+    def test_csv_import_accepts_kiwi_merchant_id_alias(self):
+        from shopping_cli.cli import build_parser
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            csv_file = Path(tmp) / "products.csv"
+            csv_file.write_text("sku,title,price,stock\nSKU-002,Mouse,49,2\n", encoding="utf-8")
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-b", "--name", "Acme")
+
+            with patch.dict(
+                os.environ,
+                {"SHOPPING_DB_PATH": str(db_file), "KIWI_MERCHANT_ID": "seller-b"},
+                clear=False,
+            ):
+                os.environ.pop("SHOPPING_MERCHANT_ID", None)
+                args = build_parser().parse_args(["import-csv-excel", "--file", str(csv_file), "--format", "json"])
+                output = StringIO()
+                with redirect_stdout(output):
+                    args.func(args)
+
+            self.assertIn('"upserted": 1', output.getvalue())
+            with sqlite3.connect(db_file) as conn:
+                row = conn.execute("select merchant_id, title from products where sku = 'SKU-002'").fetchone()
+            self.assertEqual(row, ("seller-b", "Mouse"))
+
 
 if __name__ == "__main__":
     unittest.main()

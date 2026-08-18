@@ -87,6 +87,20 @@ printf 'longjing gift delivery today\n/summary\n/quit\n' | \
 
 Default database path: `~/.local/share/shopping-cli/shopping-cli.sqlite`.
 
+For a single-merchant deployment, import commands can read the database and
+merchant identity from the environment instead of repeating tenant flags:
+
+```bash
+export SHOPPING_DB_PATH="$HOME/.local/share/shopping-cli/shopping-cli.sqlite"
+export SHOPPING_MERCHANT_ID="your-merchant-id"
+
+shopping-cli import-csv-excel --file products.csv
+```
+
+`KIWI_MERCHANT_ID` is accepted as a compatibility alias for
+`SHOPPING_MERCHANT_ID`. Explicit `--db` and `--merchant` arguments take
+precedence over environment variables.
+
 ## Channel Ingress
 
 External channel adapters can ingest buyer messages through a stable local entry point before real WhatsApp, Telegram, Slack, or OpenClaw/Hermes gateway bridges are attached:

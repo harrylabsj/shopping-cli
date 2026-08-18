@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.data_sources import csv_excel_source  # noqa: F401  # 导入即注册适配器
@@ -29,7 +30,12 @@ def cmd_adapters_list(args: argparse.Namespace) -> None:
 def cmd_import_csv_excel(args: argparse.Namespace) -> None:
     """运行 CSV/Excel 适配器导入本地 products 表。"""
     db_path = db_path_from_args(args)
-    merchant_id = str(args.merchant or "").strip() or str(args.default_merchant or "").strip()
+    merchant_id = (
+        str(args.merchant or "").strip()
+        or str(getattr(args, "default_merchant", "")).strip()
+        or str(os.environ.get("SHOPPING_MERCHANT_ID") or "").strip()
+        or str(os.environ.get("KIWI_MERCHANT_ID") or "").strip()
+    )
     if not merchant_id:
         raise SystemExit("--merchant is required (FK 归属防护)")
     with db_session(db_path) as conn:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -132,4 +133,12 @@ def tcp_port(value: str) -> int:
 
 
 def db_path_from_args(args: argparse.Namespace) -> Path:
-    return Path(getattr(args, "agent_db", None) or args.db or args.data or DEFAULT_DB_PATH).expanduser()
+    configured = (
+        getattr(args, "agent_db", None)
+        or getattr(args, "db", None)
+        or getattr(args, "data", None)
+        or os.environ.get("SHOPPING_DB_PATH")
+        or os.environ.get("SHOPPING_DB")
+        or DEFAULT_DB_PATH
+    )
+    return Path(configured).expanduser()
