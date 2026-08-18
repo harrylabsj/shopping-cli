@@ -853,6 +853,142 @@ class ShoppingCliTest(unittest.TestCase):
 
             self.assertIn("delivery fee must be non-negative", str(raised.exception))
 
+    def test_delivery_set_time_text_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+
+            first = self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "东北", "--min-days", "3", "--max-days", "4",
+            )
+            second = self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "华北", "--min-days", "1", "--max-days", "2",
+            )
+            shown = self.run_cli(db_file, "delivery", "times", "--merchant", "seller-a")
+
+            self.assertIn("东北 3-4天", first)
+            self.assertIn("东北 3-4天；华北 1-2天", second)
+            self.assertIn("东北 3-4天；华北 1-2天", shown)
+
+    def test_delivery_set_time_single_day_renders_without_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+
+            output = self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "华北", "--min-days", "1", "--max-days", "1",
+            )
+
+            self.assertIn("华北 1天", output)
+
+    def test_delivery_set_time_validates_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(
+                    db_file, "delivery", "set-time", "--merchant", "seller-a",
+                    "--region", "华南", "--min-days", "9", "--max-days", "3",
+                )
+            self.assertIn("delivery max days must be >= min days", str(raised.exception))
+
+            # min-days 0 在 argparse positive_int 层拒绝（进入核心前）
+            from shopping_cli import cli as cli_mod
+
+            stderr = StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+                cli_mod.build_parser().parse_args(
+                    ["delivery", "set-time", "--merchant", "seller-a",
+                     "--region", "华南", "--min-days", "0", "--max-days", "3"]
+                )
+            self.assertEqual(caught.exception.code, 2)
+            self.assertIn("must be greater than 0", stderr.getvalue())
+
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(
+                    db_file, "delivery", "set-time", "--merchant", "seller-a",
+                    "--region", "华南", "--min-days", "1", "--max-days", "999",
+                )
+            self.assertIn("delivery max days must be <= 365", str(raised.exception))
+
+    def test_delivery_set_time_unknown_merchant_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(
+                    db_file, "delivery", "set-time", "--merchant", "nobody",
+                    "--region", "华南", "--min-days", "1", "--max-days", "3",
+                )
+            self.assertIn("unknown merchant", str(raised.exception).lower())
+
+    def test_delivery_remove_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+            self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "东北", "--min-days", "3", "--max-days", "4",
+            )
+            self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "华北", "--min-days", "1", "--max-days", "2",
+            )
+
+            removed = self.run_cli(
+                db_file, "delivery", "remove-time", "--merchant", "seller-a", "--region", "华北",
+            )
+            shown = self.run_cli(db_file, "delivery", "times", "--merchant", "seller-a")
+
+            self.assertNotIn("华北", removed)
+            self.assertIn("东北 3-4天", shown)
+            self.assertNotIn("华北", shown)
+
+    def test_delivery_times_json_output_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+            self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "东北", "--min-days", "3", "--max-days", "4",
+            )
+
+            output = self.run_cli(db_file, "delivery", "times", "--merchant", "seller-a", "--format", "json")
+            payload = json.loads(output)
+
+            self.assertEqual(payload["delivery_times"], {"东北": {"min_days": 3, "max_days": 4}})
+
+    def test_delivery_set_time_preserves_rule_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "shopping.sqlite"
+            self.run_cli(db_file, "merchant", "create", "--id", "seller-a", "--name", "West Lake Tea")
+            self.run_cli(
+                db_file, "delivery", "set", "--merchant", "seller-a",
+                "--service-area", "West Lake", "--fee", "12", "--eta-minutes", "45",
+            )
+            self.run_cli(
+                db_file, "delivery", "set-time", "--merchant", "seller-a",
+                "--region", "东北", "--min-days", "3", "--max-days", "4",
+            )
+
+            shown = self.run_cli(db_file, "delivery", "times", "--merchant", "seller-a", "--format", "json")
+            payload = json.loads(shown)
+            self.assertEqual(payload["delivery_times"], {"东北": {"min_days": 3, "max_days": 4}})
+
+            # set-time 只写 delivery_times_json + updated_at，不触碰规则其它字段
+            with sqlite3.connect(db_file) as conn:
+                row = conn.execute(
+                    "select service_area, fee, eta_minutes, delivery_times_json"
+                    " from delivery_rules where merchant_id = 'seller-a'"
+                ).fetchone()
+            self.assertEqual(row[0], "West Lake")
+            self.assertEqual(row[1], 12.0)
+            self.assertEqual(row[2], 45)
+            self.assertEqual(json.loads(row[3]), {"东北": {"min_days": 3, "max_days": 4}})
+
     def test_merchant_human_review_text_output_lists_conversations(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_file = Path(tmp) / "shopping.sqlite"

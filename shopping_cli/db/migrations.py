@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 27
 
 
 @dataclass(frozen=True)
@@ -542,6 +542,16 @@ def migration_026_product_pricing_boundaries(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "products", "promotions_json", "text not null default '[]'")
 
 
+def migration_027_delivery_times(conn: sqlite3.Connection) -> None:
+    """delivery_rules.delivery_times_json 列（商家按区域配送时效，发现指标）。
+
+    商家级一个字段：区域 → {min_days, max_days}（如 东北 3-4 天、华北 1-2 天）。
+    买家在发现/搜索阶段看到摘要（listings 投影 → commercial_hints.lead_time_hint）。
+    幂等加列（ensure_column 已存在列跳过）；存量行默认 '{}'，行为向后兼容。
+    """
+    ensure_column(conn, "delivery_rules", "delivery_times_json", "text not null default '{}'")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -562,6 +572,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(24, "product_source_csv_excel", migration_024_product_source_csv_excel),
     Migration(25, "negotiation_decision_idempotency", migration_025_negotiation_decision_idempotency),
     Migration(26, "product_pricing_boundaries", migration_026_product_pricing_boundaries),
+    Migration(27, "delivery_times", migration_027_delivery_times),
 )
 
 

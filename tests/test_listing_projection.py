@@ -106,6 +106,35 @@ class ListingProjectionTest(unittest.TestCase):
         self.assertIn("name-only discovery projection", provenance["note"])
         self.assertNotIn("commercial_hints", projection)
 
+    def test_projection_carries_delivery_times_hint(self) -> None:
+        """商家级配送时效（delivery set-time）→ 投影 regions + commercial_hints：
+        买家发现阶段看到时效摘要与履约区域。"""
+        from shopping_cli.core.catalog import set_delivery_time
+
+        _seed_product(self.conn, "SKU-DEL", price=66.0, stock=3)
+        set_delivery_time(self.conn, MERCHANT, "东北", 3, 4)
+        set_delivery_time(self.conn, MERCHANT, "华北", 1, 2)
+
+        projection = project_product_listing(self.conn, "SKU-DEL", merchant_id=MERCHANT)
+
+        self.assertEqual(projection["regions"], ["东北", "华北"])
+        self.assertEqual(
+            projection["commercial_hints"],
+            {
+                "fulfillment_regions": ["东北", "华北"],
+                "lead_time_hint": "东北 3-4天；华北 1-2天",
+            },
+        )
+
+    def test_projection_without_delivery_times_stays_plain(self) -> None:
+        """未设 delivery_times 时保持 regions:[] 且无 commercial_hints（不编造时效）。"""
+        _seed_product(self.conn, "SKU-PLAIN", price=66.0, stock=3)
+
+        projection = project_product_listing(self.conn, "SKU-PLAIN", merchant_id=MERCHANT)
+
+        self.assertEqual(projection["regions"], [])
+        self.assertNotIn("commercial_hints", projection)
+
     def test_active_zero_excluded_from_publishable(self) -> None:
         _seed_product(self.conn, "SKU-001", active=1)
         _seed_product(self.conn, "SKU-002", active=0)
