@@ -62,7 +62,14 @@ def get_listing_projection(db_path: str | Path, sku: str, payload: dict[str, Any
         )
         try:
             # 审查 S-M3：私有剥离收进投影层（include_private）。
-            projection = project_product_listing(conn, sku, include_private=is_owner)
+            # merchant_id 由商品 owner 派生（配送时效是商家级字段，投影需要它）；
+            # 此前缺省 "" 会让商家级 delivery_times 在该路径静默丢失。
+            projection = project_product_listing(
+                conn,
+                sku,
+                merchant_id=str(row["merchant_id"] or "") if row is not None else "",
+                include_private=is_owner,
+            )
         except ProjectionError as exc:
             raise NotFoundError(str(exc)) from exc
         return {"ok": True, "projection": projection}

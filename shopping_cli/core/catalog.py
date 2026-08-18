@@ -376,6 +376,145 @@ def upsert_delivery_rule(
     return delivery_rule(conn, merchant_id)
 
 
+# 配送时效天数上限（区域时效为天数区间，封顶防止脏数据进入发现投影）。
+MAX_DELIVERY_DAYS = 365
+
+
+def decode_delivery_times(value: str | None) -> dict[str, dict[str, int]]:
+    """解码 delivery_times_json：区域 → {min_days, max_days}。
+
+    仿 ``decode_promotions``（list-of-dict）按 dict-of-dict 校验：非 dict /
+    损坏 / 条目缺 min_days/max_days 或非正整数 → 丢弃该条，整体非法回退 {}。
+    不抛异常（数据面读取容错），写入侧由 ``set_delivery_time`` 强校验。
+    """
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    result: dict[str, dict[str, int]] = {}
+    for region, entry in decoded.items():
+        if not isinstance(region, str) or not region.strip():
+            continue
+        if not isinstance(entry, dict):
+            continue
+        try:
+            min_days = int(entry.get("min_days"))
+            max_days = int(entry.get("max_days"))
+        except (TypeError, ValueError):
+            continue
+        if min_days < 1 or max_days < min_days or max_days > MAX_DELIVERY_DAYS:
+            continue
+        result[region.strip()] = {"min_days": min_days, "max_days": max_days}
+    return result
+
+
+def set_delivery_time(
+    conn: sqlite3.Connection,
+    merchant_id: str,
+    region: str,
+    min_days: int,
+    max_days: int,
+) -> dict[str, Any]:
+    """维护商家某一区域的配送时效（upsert 单个区域，不影响其它区域）。
+
+    region → {min_days, max_days} 写回 delivery_rules.delivery_times_json。
+    行不存在则插入（其余配送列保持默认），存在则只更新该 JSON + updated_at
+    —— 不触碰 service_area/fee/eta_minutes/radius_km/notes。
+    """
+    region = bounded_text(region, "delivery region", MAX_SHORT_TEXT_CHARS).strip()
+    if not region:
+        raise ValidationError("delivery region must not be empty")
+    min_days = _whole_int(min_days, "delivery min days must be a whole number")
+    max_days = _whole_int(max_days, "delivery max days must be a whole number")
+    if min_days < 1:
+        raise ValidationError("delivery min days must be at least 1")
+    if max_days < min_days:
+        raise ValidationError("delivery max days must be >= min days")
+    if max_days > MAX_DELIVERY_DAYS:
+        raise ValidationError(f"delivery max days must be <= {MAX_DELIVERY_DAYS}")
+    require_merchant(conn, merchant_id)
+    times = delivery_times(conn, merchant_id)
+    times[region] = {"min_days": min_days, "max_days": max_days}
+    now = now_iso()
+    conn.execute(
+        """
+        insert into delivery_rules(merchant_id, delivery_times_json, created_at, updated_at)
+        values (?, ?, ?, ?)
+        on conflict(merchant_id) do update set
+            delivery_times_json = excluded.delivery_times_json,
+            updated_at = excluded.updated_at
+        """,
+        (merchant_id, encode_json(times), now, now),
+    )
+    _audit_catalog(
+        conn,
+        merchant_id,
+        "delivery_time_updated",
+        {"merchant_id": merchant_id, "region": region, "min_days": min_days, "max_days": max_days},
+    )
+    return delivery_rule(conn, merchant_id)
+
+
+def remove_delivery_time(conn: sqlite3.Connection, merchant_id: str, region: str) -> dict[str, Any]:
+    """删除商家某一区域的配送时效（不存在则原样返回，幂等）。"""
+    region = bounded_text(region, "delivery region", MAX_SHORT_TEXT_CHARS).strip()
+    require_merchant(conn, merchant_id)
+    times = delivery_times(conn, merchant_id)
+    if region not in times:
+        return delivery_rule(conn, merchant_id)
+    del times[region]
+    now = now_iso()
+    conn.execute(
+        "update delivery_rules set delivery_times_json = ?, updated_at = ? where merchant_id = ?",
+        (encode_json(times), now, merchant_id),
+    )
+    _audit_catalog(
+        conn,
+        merchant_id,
+        "delivery_time_removed",
+        {"merchant_id": merchant_id, "region": region},
+    )
+    return delivery_rule(conn, merchant_id)
+
+
+def delivery_times(conn: sqlite3.Connection, merchant_id: str) -> dict[str, dict[str, int]]:
+    """读商家配送时效映射（只读、容错；空 → {}）。"""
+    row = conn.execute(
+        "select delivery_times_json from delivery_rules where merchant_id = ?", (merchant_id,)
+    ).fetchone()
+    return decode_delivery_times(row["delivery_times_json"] if row is not None else None)
+
+
+def render_delivery_times_hint(delivery_times_map: Mapping[str, Any] | None) -> str:
+    """区域时效摘要（发现投影 lead_time_hint / CLI 展示），单一来源。
+
+    例：`{"东北": {"min_days": 3, "max_days": 4}, "华北": {"min_days": 1, "max_days": 2}}`
+    → `东北 3-4天；华北 1-2天`；min==max 渲染 `东北 3天`；空 → `-`。
+    """
+    if not delivery_times_map:
+        return "-"
+    parts: list[str] = []
+    for region, entry in delivery_times_map.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            min_days = int(entry.get("min_days") or 0)
+            max_days = int(entry.get("max_days") or 0)
+        except (TypeError, ValueError):
+            continue
+        if min_days < 1:
+            continue
+        if min_days == max_days:
+            parts.append(f"{region} {min_days}天")
+        else:
+            parts.append(f"{region} {min_days}-{max_days}天")
+    return "；".join(parts) if parts else "-"
+
+
 def create_product(
     conn: sqlite3.Connection,
     merchant_id: str,
@@ -569,6 +708,7 @@ def delivery_rule(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
             "eta_minutes": 0,
             "radius_km": 0.0,
             "notes": "",
+            "delivery_times": {},
         }
     return {
         "service_area": row["service_area"],
@@ -577,6 +717,7 @@ def delivery_rule(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
         "eta_minutes": _safe_non_negative_int(row["eta_minutes"]),
         "radius_km": _safe_non_negative_float(row["radius_km"]),
         "notes": row["notes"],
+        "delivery_times": decode_delivery_times(row["delivery_times_json"]),
     }
 
 
@@ -608,6 +749,7 @@ def _delivery_rule_from_joined_merchant(row: sqlite3.Row) -> dict[str, Any]:
         "eta_minutes": _safe_non_negative_int(row["delivery_eta_minutes"]),
         "radius_km": _safe_non_negative_float(row["delivery_radius_km"]),
         "notes": row["delivery_notes"] or "",
+        "delivery_times": decode_delivery_times(row["delivery_times_json"]),
     }
 
 
@@ -638,6 +780,7 @@ def list_merchants(conn: sqlite3.Connection, limit: int = 50, offset: int = 0) -
                dr.eta_minutes as delivery_eta_minutes,
                dr.radius_km as delivery_radius_km,
                dr.notes as delivery_notes,
+               dr.delivery_times_json as delivery_times_json,
                count(p.sku) as active_product_count
         from merchants m
         left join delivery_rules dr on dr.merchant_id = m.id
@@ -1067,6 +1210,7 @@ def search_products(
                dr.eta_minutes as delivery_eta_minutes,
                dr.radius_km as delivery_radius_km,
                dr.notes as delivery_notes,
+               dr.delivery_times_json as delivery_times_json,
                (
                    select count(*)
                    from products pc
@@ -1203,6 +1347,7 @@ def search_merchants(
                dr.eta_minutes as delivery_eta_minutes,
                dr.radius_km as delivery_radius_km,
                dr.notes as delivery_notes,
+               dr.delivery_times_json as delivery_times_json,
                count(p.sku) as active_product_count
     """
     if use_index:

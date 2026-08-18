@@ -9,9 +9,13 @@ from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.core.catalog import (
     create_merchant,
     create_product,
+    delivery_rule,
     list_merchants,
+    remove_delivery_time,
+    render_delivery_times_hint,
     search_merchants,
     search_products,
+    set_delivery_time,
     set_stock,
     update_merchant,
     update_product,
@@ -112,6 +116,41 @@ def emit_delivery_rule_text(merchant_id: str, delivery: dict[str, Any]) -> None:
     print(f"ETA: {int(delivery.get('eta_minutes') or 0)} minutes")
     print(f"Radius: {float(delivery.get('radius_km') or 0):g} km")
     print(f"Notes: {delivery.get('notes') or '-'}")
+    print(f"Delivery times: {render_delivery_times_hint(delivery.get('delivery_times'))}")
+
+
+def cmd_delivery_set_time(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        delivery = set_delivery_time(
+            conn,
+            args.merchant,
+            region=args.region,
+            min_days=args.min_days,
+            max_days=args.max_days,
+        )
+    if args.format == "text":
+        print(f"Delivery time set: {args.merchant} {render_delivery_times_hint(delivery.get('delivery_times'))}")
+        return
+    emit({"ok": True, "merchant_id": args.merchant, "delivery": delivery}, args.format)
+
+
+def cmd_delivery_remove_time(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        delivery = remove_delivery_time(conn, args.merchant, region=args.region)
+    if args.format == "text":
+        print(f"Delivery time removed: {args.merchant} {render_delivery_times_hint(delivery.get('delivery_times'))}")
+        return
+    emit({"ok": True, "merchant_id": args.merchant, "delivery": delivery}, args.format)
+
+
+def cmd_delivery_times(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        delivery = delivery_rule(conn, args.merchant)
+    if args.format == "text":
+        print(f"Delivery times: {args.merchant}")
+        print(render_delivery_times_hint(delivery.get("delivery_times")))
+        return
+    emit({"ok": True, "merchant_id": args.merchant, "delivery_times": delivery.get("delivery_times", {})}, args.format)
 
 
 def cmd_product_add(args: argparse.Namespace) -> None:

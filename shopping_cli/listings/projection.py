@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from shopping_cli.core.catalog import delivery_times, render_delivery_times_hint
 from shopping_cli.data_sources.erp_source import SOURCE_LOCAL
 
 
@@ -68,6 +69,18 @@ def project_product_listing(
         "regions": [],
         "tags": json.loads(row.get("tags_json") or "[]"),
     }
+    # 商家配送时效（按区域，如 东北 3-4 天）→ 公开发现 hint：买家在搜索/发现
+    # 阶段看到时效摘要与履约区域。商家级字段（delivery_rules.delivery_times_json），
+    # 由商家用 `delivery set-time` 维护；为空保持 regions:[] 且无 commercial_hints。
+    if merchant_id:
+        times = delivery_times(conn, merchant_id)
+        if times:
+            region_names = sorted(times.keys())
+            projection["regions"] = region_names
+            projection["commercial_hints"] = {
+                "fulfillment_regions": region_names,
+                "lead_time_hint": render_delivery_times_hint(times),
+            }
     # 每商品成交入口（KTH destination_ref）：商家自行维护，publish 时同步进
     # catalog listing 的 handoff_destination_ref。审查 S-M3：私有字段，缺省
     # 剥离；仅 owner（include_private=True）保留。

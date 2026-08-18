@@ -88,6 +88,7 @@ SCHEMA = [
         eta_minutes integer not null default 0,
         radius_km real not null default 0,
         notes text not null default '',
+        delivery_times_json text not null default '{}',
         created_at text not null,
         updated_at text not null,
         foreign key (merchant_id) references merchants(id)

@@ -2037,6 +2037,32 @@ class PublicMarketplaceTest(unittest.TestCase):
             self.assertEqual(shown["merchant"]["delivery"]["fee"], 0.0)
             self.assertEqual(shown["merchant"]["delivery"]["eta_minutes"], 0)
             self.assertEqual(shown["merchant"]["delivery"]["radius_km"], 0.0)
+            self.assertEqual(shown["merchant"]["delivery"]["delivery_times"], {})
+
+    def test_merchant_read_exposes_delivery_times(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_file = Path(tmp) / "marketplace.sqlite"
+            app = create_app(db_file)
+
+            status, created = self.request(app, "POST", "/merchants", {"id": "seller-a", "name": "West Lake Tea"})
+            self.assertEqual(status, 200)
+            with closing(sqlite3.connect(db_file)) as conn:
+                conn.execute(
+                    """
+                    update delivery_rules
+                    set delivery_times_json = ? where merchant_id = 'seller-a'
+                    """,
+                    (json.dumps({"东北": {"min_days": 3, "max_days": 4}}, ensure_ascii=False),),
+                )
+                conn.commit()
+
+            status, shown = self.request(app, "GET", "/merchants/seller-a")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                shown["merchant"]["delivery"]["delivery_times"],
+                {"东北": {"min_days": 3, "max_days": 4}},
+            )
 
     def test_product_read_tolerates_corrupt_price_and_stock(self):
         with tempfile.TemporaryDirectory() as tmp:

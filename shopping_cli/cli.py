@@ -33,7 +33,10 @@ from shopping_cli.cli_agent_commands import (
     cmd_agent_tokens,
 )
 from shopping_cli.cli_catalog_commands import (
+    cmd_delivery_remove_time,
     cmd_delivery_set,
+    cmd_delivery_set_time,
+    cmd_delivery_times,
     cmd_merchant_create,
     cmd_merchant_list,
     cmd_merchant_update,
@@ -510,6 +513,25 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_set.add_argument("--notes", default="")
     delivery_set.add_argument("--format", choices=["text", "json"], default="text")
     delivery_set.set_defaults(func=cmd_delivery_set)
+
+    delivery_set_time = delivery_sub.add_parser("set-time", help="Set delivery time for one region (days)")
+    delivery_set_time.add_argument("--merchant", required=True)
+    delivery_set_time.add_argument("--region", required=True, help="区域名，如 东北 / 华北")
+    delivery_set_time.add_argument("--min-days", type=positive_int, required=True)
+    delivery_set_time.add_argument("--max-days", type=positive_int, required=True)
+    delivery_set_time.add_argument("--format", choices=["text", "json"], default="text")
+    delivery_set_time.set_defaults(func=cmd_delivery_set_time)
+
+    delivery_remove_time = delivery_sub.add_parser("remove-time", help="Remove delivery time for one region")
+    delivery_remove_time.add_argument("--merchant", required=True)
+    delivery_remove_time.add_argument("--region", required=True)
+    delivery_remove_time.add_argument("--format", choices=["text", "json"], default="text")
+    delivery_remove_time.set_defaults(func=cmd_delivery_remove_time)
+
+    delivery_times = delivery_sub.add_parser("times", help="Show per-region delivery times")
+    delivery_times.add_argument("--merchant", required=True)
+    delivery_times.add_argument("--format", choices=["text", "json"], default="text")
+    delivery_times.set_defaults(func=cmd_delivery_times)
 
     product = subparsers.add_parser("product", help="Manage products and stock")
     product_sub = product.add_subparsers(dest="product_command", required=True)
