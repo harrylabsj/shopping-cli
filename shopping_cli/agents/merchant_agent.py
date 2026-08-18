@@ -115,6 +115,29 @@ def _authorized_bargain_amount(product: dict[str, Any]) -> str:
     return ""
 
 
+def _effective_floor_price(product: dict[str, Any]) -> float | None:
+    """解析商家授权的最低成交价（v26 结构化优先）。
+
+    优先级：``product.floor_price > 0`` → 用它；否则
+    ``0 < max_discount_percent <= 100`` → ``price * (1 - discount/100)``；
+    否则回退 ``_authorized_bargain_amount`` 自由文本正则（存量
+    ``automation_boundaries`` 兼容）。全无 → None（无授权底价）。
+    """
+    floor = _safe_non_negative_float(product.get("floor_price"))
+    if floor > 0:
+        return floor
+    discount = _safe_non_negative_float(product.get("max_discount_percent"))
+    if 0 < discount <= 100:
+        return _safe_non_negative_float(product.get("price")) * (1 - discount / 100)
+    free_text = _authorized_bargain_amount(product)
+    if free_text:
+        try:
+            return float(free_text)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def generate_reply(
     tools: MerchantAgentTools,
     conversation: dict[str, Any],

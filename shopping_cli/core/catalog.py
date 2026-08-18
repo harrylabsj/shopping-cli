@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -43,6 +44,51 @@ def parse_tags(value: str | list[str] | None) -> list[str]:
         return bounded_string_list([str(item).strip() for item in value if str(item).strip()], "tags")
     parts = re.split(r"[,;，；、\n]+", str(value))
     return bounded_string_list([part.strip() for part in parts if part.strip()], "tags")
+
+
+def parse_promotions(value: list | None) -> list[dict[str, Any]]:
+    """促销数组轻校验（v26）：list of dict，每项含非空 title。返回可 JSON 编码 list。
+
+    促销为商家私有元数据，本里程碑只做形态校验 + 存取，不参与谈判门判断。
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValidationError("promotions must be a list")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValidationError("each promotion must be an object")
+        title = str(item.get("title") or "").strip()
+        if not title:
+            raise ValidationError("each promotion must have a non-empty title")
+        result.append(item)
+    return result
+
+
+def decode_promotions(value: str | None) -> list[dict[str, Any]]:
+    """解码 promotions_json：list of dict（区别于 ``decode_json`` 的字符串列表归一化）。
+
+    ``decode_json(value, [])`` 会把 list 归一化为 list[str] 并丢弃 dict 项，
+    不适合促销数组（元素为 dict）；本函数按 list-of-dict 解码，非法/空值回退 []。
+    """
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [item for item in decoded if isinstance(item, dict)]
+
+
+def _discount_percent(value: Any, message: str) -> float:
+    """最大折扣率校验：finite + 0 <= x <= 100（0=无折扣授权）。"""
+    percent = _finite_float(value, message)
+    if percent < 0 or percent > 100:
+        raise ValidationError(f"{message} (must be between 0 and 100)")
+    return percent
 
 
 def require_merchant(conn: sqlite3.Connection, merchant_id: str) -> sqlite3.Row:
@@ -343,6 +389,9 @@ def create_product(
     description: str = "",
     delivery_attributes: str | list[str] | None = None,
     handoff_destination: str = "",
+    floor_price: float = 0.0,
+    max_discount_percent: float = 0.0,
+    promotions: list | None = None,
 ) -> dict[str, Any]:
     merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
     sku = bounded_text(sku, "product sku", MAX_SHORT_TEXT_CHARS).strip()
@@ -362,6 +411,9 @@ def create_product(
     stock = _whole_int(stock, "--stock must be a whole number")
     if stock < 0:
         raise ValidationError("--stock must be non-negative")
+    floor_price = _price_with_precision(floor_price, "--floor-price must be finite and non-negative")
+    max_discount_percent = _discount_percent(max_discount_percent, "--max-discount-percent")
+    promotions = parse_promotions(promotions)
     require_merchant(conn, merchant_id)
     now = now_iso()
     try:
@@ -370,9 +422,10 @@ def create_product(
         insert into products(
             sku, merchant_id, title, description, category, tags_json, price,
             currency, stock, delivery_attributes_json, handoff_destination,
+            floor_price, max_discount_percent, promotions_json,
             active, created_at, updated_at
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
             sku,
@@ -386,6 +439,9 @@ def create_product(
             stock,
             encode_json(parse_tags(delivery_attributes)),
             handoff_destination,
+            floor_price,
+            max_discount_percent,
+            encode_json(promotions),
             now,
             now,
             ),
@@ -410,6 +466,9 @@ def update_product(
     description: str | None = None,
     delivery_attributes: str | list[str] | None = None,
     handoff_destination: str | None = None,
+    floor_price: float | None = None,
+    max_discount_percent: float | None = None,
+    promotions: list | None = None,
 ) -> dict[str, Any]:
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
@@ -435,6 +494,12 @@ def update_product(
         stock = _whole_int(stock, "--stock must be a whole number")
     if stock is not None and stock < 0:
         raise ValidationError("--stock must be non-negative")
+    if floor_price is not None:
+        floor_price = _price_with_precision(floor_price, "--floor-price must be finite and non-negative")
+    if max_discount_percent is not None:
+        max_discount_percent = _discount_percent(max_discount_percent, "--max-discount-percent")
+    if promotions is not None:
+        promotions = parse_promotions(promotions)
     updates: list[str] = []
     values: list[Any] = []
     field_map = {
@@ -444,6 +509,8 @@ def update_product(
         "currency": currency,
         "category": category,
         "description": description,
+        "floor_price": floor_price,
+        "max_discount_percent": max_discount_percent,
     }
     for column, value in field_map.items():
         if value is not None:
@@ -455,6 +522,9 @@ def update_product(
     if delivery_attributes is not None:
         updates.append("delivery_attributes_json = ?")
         values.append(encode_json(parse_tags(delivery_attributes)))
+    if promotions is not None:
+        updates.append("promotions_json = ?")
+        values.append(encode_json(promotions))
     if handoff_destination is not None:
         updates.append("handoff_destination = ?")
         values.append(handoff_destination)
@@ -596,6 +666,9 @@ def product_summary(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
         "stock": _safe_non_negative_int(product["stock"]),
         "delivery_attributes": decode_json(product["delivery_attributes_json"], []),
         "handoff_destination": product["handoff_destination"] or "",
+        "floor_price": _safe_non_negative_float(product["floor_price"]),
+        "max_discount_percent": _safe_non_negative_float(product["max_discount_percent"]),
+        "promotions": decode_promotions(product["promotions_json"]),
         "merchant": merchant,
         "delivery": merchant["delivery"],
         "warnings": product_warnings(product, merchant),
@@ -631,6 +704,9 @@ def _product_summary_from_search_row(row: sqlite3.Row) -> dict[str, Any]:
         "stock": _safe_non_negative_int(row["stock"]),
         "delivery_attributes": decode_json(row["delivery_attributes_json"], []),
         "handoff_destination": row["handoff_destination"] or "",
+        "floor_price": _safe_non_negative_float(row["floor_price"]),
+        "max_discount_percent": _safe_non_negative_float(row["max_discount_percent"]),
+        "promotions": decode_promotions(row["promotions_json"]),
         "merchant": merchant,
         "delivery": merchant["delivery"],
         "warnings": product_warnings(row, merchant),

@@ -514,7 +514,10 @@ def _merchant_gate(
     # SKU 复用/重建时会对错误商家的 automation_boundaries 做 floor/折扣判断。
     # 换用 _load_conversation_product（带归属校验，fail-closed）。
     product = _load_conversation_product(conn, conversation)
-    floor_str = merchant_agent._authorized_bargain_amount(product)
+    # v26：结构化底价/折扣优先（floor_price / max_discount_percent），回退
+    # automation_boundaries 自由文本正则（_effective_floor_price 内部处理）。
+    effective_floor = merchant_agent._effective_floor_price(product)
+    floor_str = str(effective_floor) if effective_floor is not None else ""
     # 泄漏守卫对每个 merchant 决策运行——ask/decline 等无 proposal 的决策
     # 也可能携带泄露底价的 public_message（此前该分支直接放行）。
     if floor_str and _leaks_private_threshold(str(decision.get("public_message") or ""), floor_str):
@@ -533,8 +536,8 @@ def _merchant_gate(
     if age > protocol.STOCK_OBSERVATION_MAX_AGE_SECONDS or age < -60:
         return _reject("stale_inventory", "库存观察时间已过期，请重新获取快照后再报价。")
     unit_price = float(proposal["unit_price"])
-    if floor_str:
-        if unit_price < float(floor_str):
+    if effective_floor is not None:
+        if unit_price < effective_floor:
             return _human("below_floor", "报价低于商家授权的自动磋商范围，需要人工处理。")
     elif unit_price < float(product["price"]):
         return _human("unauthorized_discount", "该折扣没有商家授权规则，需要人工处理。")

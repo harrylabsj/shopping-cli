@@ -47,3 +47,22 @@ def test_public_product_summary_strips_handoff_destination() -> None:
     assert product["handoff_destination"] == "https://shop.example/checkout/abc"
     merchant_view = merchant_product_summary(product)
     assert merchant_view["handoff_destination"] == "https://shop.example/checkout/abc"
+
+
+def test_public_product_summary_strips_pricing_boundaries() -> None:
+    """v26 — floor_price / max_discount_percent / promotions 是商家私有价格
+    边界，公开投影剥离；merchant_product_summary（owner）保留。"""
+    product = {
+        "sku": "sku-1",
+        "stock": 5,
+        "floor_price": 80.0,
+        "max_discount_percent": 10.0,
+        "promotions": [{"title": "限时特价", "type": "price_cut"}],
+    }
+    public = public_product_summary(product)
+    for field in ("floor_price", "max_discount_percent", "promotions"):
+        assert field not in public
+    merchant_view = merchant_product_summary(product)
+    assert merchant_view["floor_price"] == 80.0
+    assert merchant_view["max_discount_percent"] == 10.0
+    assert merchant_view["promotions"] == [{"title": "限时特价", "type": "price_cut"}]
