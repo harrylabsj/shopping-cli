@@ -6,7 +6,6 @@
     "agents/openai.yaml",
     "docs/agent-protocol.md",
     "docs/architecture.md",
-    "docs/migration-from-shopping.md",
     "shopping_cli/**/*.py",
     "plugins/shopping-plugin/index.js",
     "plugins/shopping-plugin/openclaw_compat.js",

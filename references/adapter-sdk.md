@@ -79,5 +79,4 @@ shopping adapters list
 
 ## 接入时间实测
 
-见 `references/csv-excel-onboarding-measurement.md`：**空环境 → 首条有效 listing
-≈ 0.27s**（merchant create + import 4 行 + 可搜索）。
+实测**空环境 → 首条有效 listing ≈ 0.27s**（merchant create + import 4 行 + 可搜索）。
