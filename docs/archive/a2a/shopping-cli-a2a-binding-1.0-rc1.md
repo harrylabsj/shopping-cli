@@ -321,7 +321,7 @@ Implementation MUST NOT claim KNP Direct A2A interoperability before these gates
 
 ## Appendix A — RC1 Review Closure
 
-This RC1 closes the blocking findings from `design-review-a2a-v1.1-2026-08-06.md`:
+This RC1 closes the blocking findings from the v1.1 design review:
 
 - 12 binding decisions now have proposed direction, owner role, freeze milestone and status;
 - Agent Card pinned to official A2A v1.0.0 semantics;

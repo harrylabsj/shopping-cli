@@ -2120,8 +2120,8 @@ shopping-cli 不必控制所有通信，却仍然可以成为 Kiwi 网络最重�
 - 当前 HEAD Negotiation Gateway：`shopping.negotiation/0.1` frozen contract、`services/negotiation.py` / `core/negotiation.py`、`/negotiation/*` authoritative API、claim/heartbeat/policy/audit/settlement。
 - `agent-protocol.md`：Merchant Agent、capabilities、heartbeat/stale、Conversation/Message、Agent token 生命周期。
 - `optimization-directions.md`：shared service layer、FTS/search scaling、显式 migration、domain exception、LLM tool contract consolidation。
-- `code-review-2026-05-21.md`、`code-review-2026-06-04.md`、`code-review-2026-07-07.md`、`shopping-cli-code-review-2026-07-22.docx`：认证、并发、搜索、插件、公开/私有序列化和生产化风险。
-- `p2-remediation-2026-07-24.md`、`p3-remediation-2026-07-24.md`：资源限制、token 生命周期、HTTPS、日志、CI、Ruff/Mypy、发布制品等整改已形成的新工程基线。
+- `shopping-cli-code-review-2026-07-22.docx`：认证、并发、搜索、插件、公开/私有序列化和生产化风险。
+- `p3-remediation-2026-07-24.md`：资源限制、token 生命周期、HTTPS、日志、CI、Ruff/Mypy、发布制品等整改已形成的新工程基线。
 - `migration-from-shopping.md`：legacy import 只迁移 Merchant/Product/Public Catalog/Stock，继续忽略 transaction/payment-like records。
 
 ---
@@ -2164,7 +2164,7 @@ Catalog 的核心原则是：
 
 # Appendix D — v1.2 修订摘要
 
-本修订吸收 `design-review-a2a-v1.1-2026-08-06.md`：
+本修订吸收 v1.1 设计评审结论：
 
 1. Binding 决策从“待办清单”升级为有 Proposed Direction / Owner / Freeze Milestone 的 Decision Table；
 2. Pin A2A Agent Card / Protocol v1.0.0；
