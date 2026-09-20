@@ -18,6 +18,7 @@
     "scripts/shopping_agent.py",
     "scripts/shopping_api.py",
     "scripts/shopping_registry.py",
+    "scripts/wechat_bridge.py",
     "scripts/quality.sh",
     "scripts/verify_release.sh",
     "scripts/verify.sh",
@@ -31,7 +32,8 @@
   "bin": {
     "shopping-cli": "scripts/shopping.py",
     "shopping-cli-api": "scripts/shopping_api.py",
-    "shopping-cli-agent": "scripts/shopping_agent.py"
+    "shopping-cli-agent": "scripts/shopping_agent.py",
+    "shopping-cli-wechat-bridge": "scripts/wechat_bridge.py"
   },
   "scripts": {
     "install:agents": "bash scripts/install.sh --both",

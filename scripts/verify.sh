@@ -7,6 +7,7 @@ DB_FILE="$TMP_DIR/shopping-cli.sqlite"
 
 python3 "$ROOT_DIR/scripts/shopping.py" --help >/dev/null
 python3 "$ROOT_DIR/scripts/shopping_registry.py" --help >/dev/null
+python3 "$ROOT_DIR/scripts/wechat_bridge.py" --help >/dev/null
 bash "$ROOT_DIR/scripts/install.sh" --both --dry-run >/dev/null
 python3 -m pytest "$ROOT_DIR/tests" -q
 node --test "$ROOT_DIR/tests/shopping_plugin.test.mjs"

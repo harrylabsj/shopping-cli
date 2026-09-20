@@ -17,6 +17,7 @@ license = {file = "LICENSE"}
 shopping-cli = "shopping_cli.cli:main"
 shopping-cli-api = "shopping_cli.api.server:main"
 shopping-cli-agent = "shopping_cli.agents.agent_cli:main"
+shopping-cli-wechat-bridge = "shopping_cli.wechat.bridge:main"
 
 [project.optional-dependencies]
 api = [
