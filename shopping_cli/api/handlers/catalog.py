@@ -19,7 +19,13 @@ from shopping_cli.core.money_authority import (
 )
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api import idempotency
-from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict, NotFoundError
+from shopping_cli.core.errors import (
+    AuthError,
+    ConflictError,
+    IdempotencyConflict,
+    NotFoundError,
+    ValidationError,
+)
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session
@@ -442,6 +448,7 @@ def create_product_exact_api(
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = str(require_field(payload, "merchant_id"))
+    _require_exact_currency_table(payload)
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
         product = catalog.create_product_exact(
@@ -473,17 +480,28 @@ def update_product_money_exact_api(
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = str(require_field(payload, "merchant_id"))
+    _require_exact_currency_table(payload)
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
+        current = exact_product_money(conn, merchant_id, sku)
         update_product_money_exact(
             conn,
             merchant_id=merchant_id,
             sku=sku,
             expected_authority_version=int(require_field(payload, "expected_authority_version")),
             price_minor=str(require_field(payload, "price_minor")),
-            floor_price_minor=str(require_field(payload, "floor_price_minor")),
+            # The HTTP Workbench path changes the public price only. Private floor
+            # remains server-side and cannot enter a general candidate/action snapshot.
+            floor_price_minor=current.floor_price_minor,
         )
         return {"ok": True, "product": _exact_product_projection(conn, merchant_id, sku)}
+
+
+def _require_exact_currency_table(payload: dict[str, Any]) -> None:
+    if str(payload.get("currency_table_version") or "") != CURRENCY_TABLE_VERSION:
+        raise ValidationError(
+            f"currency_table_version must be {CURRENCY_TABLE_VERSION}"
+        )
 
 
 def _owner_merchant_from_payload(conn: Any, payload: dict[str, Any] | None) -> str:

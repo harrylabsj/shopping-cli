@@ -83,6 +83,7 @@ class ExactMoneyApiTest(unittest.TestCase):
                 floor_price_minor="1000",
                 stock=3,
                 currency="CNY",
+                currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
                 expected_authority_version=1,
             ),
             self.require_token,
@@ -94,7 +95,7 @@ class ExactMoneyApiTest(unittest.TestCase):
             self.payload(
                 merchant_id="m1",
                 price_minor="1200",
-                floor_price_minor="1000",
+                currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
                 expected_authority_version=1,
             ),
             self.require_token,
