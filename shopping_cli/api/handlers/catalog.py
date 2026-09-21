@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import hmac
+import json
 import sqlite3
 from typing import Any
 
@@ -28,7 +29,7 @@ from shopping_cli.core.errors import (
 )
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import token_digest
-from shopping_cli.db.session import db_session
+from shopping_cli.db.session import db_session, now_iso
 from shopping_cli.services import tokens as token_service
 
 from .common import (
@@ -442,19 +443,146 @@ def get_product_exact(
         return {"ok": True, "product": _exact_product_projection(conn, merchant_id, sku)}
 
 
+def _operation_id(payload: dict[str, Any]) -> str:
+    value = str(require_field(payload, "operation_id")).strip()
+    if len(value) > 200:
+        raise ValidationError("operation_id must be <= 200 characters")
+    return value
+
+
+def _operation_projection(row: Any) -> dict[str, Any]:
+    return {
+        "operation_id": str(row["operation_id"]),
+        "merchant_id": str(row["merchant_id"]),
+        "operation_kind": str(row["operation_kind"]),
+        "sku": str(row["sku"]),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _operation_replay(
+    conn: Any,
+    *,
+    operation_id: str,
+    merchant_id: str,
+    request_hash: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "select * from merchant_product_operations where operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if str(row["merchant_id"]) != merchant_id or str(row["request_hash"]) != request_hash:
+        raise IdempotencyConflict("operation_id was reused with a different merchant or request")
+    response = json.loads(str(row["response_json"]))
+    if not isinstance(response, dict):
+        raise ConflictError("stored operation receipt is invalid")
+    return {**response, "operation": _operation_projection(row), "idempotent": True}
+
+
+def _record_product_operation(
+    conn: Any,
+    *,
+    operation_id: str,
+    merchant_id: str,
+    operation_kind: str,
+    sku: str,
+    request_hash: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    created_at = now_iso()
+    conn.execute(
+        """
+        insert into merchant_product_operations(
+            operation_id, merchant_id, operation_kind, sku, request_hash,
+            status, response_json, created_at
+        ) values(?, ?, ?, ?, ?, 'succeeded', ?, ?)
+        """,
+        (
+            operation_id,
+            merchant_id,
+            operation_kind,
+            sku,
+            request_hash,
+            json.dumps(response, ensure_ascii=False, sort_keys=True),
+            created_at,
+        ),
+    )
+    row = conn.execute(
+        "select * from merchant_product_operations where operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    return _operation_projection(row)
+
+
+def get_product_operation_exact(
+    db_path: str | Path,
+    operation_id: str,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    merchant_id = str(require_field(payload, "merchant_id"))
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        row = conn.execute(
+            "select * from merchant_product_operations where operation_id=? and merchant_id=?",
+            (operation_id, merchant_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Unknown merchant product operation: {operation_id}")
+        response = json.loads(str(row["response_json"]))
+        return {
+            "ok": True,
+            "operation": _operation_projection(row),
+            "result": response if isinstance(response, dict) else {},
+        }
+
+
 def create_product_exact_api(
     db_path: str | Path,
     payload: dict[str, Any],
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = str(require_field(payload, "merchant_id"))
+    operation_id = _operation_id(payload)
+    sku = str(require_field(payload, "sku"))
     _require_exact_currency_table(payload)
+    request_hash = idempotency.request_hash(
+        {
+            "operation_kind": "exact_product_create",
+            "merchant_id": merchant_id,
+            "sku": sku,
+            "title": str(require_field(payload, "title")),
+            "price_minor": str(require_field(payload, "price_minor")),
+            "floor_price_minor": str(payload.get("floor_price_minor") or "0"),
+            "stock": int(require_field(payload, "stock")),
+            "currency": str(payload.get("currency") or "CNY"),
+            "currency_table_version": str(payload.get("currency_table_version") or ""),
+            "expected_authority_version": int(require_field(payload, "expected_authority_version")),
+            "category": str(payload.get("category") or ""),
+            "tags": payload.get("tags") or [],
+            "description": str(payload.get("description") or ""),
+            "delivery_attributes": payload.get("delivery_attributes") or [],
+            "handoff_destination": str(payload.get("handoff_destination") or ""),
+        }
+    )
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
+        conn.execute("begin immediate")
+        replay = _operation_replay(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
         product = catalog.create_product_exact(
             conn,
             merchant_id,
-            str(require_field(payload, "sku")),
+            sku,
             str(require_field(payload, "title")),
             str(require_field(payload, "price_minor")),
             int(require_field(payload, "stock")),
@@ -467,10 +595,21 @@ def create_product_exact_api(
             delivery_attributes=payload.get("delivery_attributes") or [],
             handoff_destination=str(payload.get("handoff_destination") or ""),
         )
-        return {
+        response = {
             "ok": True,
             "product": _exact_product_projection(conn, merchant_id, str(product["sku"])),
+            "idempotent": False,
         }
+        response["operation"] = _record_product_operation(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            operation_kind="exact_product_create",
+            sku=sku,
+            request_hash=request_hash,
+            response=response,
+        )
+        return response
 
 
 def update_product_money_exact_api(
@@ -480,9 +619,29 @@ def update_product_money_exact_api(
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = str(require_field(payload, "merchant_id"))
+    operation_id = _operation_id(payload)
     _require_exact_currency_table(payload)
+    request_hash = idempotency.request_hash(
+        {
+            "operation_kind": "exact_product_money_update",
+            "merchant_id": merchant_id,
+            "sku": sku,
+            "price_minor": str(require_field(payload, "price_minor")),
+            "currency_table_version": str(payload.get("currency_table_version") or ""),
+            "expected_authority_version": int(require_field(payload, "expected_authority_version")),
+        }
+    )
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
+        conn.execute("begin immediate")
+        replay = _operation_replay(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
         current = exact_product_money(conn, merchant_id, sku)
         update_product_money_exact(
             conn,
@@ -494,7 +653,21 @@ def update_product_money_exact_api(
             # remains server-side and cannot enter a general candidate/action snapshot.
             floor_price_minor=current.floor_price_minor,
         )
-        return {"ok": True, "product": _exact_product_projection(conn, merchant_id, sku)}
+        response = {
+            "ok": True,
+            "product": _exact_product_projection(conn, merchant_id, sku),
+            "idempotent": False,
+        }
+        response["operation"] = _record_product_operation(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            operation_kind="exact_product_money_update",
+            sku=sku,
+            request_hash=request_hash,
+            response=response,
+        )
+        return response
 
 
 def _require_exact_currency_table(payload: dict[str, Any]) -> None:

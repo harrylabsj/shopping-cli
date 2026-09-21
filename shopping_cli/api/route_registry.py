@@ -30,6 +30,7 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/v1/merchant/products/exact": {"merchants"},
     "/v1/merchant/products/{sku}/exact": {"merchants"},
     "/v1/merchant/products/{sku}/money": {"merchants"},
+    "/v1/merchant/product-operations/{operation_id}": {"merchants"},
     "/search/products": {"marketplace"},
     "/search/merchants": {"marketplace"},
     "/channels/messages": {"marketplace", "conversations"},

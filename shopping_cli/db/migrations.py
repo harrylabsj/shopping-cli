@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29
 
 
 @dataclass(frozen=True)
@@ -579,6 +579,32 @@ def migration_028_exact_money_authority(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_029_merchant_product_operation_receipts(conn: sqlite3.Connection) -> None:
+    """Operation-scoped receipts for exact Workbench product writes."""
+    conn.execute(
+        """
+        create table if not exists merchant_product_operations (
+            operation_id text primary key,
+            merchant_id text not null,
+            operation_kind text not null
+                check(operation_kind in ('exact_product_create','exact_product_money_update')),
+            sku text not null,
+            request_hash text not null,
+            status text not null check(status in ('succeeded')),
+            response_json text not null,
+            created_at text not null,
+            foreign key (merchant_id) references merchants(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        create index if not exists idx_merchant_product_operations_owner
+        on merchant_product_operations(merchant_id, created_at, operation_id)
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -601,6 +627,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(26, "product_pricing_boundaries", migration_026_product_pricing_boundaries),
     Migration(27, "delivery_times", migration_027_delivery_times),
     Migration(28, "exact_money_authority", migration_028_exact_money_authority),
+    Migration(29, "merchant_product_operation_receipts", migration_029_merchant_product_operation_receipts),
 )
 
 

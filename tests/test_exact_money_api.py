@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 from pathlib import Path
 
 from shopping_cli.api.handlers import catalog as catalog_handlers
 from shopping_cli.core.catalog import create_merchant, create_product
-from shopping_cli.core.errors import AuthError, ConflictError
+from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict
 from shopping_cli.core.money_authority import (
     activate_exact_money,
     begin_money_migration,
@@ -85,6 +86,7 @@ class ExactMoneyApiTest(unittest.TestCase):
                 currency="CNY",
                 currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
                 expected_authority_version=1,
+                operation_id="operation-create-sku-b",
             ),
             self.require_token,
         )
@@ -97,6 +99,7 @@ class ExactMoneyApiTest(unittest.TestCase):
                 price_minor="1200",
                 currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
                 expected_authority_version=1,
+                operation_id="operation-update-sku-b",
             ),
             self.require_token,
         )
@@ -108,6 +111,91 @@ class ExactMoneyApiTest(unittest.TestCase):
             self.require_token,
         )
         self.assertEqual(detail["product"]["authority_version"], 1)
+        receipt = catalog_handlers.get_product_operation_exact(
+            self.db_path,
+            "operation-update-sku-b",
+            self.payload(merchant_id="m1"),
+            self.require_token,
+        )
+        self.assertEqual(receipt["operation"]["status"], "succeeded")
+        self.assertEqual(receipt["operation"]["operation_kind"], "exact_product_money_update")
+        self.assertEqual(receipt["operation"]["sku"], "sku-b")
+
+    def test_exact_write_operation_receipt_replays_and_rejects_conflicts(self) -> None:
+        self.activate()
+        payload = self.payload(
+            merchant_id="m1",
+            sku="sku-b",
+            title="B",
+            price_minor="1234",
+            floor_price_minor="1000",
+            stock=3,
+            currency="CNY",
+            currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
+            expected_authority_version=1,
+            operation_id="operation-replay",
+        )
+        first = catalog_handlers.create_product_exact_api(
+            self.db_path, payload, self.require_token
+        )
+        replay = catalog_handlers.create_product_exact_api(
+            self.db_path, payload, self.require_token
+        )
+        self.assertFalse(first["idempotent"])
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(first["product"], replay["product"])
+        with self.assertRaises(IdempotencyConflict):
+            catalog_handlers.create_product_exact_api(
+                self.db_path,
+                {**payload, "price_minor": "1200"},
+                self.require_token,
+            )
+        with db_session(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) count from merchant_product_operations where operation_id=?",
+                    ("operation-replay",),
+                ).fetchone()["count"],
+                1,
+            )
+
+    def test_concurrent_exact_create_commits_one_effect_and_one_receipt(self) -> None:
+        self.activate()
+        payload = self.payload(
+            merchant_id="m1",
+            sku="sku-concurrent",
+            title="Concurrent",
+            price_minor="7000",
+            floor_price_minor="6000",
+            stock=4,
+            currency="CNY",
+            currency_table_version="kiwi-workbench-currency-v1-2026-09-21",
+            expected_authority_version=1,
+            operation_id="operation-concurrent",
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: catalog_handlers.create_product_exact_api(
+                        self.db_path, payload, self.require_token
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual(sorted(result["idempotent"] for result in results), [False, True])
+        with db_session(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) count from products where sku='sku-concurrent'"
+                ).fetchone()["count"],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) count from merchant_product_operations where operation_id='operation-concurrent'"
+                ).fetchone()["count"],
+                1,
+            )
 
     def test_wrong_or_missing_token_is_rejected(self) -> None:
         self.activate()

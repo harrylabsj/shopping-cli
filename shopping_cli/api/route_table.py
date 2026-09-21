@@ -108,6 +108,14 @@ def _update_product_money_exact(
     )
 
 
+def _get_product_operation_exact(
+    db_path: str | Path, operation_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return catalog_handlers.get_product_operation_exact(
+        db_path, operation_id, payload, _require_merchant_token
+    )
+
+
 def _get_product(db_path: str | Path, sku: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return catalog_handlers.get_product(db_path, sku, payload)
 
@@ -443,6 +451,13 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"PATCH"},
         "/v1/merchant/products/{sku}/money",
         lambda db_path, payload, query, sku: _update_product_money_exact(db_path, sku, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/product-operations/{operation_id}",
+        lambda db_path, payload, query, operation_id: _get_product_operation_exact(
+            db_path, operation_id, {**payload, **query}
+        ),
     ),
     RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query, payload)),
     RouteEntry(

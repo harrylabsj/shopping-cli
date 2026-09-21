@@ -44,6 +44,7 @@ from shopping_cli.api.route_table import (
     _get_merchant_private_config,
     _get_product,
     _get_product_exact,
+    _get_product_operation_exact,
     _health,
     _human_review_queue,
     _ingest_channel_message,
@@ -270,6 +271,18 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _update_product_money_exact(
             db_path, sku, api_auth.payload_with_auth(payload, authorization)
+        )
+
+    @app.get("/v1/merchant/product-operations/{operation_id}")
+    def get_product_operation_exact(
+        operation_id: str,
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_product_operation_exact(
+            db_path,
+            operation_id,
+            api_auth.payload_with_auth({"merchant_id": merchant_id}, authorization),
         )
 
     @app.get("/v1/merchant/listings/projections")
