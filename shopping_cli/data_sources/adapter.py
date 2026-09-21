@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
+from shopping_cli.core.money_authority import assert_legacy_money_write_allowed
+
 SOURCE_LOCAL = "local"
 AUTHORITY_LOCAL = "LOCAL_AUTHORITATIVE"
 AUTHORITY_UPSTREAM = "UPSTREAM_PROXY"
@@ -134,6 +136,7 @@ def upsert_product_row(
     fresh_until: str,
 ) -> None:
     """共享 upsert（ERP / CSV-Excel 同款语义：source 标注 + provenance 回填）。"""
+    assert_legacy_money_write_allowed(conn, merchant_id)
     conn.execute(
         """
         insert into products(

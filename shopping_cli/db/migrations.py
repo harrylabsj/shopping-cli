@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 27
+CURRENT_SCHEMA_VERSION = 28
 
 
 @dataclass(frozen=True)
@@ -552,6 +552,33 @@ def migration_027_delivery_times(conn: sqlite3.Connection) -> None:
     ensure_column(conn, "delivery_rules", "delivery_times_json", "text not null default '{}'")
 
 
+def migration_028_exact_money_authority(conn: sqlite3.Connection) -> None:
+    """Workbench 精确金额迁移骨架；不从历史 REAL 猜回 minor units。
+
+    新列保持 NULL，直到商家进入 FROZEN 并从权威源逐 SKU 重新读取十进制文本。
+    只有全量 staging/对账完成后才切到 EXACT_MINOR；REAL 此后只是派生兼容投影。
+    """
+    ensure_column(conn, "products", "price_minor_text", "text")
+    ensure_column(conn, "products", "floor_price_minor_text", "text")
+    ensure_column(conn, "products", "money_currency_table_version", "text not null default ''")
+    ensure_column(conn, "delivery_rules", "fee_minor_text", "text")
+    ensure_column(conn, "delivery_rules", "money_currency_table_version", "text not null default ''")
+    conn.execute(
+        """
+        create table if not exists merchant_money_authority (
+            merchant_id text primary key,
+            mode text not null default 'LEGACY_REAL'
+                check(mode in ('LEGACY_REAL','FROZEN','EXACT_MINOR')),
+            authority_version integer not null default 0,
+            started_at text,
+            activated_at text,
+            updated_at text not null,
+            foreign key (merchant_id) references merchants(id)
+        )
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -573,6 +600,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(25, "negotiation_decision_idempotency", migration_025_negotiation_decision_idempotency),
     Migration(26, "product_pricing_boundaries", migration_026_product_pricing_boundaries),
     Migration(27, "delivery_times", migration_027_delivery_times),
+    Migration(28, "exact_money_authority", migration_028_exact_money_authority),
 )
 
 

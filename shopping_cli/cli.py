@@ -40,6 +40,15 @@ from shopping_cli.cli_catalog_commands import (
     cmd_merchant_create,
     cmd_merchant_list,
     cmd_merchant_update,
+    cmd_money_abort,
+    cmd_money_activate,
+    cmd_money_begin,
+    cmd_money_delivery_update,
+    cmd_money_product_create,
+    cmd_money_product_update,
+    cmd_money_report,
+    cmd_money_stage_delivery,
+    cmd_money_stage_product,
     cmd_policy_add,
     cmd_policy_list,
     cmd_policy_show,
@@ -569,6 +578,68 @@ def build_parser() -> argparse.ArgumentParser:
     product_update.add_argument("--handoff-destination", help="KTH 成交入口（每商品一个；URL 类为 https URL，联系/会话类为 opaque ref）")
     product_update.add_argument("--format", choices=["text", "json"], default="text")
     product_update.set_defaults(func=cmd_product_update)
+
+    money = subparsers.add_parser("money", help="Migrate and manage exact Workbench money")
+    money_sub = money.add_subparsers(dest="money_command", required=True)
+    money_begin = money_sub.add_parser("begin", help="Freeze legacy money writes for one merchant")
+    money_begin.add_argument("--merchant", required=True)
+    money_begin.add_argument("--format", choices=["text", "json"], default="json")
+    money_begin.set_defaults(func=cmd_money_begin)
+    money_report = money_sub.add_parser("report", help="Show exact-money migration coverage")
+    money_report.add_argument("--merchant", required=True)
+    money_report.add_argument("--format", choices=["text", "json"], default="json")
+    money_report.set_defaults(func=cmd_money_report)
+    money_stage_product = money_sub.add_parser(
+        "stage-product", help="Stage authoritative product minor-unit strings while frozen"
+    )
+    money_stage_product.add_argument("--merchant", required=True)
+    money_stage_product.add_argument("--sku", required=True)
+    money_stage_product.add_argument("--currency", default="CNY")
+    money_stage_product.add_argument("--price-minor", required=True)
+    money_stage_product.add_argument("--floor-price-minor", required=True)
+    money_stage_product.add_argument("--format", choices=["text", "json"], default="json")
+    money_stage_product.set_defaults(func=cmd_money_stage_product)
+    money_stage_delivery = money_sub.add_parser(
+        "stage-delivery", help="Stage authoritative delivery fee minor units while frozen"
+    )
+    money_stage_delivery.add_argument("--merchant", required=True)
+    money_stage_delivery.add_argument("--currency", default="CNY")
+    money_stage_delivery.add_argument("--fee-minor", required=True)
+    money_stage_delivery.add_argument("--format", choices=["text", "json"], default="json")
+    money_stage_delivery.set_defaults(func=cmd_money_stage_delivery)
+    money_activate = money_sub.add_parser("activate", help="Atomically switch one merchant to exact money")
+    money_activate.add_argument("--merchant", required=True)
+    money_activate.add_argument("--format", choices=["text", "json"], default="json")
+    money_activate.set_defaults(func=cmd_money_activate)
+    money_abort = money_sub.add_parser("abort", help="Abort a frozen migration and clear staged values")
+    money_abort.add_argument("--merchant", required=True)
+    money_abort.add_argument("--format", choices=["text", "json"], default="json")
+    money_abort.set_defaults(func=cmd_money_abort)
+    money_create = money_sub.add_parser("create-product", help="Create a product under exact authority")
+    money_create.add_argument("--merchant", required=True)
+    money_create.add_argument("--sku", required=True)
+    money_create.add_argument("--title", required=True)
+    money_create.add_argument("--price-minor", required=True)
+    money_create.add_argument("--floor-price-minor", default="0")
+    money_create.add_argument("--stock", required=True, type=non_negative_int)
+    money_create.add_argument("--currency", default="CNY")
+    money_create.add_argument("--authority-version", required=True, type=positive_int)
+    money_create.add_argument("--format", choices=["text", "json"], default="json")
+    money_create.set_defaults(func=cmd_money_product_create)
+    money_update = money_sub.add_parser("update-product", help="Update exact product money")
+    money_update.add_argument("--merchant", required=True)
+    money_update.add_argument("--sku", required=True)
+    money_update.add_argument("--price-minor", required=True)
+    money_update.add_argument("--floor-price-minor", required=True)
+    money_update.add_argument("--authority-version", required=True, type=positive_int)
+    money_update.add_argument("--format", choices=["text", "json"], default="json")
+    money_update.set_defaults(func=cmd_money_product_update)
+    money_delivery = money_sub.add_parser("update-delivery", help="Update exact delivery fee")
+    money_delivery.add_argument("--merchant", required=True)
+    money_delivery.add_argument("--fee-minor", required=True)
+    money_delivery.add_argument("--authority-version", required=True, type=positive_int)
+    money_delivery.add_argument("--format", choices=["text", "json"], default="json")
+    money_delivery.set_defaults(func=cmd_money_delivery_update)
 
     policy = subparsers.add_parser("policy", help="Manage merchant policy reference clauses")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)

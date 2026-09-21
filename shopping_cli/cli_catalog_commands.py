@@ -9,6 +9,7 @@ from shopping_cli.cli_common import db_path_from_args, emit
 from shopping_cli.core.catalog import (
     create_merchant,
     create_product,
+    create_product_exact,
     delivery_rule,
     list_merchants,
     remove_delivery_time,
@@ -20,6 +21,16 @@ from shopping_cli.core.catalog import (
     update_merchant,
     update_product,
     upsert_delivery_rule,
+)
+from shopping_cli.core.money_authority import (
+    abort_money_migration,
+    activate_exact_money,
+    begin_money_migration,
+    money_migration_report,
+    stage_delivery_fee,
+    stage_product_money,
+    update_delivery_fee_exact,
+    update_product_money_exact,
 )
 from shopping_cli.core.policies import create_policy, list_policies, policy_summary, search_policies
 from shopping_cli.db.session import db_session
@@ -195,6 +206,95 @@ def cmd_product_update(args: argparse.Namespace) -> None:
             handoff_destination=args.handoff_destination,
         )
     emit({"ok": True, "product": product, "message": f"Product updated: {args.sku}"}, args.format)
+
+
+def cmd_money_begin(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        version = begin_money_migration(conn, args.merchant)
+        report = money_migration_report(conn, args.merchant)
+    emit({"ok": True, "authority_version": version, "report": report}, args.format)
+
+
+def cmd_money_report(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        report = money_migration_report(conn, args.merchant)
+    emit({"ok": True, "report": report}, args.format)
+
+
+def cmd_money_stage_product(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        money = stage_product_money(
+            conn,
+            merchant_id=args.merchant,
+            sku=args.sku,
+            currency=args.currency,
+            price_minor=args.price_minor,
+            floor_price_minor=args.floor_price_minor,
+        )
+    emit({"ok": True, "money": money.__dict__}, args.format)
+
+
+def cmd_money_stage_delivery(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        fee = stage_delivery_fee(
+            conn,
+            merchant_id=args.merchant,
+            currency=args.currency,
+            fee_minor=args.fee_minor,
+        )
+    emit({"ok": True, "merchant_id": args.merchant, "fee_minor": fee}, args.format)
+
+
+def cmd_money_activate(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        version = activate_exact_money(conn, args.merchant)
+    emit({"ok": True, "merchant_id": args.merchant, "authority_version": version}, args.format)
+
+
+def cmd_money_abort(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        abort_money_migration(conn, args.merchant)
+    emit({"ok": True, "merchant_id": args.merchant, "mode": "LEGACY_REAL"}, args.format)
+
+
+def cmd_money_product_create(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        product = create_product_exact(
+            conn,
+            args.merchant,
+            args.sku,
+            args.title,
+            args.price_minor,
+            args.stock,
+            expected_authority_version=args.authority_version,
+            floor_price_minor=args.floor_price_minor,
+            currency=args.currency,
+        )
+    emit({"ok": True, "product": product}, args.format)
+
+
+def cmd_money_product_update(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        money = update_product_money_exact(
+            conn,
+            merchant_id=args.merchant,
+            sku=args.sku,
+            expected_authority_version=args.authority_version,
+            price_minor=args.price_minor,
+            floor_price_minor=args.floor_price_minor,
+        )
+    emit({"ok": True, "money": money.__dict__}, args.format)
+
+
+def cmd_money_delivery_update(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        fee = update_delivery_fee_exact(
+            conn,
+            merchant_id=args.merchant,
+            expected_authority_version=args.authority_version,
+            fee_minor=args.fee_minor,
+        )
+    emit({"ok": True, "merchant_id": args.merchant, "fee_minor": fee}, args.format)
 
 
 def cmd_search_products(args: argparse.Namespace) -> None:

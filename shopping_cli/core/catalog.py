@@ -11,6 +11,14 @@ from urllib.parse import urlparse
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event
+from shopping_cli.core.money_authority import (
+    CURRENCY_TABLE_VERSION,
+    assert_legacy_delivery_projection_unchanged,
+    assert_legacy_money_write_allowed,
+    minor_to_legacy_major,
+    money_mode,
+    validate_minor_text,
+)
 from shopping_cli.core.limits import MAX_PERSISTED_TEXT_CHARS, MAX_SHORT_TEXT_CHARS, bounded_string_list, bounded_text
 from shopping_cli.core.limits import safe_non_negative_float as _safe_non_negative_float, safe_non_negative_int as _safe_non_negative_int
 from shopping_cli.core.catalog_text import (
@@ -353,6 +361,7 @@ def upsert_delivery_rule(
     if radius_km < 0:
         raise ValidationError("delivery radius must be non-negative")
     require_merchant(conn, merchant_id)
+    assert_legacy_delivery_projection_unchanged(conn, merchant_id, currency, fee)
     now = now_iso()
     conn.execute(
         """
@@ -402,8 +411,8 @@ def decode_delivery_times(value: str | None) -> dict[str, dict[str, int]]:
         if not isinstance(entry, dict):
             continue
         try:
-            min_days = int(entry.get("min_days"))
-            max_days = int(entry.get("max_days"))
+            min_days = int(str(entry.get("min_days")))
+            max_days = int(str(entry.get("max_days")))
         except (TypeError, ValueError):
             continue
         if min_days < 1 or max_days < min_days or max_days > MAX_DELIVERY_DAYS:
@@ -546,6 +555,7 @@ def create_product(
         raise ValidationError("product sku is required")
     if not title:
         raise ValidationError("product title is required")
+    assert_legacy_money_write_allowed(conn, merchant_id)
     price = _price_with_precision(price, "--price must be finite")
     stock = _whole_int(stock, "--stock must be a whole number")
     if stock < 0:
@@ -592,6 +602,98 @@ def create_product(
     return product_summary(conn, sku)
 
 
+def create_product_exact(
+    conn: sqlite3.Connection,
+    merchant_id: str,
+    sku: str,
+    title: str,
+    price_minor: str,
+    stock: int,
+    *,
+    expected_authority_version: int,
+    floor_price_minor: str = "0",
+    currency: str = "CNY",
+    category: str = "",
+    tags: str | list[str] | None = None,
+    description: str = "",
+    delivery_attributes: str | list[str] | None = None,
+    handoff_destination: str = "",
+    max_discount_percent: float = 0.0,
+    promotions: list | None = None,
+) -> dict[str, Any]:
+    """Create a product after a merchant has atomically switched to EXACT_MINOR.
+
+    REAL fields are written only as compatibility projections derived from the exact strings;
+    they are never accepted as caller authority on this path.
+    """
+    merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
+    sku = bounded_text(sku, "product sku", MAX_SHORT_TEXT_CHARS).strip()
+    title = bounded_text(title, "product title", MAX_SHORT_TEXT_CHARS).strip()
+    description = bounded_text(description, "product description")
+    category = bounded_text(category, "product category", MAX_SHORT_TEXT_CHARS)
+    currency = bounded_text(currency, "currency", 16)
+    handoff_destination = bounded_text(
+        handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS
+    )
+    _validate_handoff_destination(handoff_destination)
+    if not merchant_id or not sku or not title:
+        raise ValidationError("merchant id, product sku and product title are required")
+    mode, version = money_mode(conn, merchant_id)
+    if mode != "EXACT_MINOR" or version != expected_authority_version:
+        raise ConflictError("exact money authority version changed")
+    price_exact = validate_minor_text(price_minor, "price_minor")
+    floor_exact = validate_minor_text(floor_price_minor, "floor_price_minor")
+    if int(floor_exact) > int(price_exact):
+        raise ValidationError("floor_price_minor must not exceed price_minor")
+    stock = _whole_int(stock, "--stock must be a whole number")
+    if stock < 0:
+        raise ValidationError("--stock must be non-negative")
+    max_discount_percent = _discount_percent(max_discount_percent, "--max-discount-percent")
+    promotions = parse_promotions(promotions)
+    require_merchant(conn, merchant_id)
+    price = minor_to_legacy_major(currency, price_exact)
+    floor_price = minor_to_legacy_major(currency, floor_exact)
+    now = now_iso()
+    try:
+        conn.execute(
+            """
+            insert into products(
+                sku, merchant_id, title, description, category, tags_json, price,
+                currency, price_minor_text, floor_price_minor_text,
+                money_currency_table_version, stock, delivery_attributes_json,
+                handoff_destination, floor_price, max_discount_percent, promotions_json,
+                active, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                sku,
+                merchant_id,
+                title,
+                description,
+                category,
+                encode_json(parse_tags(tags)),
+                price,
+                currency,
+                price_exact,
+                floor_exact,
+                CURRENCY_TABLE_VERSION,
+                stock,
+                encode_json(parse_tags(delivery_attributes)),
+                handoff_destination,
+                floor_price,
+                max_discount_percent,
+                encode_json(promotions),
+                now,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ConflictError(f"Product already exists: {sku}") from exc
+    sync_product_search_index(conn, sku=sku)
+    _audit_catalog(conn, merchant_id, "product_created_exact", {"sku": sku, "merchant_id": merchant_id})
+    return product_summary(conn, sku)
+
+
 def update_product(
     conn: sqlite3.Connection,
     sku: str,
@@ -612,6 +714,9 @@ def update_product(
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
         raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
+    product_merchant_id = str(product["merchant_id"])
+    if price is not None or floor_price is not None or currency is not None:
+        assert_legacy_money_write_allowed(conn, product_merchant_id)
     if title is not None:
         title = bounded_text(title, "product title", MAX_SHORT_TEXT_CHARS).strip()
         if not title:

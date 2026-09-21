@@ -34,6 +34,11 @@ SCHEMA = [
         tags_json text not null default '[]',
         price real not null,
         currency text not null default 'CNY',
+        -- v28 — Workbench 精确金额权威。迁移阶段 nullable，严禁从历史 REAL
+        -- 自动乘 100 回填；EXACT 模式下这两列是权威，REAL 仅为派生兼容投影。
+        price_minor_text text,
+        floor_price_minor_text text,
+        money_currency_table_version text not null default '',
         stock integer not null,
         delivery_attributes_json text not null default '[]',
         -- v22 — 每商品成交入口（KTH handoff destination_ref）：商家自行维护的
@@ -64,6 +69,18 @@ SCHEMA = [
     )
     """,
     """
+    create table if not exists merchant_money_authority (
+        merchant_id text primary key,
+        mode text not null default 'LEGACY_REAL'
+            check(mode in ('LEGACY_REAL','FROZEN','EXACT_MINOR')),
+        authority_version integer not null default 0,
+        started_at text,
+        activated_at text,
+        updated_at text not null,
+        foreign key (merchant_id) references merchants(id)
+    )
+    """,
+    """
     create table if not exists policies (
         merchant_id text not null,
         code text not null,
@@ -85,6 +102,8 @@ SCHEMA = [
         service_area text not null default '',
         fee real not null default 0,
         currency text not null default 'CNY',
+        fee_minor_text text,
+        money_currency_table_version text not null default '',
         eta_minutes integer not null default 0,
         radius_km real not null default 0,
         notes text not null default '',

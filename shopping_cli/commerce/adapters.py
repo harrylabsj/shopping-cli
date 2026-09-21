@@ -24,6 +24,7 @@ from shopping_cli.commerce.data_source import (
     ProductFact,
 )
 from shopping_cli.data_sources.erp_source import AUTHORITY_ERP, SOURCE_ERP, SOURCE_LOCAL
+from shopping_cli.core.money_authority import exact_product_money, money_mode
 
 
 def _now_iso() -> str:
@@ -62,6 +63,18 @@ def _lead_days_from_eta(conn: sqlite3.Connection, merchant_id: str) -> int:
     return max(1, math.ceil(eta_minutes / 1440))
 
 
+def _authoritative_price_minor(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
+    merchant_id = str(row["merchant_id"])
+    mode, _ = money_mode(conn, merchant_id)
+    if mode == "FROZEN":
+        raise AuthorityConflictError(
+            f"merchant {merchant_id} money migration is frozen; quoting is disabled"
+        )
+    if mode == "EXACT_MINOR":
+        return int(exact_product_money(conn, merchant_id, str(row["sku"])).price_minor)
+    return _minor_from_yuan(row["price"])
+
+
 class LocalCommerceDataSource:
     """本地录入数据源（LOCAL_AUTHORITATIVE，v0.3 §5）。"""
 
@@ -82,7 +95,7 @@ class LocalCommerceDataSource:
             sku=row["sku"],
             title=row["title"],
             category=row["category"],
-            price_minor=_minor_from_yuan(row["price"]),
+            price_minor=_authoritative_price_minor(self._conn, row),
             currency=row["currency"],
             stock=row["stock"],
             merchant_id=row["merchant_id"],
@@ -108,7 +121,7 @@ class LocalCommerceDataSource:
             sku=row["sku"],
             title=row["title"],
             category=row["category"],
-            price_minor=_minor_from_yuan(row["price"]),
+            price_minor=_authoritative_price_minor(self._conn, row),
             currency=row["currency"],
             stock=row["stock"],
             merchant_id=row["merchant_id"],
@@ -132,7 +145,7 @@ class LocalCommerceDataSource:
         if row is None:
             return None
         return CommerceField(
-            value=_minor_from_yuan(row["price"]),
+            value=_authoritative_price_minor(self._conn, row),
             authority_source=SOURCE_LOCAL,
             source_revision=row["source_revision"],
             observed_at=row["observed_at"],
@@ -204,7 +217,7 @@ class ErpCommerceDataSource:
             sku=row["sku"],
             title=row["title"],
             category=row["category"],
-            price_minor=_minor_from_yuan(row["price"]),
+            price_minor=_authoritative_price_minor(self._conn, row),
             currency=row["currency"],
             stock=row["stock"],
             merchant_id=row["merchant_id"],
@@ -230,7 +243,7 @@ class ErpCommerceDataSource:
             sku=row["sku"],
             title=row["title"],
             category=row["category"],
-            price_minor=_minor_from_yuan(row["price"]),
+            price_minor=_authoritative_price_minor(self._conn, row),
             currency=row["currency"],
             stock=row["stock"],
             merchant_id=row["merchant_id"],
@@ -254,7 +267,7 @@ class ErpCommerceDataSource:
         if row is None:
             return None
         return CommerceField(
-            value=_minor_from_yuan(row["price"]),
+            value=_authoritative_price_minor(self._conn, row),
             authority_source=AUTHORITY_ERP,
             source_revision=row["source_revision"],
             observed_at=row["observed_at"],

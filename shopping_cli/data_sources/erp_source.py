@@ -25,6 +25,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from shopping_cli.core.errors import ConflictError
+from shopping_cli.core.money_authority import assert_legacy_money_write_allowed
+
 SOURCE_LOCAL = "local"
 SOURCE_ERP = "erp"
 
@@ -395,6 +398,12 @@ def sync_erp_products(
                     f"sku {sku}: merchant_id {merchant_id!r} does not match actor "
                     f"merchant {config.allowed_merchant_id!r}; skipped"
                 )
+                report.skipped += 1
+                continue
+            try:
+                assert_legacy_money_write_allowed(conn, merchant_id)
+            except ConflictError as exc:
+                report.errors.append(f"sku {sku}: {exc}")
                 report.skipped += 1
                 continue
             # 归属冲突：SKU 已属于其他 merchant 的行绝不能被 feed 改划归属
