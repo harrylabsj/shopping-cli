@@ -11,9 +11,15 @@ from typing import Any
 from shopping_cli import VERSION
 from shopping_cli.config import deployment_profile_from, production_config_checks, validate_production_config
 from shopping_cli.core import catalog
+from shopping_cli.core.money_authority import (
+    CURRENCY_TABLE_VERSION,
+    exact_product_money,
+    money_mode,
+    update_product_money_exact,
+)
 from shopping_cli.api import auth as api_auth
 from shopping_cli.api import idempotency
-from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict
+from shopping_cli.core.errors import AuthError, ConflictError, IdempotencyConflict, NotFoundError
 from shopping_cli.core.harness import append_audit_event
 from shopping_cli.core.tokens import token_digest
 from shopping_cli.db.session import db_session
@@ -357,6 +363,127 @@ def update_product(
             promotions=payload.get("promotions") if "promotions" in payload else None,
         )
         return {"ok": True, "product": product}
+
+
+def _exact_product_projection(conn: Any, merchant_id: str, sku: str) -> dict[str, Any]:
+    product = catalog.product_summary(conn, sku)
+    if str(product.get("merchant_id") or "") != merchant_id:
+        raise NotFoundError(f"Unknown product SKU for merchant: {sku}")
+    money = exact_product_money(conn, merchant_id, sku)
+    return {
+        "sku": str(product["sku"]),
+        "merchant_id": merchant_id,
+        "title": str(product["title"]),
+        "description": str(product.get("description") or ""),
+        "category": str(product.get("category") or ""),
+        "tags": list(product.get("tags") or []),
+        "stock": int(product.get("stock") or 0),
+        "currency": money.currency,
+        "price_minor": money.price_minor,
+        "currency_table_version": CURRENCY_TABLE_VERSION,
+        "authority_version": money.authority_version,
+        "delivery_attributes": list(product.get("delivery_attributes") or []),
+        "handoff_destination": str(product.get("handoff_destination") or ""),
+    }
+
+
+def list_products_exact(
+    db_path: str | Path,
+    query: dict[str, Any],
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    merchant_id = str(require_field(query, "merchant_id"))
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        mode, authority_version = money_mode(conn, merchant_id)
+        if mode != "EXACT_MINOR":
+            raise ConflictError("exact money is not authoritative for this merchant")
+        limit = result_limit(query.get("limit"), default=50)
+        offset = result_offset(query.get("offset"))
+        rows = conn.execute(
+            "select sku from products where merchant_id=? order by sku limit ? offset ?",
+            (merchant_id, limit + 1, offset),
+        ).fetchall()
+        items = [_exact_product_projection(conn, merchant_id, str(row["sku"])) for row in rows[:limit]]
+        total = int(
+            conn.execute(
+                "select count(*) count from products where merchant_id=?",
+                (merchant_id,),
+            ).fetchone()["count"]
+        )
+        return {
+            "ok": True,
+            "merchant_id": merchant_id,
+            "money_mode": mode,
+            "authority_version": authority_version,
+            "currency_table_version": CURRENCY_TABLE_VERSION,
+            "items": items,
+            "total": total,
+            "next_offset": offset + limit if len(rows) > limit else None,
+        }
+
+
+def get_product_exact(
+    db_path: str | Path,
+    sku: str,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    merchant_id = str(require_field(payload, "merchant_id"))
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        return {"ok": True, "product": _exact_product_projection(conn, merchant_id, sku)}
+
+
+def create_product_exact_api(
+    db_path: str | Path,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    merchant_id = str(require_field(payload, "merchant_id"))
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        product = catalog.create_product_exact(
+            conn,
+            merchant_id,
+            str(require_field(payload, "sku")),
+            str(require_field(payload, "title")),
+            str(require_field(payload, "price_minor")),
+            int(require_field(payload, "stock")),
+            expected_authority_version=int(require_field(payload, "expected_authority_version")),
+            floor_price_minor=str(payload.get("floor_price_minor") or "0"),
+            currency=str(payload.get("currency") or "CNY"),
+            category=str(payload.get("category") or ""),
+            tags=payload.get("tags") or [],
+            description=str(payload.get("description") or ""),
+            delivery_attributes=payload.get("delivery_attributes") or [],
+            handoff_destination=str(payload.get("handoff_destination") or ""),
+        )
+        return {
+            "ok": True,
+            "product": _exact_product_projection(conn, merchant_id, str(product["sku"])),
+        }
+
+
+def update_product_money_exact_api(
+    db_path: str | Path,
+    sku: str,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    merchant_id = str(require_field(payload, "merchant_id"))
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        update_product_money_exact(
+            conn,
+            merchant_id=merchant_id,
+            sku=sku,
+            expected_authority_version=int(require_field(payload, "expected_authority_version")),
+            price_minor=str(require_field(payload, "price_minor")),
+            floor_price_minor=str(require_field(payload, "floor_price_minor")),
+        )
+        return {"ok": True, "product": _exact_product_projection(conn, merchant_id, sku)}
 
 
 def _owner_merchant_from_payload(conn: Any, payload: dict[str, Any] | None) -> str:

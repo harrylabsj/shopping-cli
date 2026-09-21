@@ -84,6 +84,30 @@ def _update_product(db_path: str | Path, sku: str, payload: dict[str, Any]) -> d
     return catalog_handlers.update_product(db_path, sku, payload, _require_merchant_token)
 
 
+def _list_products_exact(
+    db_path: str | Path, query: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    return catalog_handlers.list_products_exact(
+        db_path, query, payload, _require_merchant_token
+    )
+
+
+def _get_product_exact(db_path: str | Path, sku: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.get_product_exact(db_path, sku, payload, _require_merchant_token)
+
+
+def _create_product_exact(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.create_product_exact_api(db_path, payload, _require_merchant_token)
+
+
+def _update_product_money_exact(
+    db_path: str | Path, sku: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return catalog_handlers.update_product_money_exact_api(
+        db_path, sku, payload, _require_merchant_token
+    )
+
+
 def _get_product(db_path: str | Path, sku: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     return catalog_handlers.get_product(db_path, sku, payload)
 
@@ -399,6 +423,26 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
     RouteEntry({"GET"}, "/products/{sku}", lambda db_path, payload, query, sku: _get_product(db_path, sku, payload)),
     RouteEntry(
         {"PATCH"}, "/products/{sku}", lambda db_path, payload, query, sku: _update_product(db_path, sku, payload)
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/products/exact",
+        lambda db_path, payload, query, **kw: _list_products_exact(db_path, query, payload),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/products/exact",
+        lambda db_path, payload, query, **kw: _create_product_exact(db_path, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/products/{sku}/exact",
+        lambda db_path, payload, query, sku: _get_product_exact(db_path, sku, payload),
+    ),
+    RouteEntry(
+        {"PATCH"},
+        "/v1/merchant/products/{sku}/money",
+        lambda db_path, payload, query, sku: _update_product_money_exact(db_path, sku, payload),
     ),
     RouteEntry({"GET"}, "/search/products", lambda db_path, payload, query, **kw: _search_products(db_path, query, payload)),
     RouteEntry(

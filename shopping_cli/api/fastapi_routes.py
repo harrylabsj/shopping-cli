@@ -34,6 +34,7 @@ from shopping_cli.api.route_table import (
     _create_human_review,
     _create_merchant,
     _create_product,
+    _create_product_exact,
     _fail_agent_message,
     _get_agent,
     _get_conversation,
@@ -42,6 +43,7 @@ from shopping_cli.api.route_table import (
     _get_merchant,
     _get_merchant_private_config,
     _get_product,
+    _get_product_exact,
     _health,
     _human_review_queue,
     _ingest_channel_message,
@@ -49,6 +51,7 @@ from shopping_cli.api.route_table import (
     _list_agents,
     _list_listing_projections,
     _list_merchants,
+    _list_products_exact,
     _merchant_conversations,
     _negotiation_abandon_claim,
     _negotiation_abandon_stale_claims,
@@ -72,6 +75,7 @@ from shopping_cli.api.route_table import (
     _sync_erp,
     _update_merchant,
     _update_product,
+    _update_product_money_exact,
 )
 
 try:  # pragma: no cover - exercised when optional dependency is installed
@@ -224,6 +228,49 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _update_product(db_path, sku, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/v1/merchant/products/exact")
+    def list_products_exact(
+        merchant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _list_products_exact(
+            db_path,
+            {"merchant_id": merchant_id, "limit": limit, "offset": offset},
+            api_auth.payload_with_auth({}, authorization),
+        )
+
+    @app.post("/v1/merchant/products/exact")
+    def create_product_exact(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _create_product_exact(
+            db_path, api_auth.payload_with_auth(payload, authorization)
+        )
+
+    @app.get("/v1/merchant/products/{sku}/exact")
+    def get_product_exact(
+        sku: str,
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_product_exact(
+            db_path,
+            sku,
+            api_auth.payload_with_auth({"merchant_id": merchant_id}, authorization),
+        )
+
+    @app.patch("/v1/merchant/products/{sku}/money")
+    def update_product_money_exact(
+        sku: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _update_product_money_exact(
+            db_path, sku, api_auth.payload_with_auth(payload, authorization)
+        )
 
     @app.get("/v1/merchant/listings/projections")
     def merchant_listing_projections(
