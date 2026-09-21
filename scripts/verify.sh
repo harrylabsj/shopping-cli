@@ -4,20 +4,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 DB_FILE="$TMP_DIR/shopping-cli.sqlite"
+if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  PYTHON="$ROOT_DIR/.venv/bin/python"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
 
-python3 "$ROOT_DIR/scripts/shopping.py" --help >/dev/null
-python3 "$ROOT_DIR/scripts/shopping_registry.py" --help >/dev/null
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --help >/dev/null
+"$PYTHON" "$ROOT_DIR/scripts/shopping_registry.py" --help >/dev/null
 bash "$ROOT_DIR/scripts/install.sh" --both --dry-run >/dev/null
-python3 -m pytest "$ROOT_DIR/tests" -q
+"$PYTHON" -m pytest "$ROOT_DIR/tests" -q
 node --test "$ROOT_DIR/tests/shopping_plugin.test.mjs"
-PYTHONWARNINGS=error::ResourceWarning python3 -m pytest "$ROOT_DIR/tests/test_db_session.py" -q
-python3 "$ROOT_DIR/scripts/benchmark_search.py" \
+PYTHONWARNINGS=error::ResourceWarning "$PYTHON" -m pytest "$ROOT_DIR/tests/test_db_session.py" -q
+"$PYTHON" "$ROOT_DIR/scripts/benchmark_search.py" \
   --merchants 2 \
   --products-per-merchant 3 \
   --iterations 2 \
   --limit 2 >"$TMP_DIR/search_benchmark.json"
 
-python3 - "$TMP_DIR/search_benchmark.json" <<'PY'
+"$PYTHON" - "$TMP_DIR/search_benchmark.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -29,7 +34,7 @@ assert benchmark["iterations"] == 2
 assert benchmark["last_result_count"] >= 1
 PY
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" merchant create \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" merchant create \
   --id seller-a \
   --name "West Lake Tea" \
   --city Hangzhou \
@@ -41,7 +46,7 @@ python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" merchant create \
   --tags "tea,gift,longjing" \
   --format json >"$TMP_DIR/merchant.json"
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" product add \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" product add \
   --merchant seller-a \
   --sku tea-a \
   --title "Longjing Gift Box" \
@@ -52,29 +57,29 @@ python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" product add \
   --delivery-attributes "same-city,courier" \
   --format json >"$TMP_DIR/product.json"
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer ask \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer ask \
   --buyer alice \
   --text "longjing gift delivery today" \
   --city Hangzhou \
   --area "West Lake" \
   --format json >"$TMP_DIR/ask.json"
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" agent run \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" agent run \
   --merchant seller-a \
   --once \
   --format json >"$TMP_DIR/agent.json"
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer summarize \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer summarize \
   --conversation CONV-0001 \
   --format json >"$TMP_DIR/summary.json"
 
-python3 "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer intent \
+"$PYTHON" "$ROOT_DIR/scripts/shopping.py" --db "$DB_FILE" buyer intent \
   --conversation CONV-0001 \
   --intent purchase_intent \
   --text "I want to continue after merchant confirmation." \
   --format json >"$TMP_DIR/intent.json"
 
-python3 - "$ROOT_DIR" "$DB_FILE" "$TMP_DIR/ask.json" "$TMP_DIR/agent.json" "$TMP_DIR/summary.json" "$TMP_DIR/intent.json" <<'PY'
+"$PYTHON" - "$ROOT_DIR" "$DB_FILE" "$TMP_DIR/ask.json" "$TMP_DIR/agent.json" "$TMP_DIR/summary.json" "$TMP_DIR/intent.json" <<'PY'
 import json
 import re
 import sqlite3
