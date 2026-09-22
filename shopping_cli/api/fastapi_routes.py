@@ -76,6 +76,7 @@ from shopping_cli.api.route_table import (
     _sync_erp,
     _update_merchant,
     _update_product,
+    _update_product_inventory_exact,
     _update_product_money_exact,
 )
 
@@ -270,6 +271,16 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _update_product_money_exact(
+            db_path, sku, api_auth.payload_with_auth(payload, authorization)
+        )
+
+    @app.patch("/v1/merchant/products/{sku}/inventory")
+    def update_product_inventory_exact(
+        sku: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _update_product_inventory_exact(
             db_path, sku, api_auth.payload_with_auth(payload, authorization)
         )
 

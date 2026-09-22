@@ -612,6 +612,68 @@ def create_product_exact_api(
         return response
 
 
+def update_product_inventory_exact_api(
+    db_path: str | Path,
+    sku: str,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    """v1 库存写入：与副作用**同事务**落 operation receipt。
+
+    **为什么需要新端点**：库存写入此前只走 legacy ``PATCH /products/{sku}``
+    （``update_product`` 接受 ``stock``），**没有可对账的回执**——一旦落进 UNKNOWN
+    就无法查明副作用是否真的发生过。不能拿**当前**库存值去猜**历史**操作的结果。
+
+    与 exact 商品写入的口径一致：统一前置（``currency_table_version``）、商家鉴权、
+    ``begin immediate`` 原子、相同 ``operation_id`` 幂等重放、不同请求冲突拒绝、回执
+    与效果同事务。
+
+    **不要求 ``expected_authority_version``**：金额权威（``merchant_money_authority``）
+    只管钱，库存不在其管辖内。这一点与改价端点不同，是刻意的。
+    """
+    merchant_id = str(require_field(payload, "merchant_id"))
+    operation_id = _operation_id(payload)
+    _require_exact_currency_table(payload)
+    stock = int(require_field(payload, "stock"))
+    request_hash = idempotency.request_hash(
+        {
+            "operation_kind": "product_inventory_update",
+            "merchant_id": merchant_id,
+            "sku": sku,
+            "stock": stock,
+        }
+    )
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        conn.execute("begin immediate")
+        replay = _operation_replay(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        # set_stock 自带归属校验、搜索索引同步与审计留痕——失败即抛，回执不会落库，
+        # 于是「有回执」严格等价于「效果已提交」。
+        catalog.set_stock(conn, sku, stock, merchant_id)
+        response = {
+            "ok": True,
+            "product": _exact_product_projection(conn, merchant_id, sku),
+            "idempotent": False,
+        }
+        response["operation"] = _record_product_operation(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            operation_kind="product_inventory_update",
+            sku=sku,
+            request_hash=request_hash,
+            response=response,
+        )
+        return response
+
+
 def update_product_money_exact_api(
     db_path: str | Path,
     sku: str,

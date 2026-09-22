@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 
 
 @dataclass(frozen=True)
@@ -605,6 +605,67 @@ def migration_029_merchant_product_operation_receipts(conn: sqlite3.Connection) 
     )
 
 
+def migration_030_product_inventory_operation_receipts(conn: sqlite3.Connection) -> None:
+    """merchant_product_operations.operation_kind CHECK 扩展：允许库存更新。
+
+    v29 的 CHECK 只允许 ('exact_product_create','exact_product_money_update')。B 线要为
+    **库存写入**提供同事务 operation receipt——现状是库存写入走 legacy
+    `PATCH /products/{sku}`（`update_product` 接受 `stock`），**没有可对账的回执**，一旦
+    落进 UNKNOWN 就无法查明副作用是否真的发生。SQLite 不能 ALTER CHECK，故重建表
+    （复制全列 + 数据 + 索引）；幂等：schema 已含 product_inventory_update 时跳过。
+
+    **已知代价**：v29 把词表写进了 CHECK，于是**每新增一个 operation kind 都要再重建一次
+    表**。本次只加 `product_inventory_update`（不预置尚未实现的 kind，避免死词表）；若
+    kind 还要继续增长（listing 变更等），应重新评估是否改为枚举表或去掉 CHECK 由应用层
+    校验——那时是一次设计决策，不是又一轮机械重建。
+    """
+    row = conn.execute(
+        "select sql from sqlite_master where type='table' and name='merchant_product_operations'"
+    ).fetchone()
+    if row is None or "product_inventory_update" in (row[0] or ""):
+        return
+    conn.execute(
+        """
+        create table merchant_product_operations_v30 (
+            operation_id text primary key,
+            merchant_id text not null,
+            operation_kind text not null
+                check(operation_kind in (
+                    'exact_product_create','exact_product_money_update','product_inventory_update'
+                )),
+            sku text not null,
+            request_hash text not null,
+            status text not null check(status in ('succeeded')),
+            response_json text not null,
+            created_at text not null,
+            foreign key (merchant_id) references merchants(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        insert into merchant_product_operations_v30(
+            operation_id, merchant_id, operation_kind, sku, request_hash,
+            status, response_json, created_at
+        )
+        select
+            operation_id, merchant_id, operation_kind, sku, request_hash,
+            status, response_json, created_at
+        from merchant_product_operations
+        """
+    )
+    conn.execute("drop table merchant_product_operations")
+    conn.execute(
+        "alter table merchant_product_operations_v30 rename to merchant_product_operations"
+    )
+    conn.execute(
+        """
+        create index if not exists idx_merchant_product_operations_owner
+        on merchant_product_operations(merchant_id, created_at, operation_id)
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -628,6 +689,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(27, "delivery_times", migration_027_delivery_times),
     Migration(28, "exact_money_authority", migration_028_exact_money_authority),
     Migration(29, "merchant_product_operation_receipts", migration_029_merchant_product_operation_receipts),
+    Migration(30, "product_inventory_operation_receipts", migration_030_product_inventory_operation_receipts),
 )
 
 
