@@ -1052,7 +1052,7 @@ def _joined_product_search_rows(conn: sqlite3.Connection, merchant_id: str = "",
                m.tags_json as merchant_tags_json
         from products p
         join merchants m on m.id = p.merchant_id
-        where p.active = 1
+        where p.active = 1 and coalesce(p.listing_paused, 0) = 0
     """
     if merchant_id:
         sql += " and p.merchant_id = ?"
@@ -1368,7 +1368,7 @@ def search_products(
         from products p
         join merchants m on m.id = p.merchant_id
         left join delivery_rules dr on dr.merchant_id = m.id
-        where p.active = 1
+        where p.active = 1 and coalesce(p.listing_paused, 0) = 0
     """
         )
     if city:

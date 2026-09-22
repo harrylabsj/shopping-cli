@@ -850,6 +850,12 @@ def get_product(db_path: str | Path, sku: str, payload: dict[str, Any] | None = 
         owner = _owner_merchant_from_payload(conn, payload)
         if owner and owner == str(product.get("merchant_id") or ""):
             return {"ok": True, "product": catalog_views.merchant_product_summary(product)}
+        paused = conn.execute(
+            "select coalesce(listing_paused, 0) as listing_paused from products where sku=?",
+            (sku,),
+        ).fetchone()
+        if paused is not None and bool(paused["listing_paused"]):
+            raise NotFoundError(f"Unknown product SKU: {sku}")
         return {"ok": True, "product": catalog_views.public_product_summary(product)}
 
 
