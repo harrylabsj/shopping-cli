@@ -4,6 +4,8 @@
 - DoD #2：私有字段（cost/floor/credentials）永不进入 projection；
 - DoD #1/#3：projection 带 source_product_ref/source_revision/freshness；
 - active=0 排除（withdraw 信号，DoD #5 前段）；
+- listing_paused=1 排除（暂停销售 = 下架语义，v31），单条投影经 _provenance
+  携带 paused 标记且不随 wire 发布；
 - capability projection 不虚构 SKU；
 - 商品 projection 为名称-only，不含价格/库存 hint（v0.3 §16）；
 - strip_provenance 发布前剥离 _provenance（wire 只留名称 + 分类/标签）。
@@ -140,6 +142,23 @@ class ListingProjectionTest(unittest.TestCase):
         _seed_product(self.conn, "SKU-002", active=0)
         projections = list_publishable_listings(self.conn, merchant_id=MERCHANT)
         self.assertEqual([p["source_product_ref"] for p in projections], ["SKU-001"])
+
+    def test_listing_paused_excluded_from_publishable_and_flagged(self) -> None:
+        """v31：listing_paused=1 即「下架」语义——退出可发布清单但仍在 products
+        里、可恢复；单条投影在 _provenance 携带 paused 标记（不进 wire）。"""
+        _seed_product(self.conn, "SKU-001")
+        _seed_product(self.conn, "SKU-PAUSED")
+        self.conn.execute("update products set listing_paused = 1 where sku = 'SKU-PAUSED'")
+
+        projections = list_publishable_listings(self.conn, merchant_id=MERCHANT)
+        self.assertEqual([p["source_product_ref"] for p in projections], ["SKU-001"])
+
+        paused = project_product_listing(self.conn, "SKU-PAUSED", merchant_id=MERCHANT)
+        self.assertTrue(paused["_provenance"]["listing_paused"])
+        active = project_product_listing(self.conn, "SKU-001", merchant_id=MERCHANT)
+        self.assertFalse(active["_provenance"]["listing_paused"])
+        # paused 标记属 provenance，发布前随 strip_provenance 剥离，不上 wire
+        self.assertNotIn("listing_paused", strip_provenance(paused))
 
     def test_capability_projection_has_no_fake_sku(self) -> None:
         projection = project_capability_listing(

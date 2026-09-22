@@ -377,6 +377,12 @@ def _exact_product_projection(conn: Any, merchant_id: str, sku: str) -> dict[str
     if str(product.get("merchant_id") or "") != merchant_id:
         raise NotFoundError(f"Unknown product SKU for merchant: {sku}")
     money = exact_product_money(conn, merchant_id, sku)
+    # listing_paused 只进 v1 面（owner 鉴权）投影：销售状态是商家的事实字段，
+    # v1 写面（上下架端点、执行后回读 verifyAfter）都依赖它能被读回；公开读面
+    # （public_product_summary）不携带。
+    paused_row = conn.execute(
+        "select listing_paused from products where sku=?", (sku,)
+    ).fetchone()
     return {
         "sku": str(product["sku"]),
         "merchant_id": merchant_id,
@@ -385,6 +391,7 @@ def _exact_product_projection(conn: Any, merchant_id: str, sku: str) -> dict[str
         "category": str(product.get("category") or ""),
         "tags": list(product.get("tags") or []),
         "stock": int(product.get("stock") or 0),
+        "listing_paused": bool(paused_row["listing_paused"]) if paused_row else False,
         "currency": money.currency,
         "price_minor": money.price_minor,
         "currency_table_version": CURRENCY_TABLE_VERSION,
@@ -667,6 +674,77 @@ def update_product_inventory_exact_api(
             operation_id=operation_id,
             merchant_id=merchant_id,
             operation_kind="product_inventory_update",
+            sku=sku,
+            request_hash=request_hash,
+            response=response,
+        )
+        return response
+
+
+def update_product_listing_exact_api(
+    db_path: str | Path,
+    sku: str,
+    payload: dict[str, Any],
+    require_merchant_token: Any,
+) -> dict[str, Any]:
+    """v1 上下架写入（暂停/恢复销售）：与副作用**同事务**落 operation receipt。
+
+    **为什么需要新端点**：上下架此前在数据模型里**根本不存在**——``listings/*``
+    全是从 products 派生的只读投影，没有任何 paused 状态可写；kiwi 侧工具只能
+    fail-closed 报「不可得」（刻意不用库存写零伪装下架，语义不同且会污染库存
+    事实）。没有真实状态可写，就没有可对账的回执——外部写一旦落进 UNKNOWN 就
+    无法查明副作用是否真的发生过。
+
+    与库存端点同一口径：统一前置（``currency_table_version``）、商家鉴权、
+    ``begin immediate`` 原子、相同 ``operation_id`` 幂等重放、不同请求冲突拒绝、
+    回执与效果同事务。响应投影携带 ``listing_paused`` 目标态，使下游对账
+    （queryOutcome）能核对回执与请求语义一致，而非只看状态 succeeded。
+
+    **不要求 ``expected_authority_version``**：金额权威只管钱，销售状态不在其
+    管辖内（与库存端点同理，刻意）。
+    """
+    merchant_id = str(require_field(payload, "merchant_id"))
+    operation_id = _operation_id(payload)
+    _require_exact_currency_table(payload)
+    paused_raw = require_field(payload, "paused")
+    if not isinstance(paused_raw, bool):
+        # 语义字段必须严格 bool：宽松的 truthy 转换（如 "false"→True）会让
+        # 商家「恢复销售」被静默执行成「暂停销售」，方向反了比不写更糟。
+        raise ValidationError("paused must be a boolean")
+    paused = paused_raw
+    request_hash = idempotency.request_hash(
+        {
+            "operation_kind": "product_listing_change",
+            "merchant_id": merchant_id,
+            "sku": sku,
+            "paused": paused,
+        }
+    )
+    with db_session(db_path) as conn:
+        require_merchant_token(conn, merchant_id, payload)
+        conn.execute("begin immediate")
+        replay = _operation_replay(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        # set_listing_paused 自带归属校验、搜索索引同步与审计留痕——失败即抛，
+        # 回执不会落库，于是「有回执」严格等价于「效果已提交」。
+        catalog.set_listing_paused(conn, sku, paused, merchant_id)
+        # 投影自带 listing_paused（v1 面统一携带），下游对账据此核对 paused 目标态。
+        response = {
+            "ok": True,
+            "product": _exact_product_projection(conn, merchant_id, sku),
+            "idempotent": False,
+        }
+        response["operation"] = _record_product_operation(
+            conn,
+            operation_id=operation_id,
+            merchant_id=merchant_id,
+            operation_kind="product_listing_change",
             sku=sku,
             request_hash=request_hash,
             response=response,

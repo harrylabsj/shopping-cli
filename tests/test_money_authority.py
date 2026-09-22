@@ -47,7 +47,7 @@ class ExactMoneyAuthorityTest(unittest.TestCase):
         self.conn.close()
 
     def test_schema_v28_adds_nullable_exact_columns_without_guessing(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 30)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 31)
         row = self.conn.execute(
             "select price_minor_text, floor_price_minor_text, money_currency_table_version "
             "from products where sku='sku-a'"

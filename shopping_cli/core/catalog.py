@@ -803,6 +803,31 @@ def set_stock(conn: sqlite3.Connection, sku: str, stock: int, merchant_id: str =
     return product_summary(conn, sku)
 
 
+def set_listing_paused(
+    conn: sqlite3.Connection, sku: str, paused: bool, merchant_id: str = ""
+) -> dict[str, Any]:
+    """暂停/恢复销售：写 ``products.listing_paused``（上下架的唯一事实来源）。
+
+    刻意**不**用库存写零伪装下架——语义不同（暂停 ≠ 无货），且伪装会污染库存
+    事实让对账无法区分。归属校验/搜索索引同步/审计留痕照 ``set_stock`` 口径。
+    """
+    product = require_product(conn, sku)
+    if merchant_id and product["merchant_id"] != merchant_id:
+        raise ValidationError(f"Product {sku} does not belong to merchant {merchant_id}")
+    conn.execute(
+        "update products set listing_paused = ?, updated_at = ? where sku = ?",
+        (1 if paused else 0, now_iso(), sku),
+    )
+    sync_product_search_index(conn, sku=sku)
+    _audit_catalog(
+        conn,
+        merchant_id,
+        "product_listing_changed",
+        {"sku": sku, "listing_paused": bool(paused)},
+    )
+    return product_summary(conn, sku)
+
+
 def delivery_rule(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
     row = conn.execute("select * from delivery_rules where merchant_id = ?", (merchant_id,)).fetchone()
     if row is None:

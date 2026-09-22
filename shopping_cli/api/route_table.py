@@ -116,6 +116,14 @@ def _update_product_inventory_exact(
     )
 
 
+def _update_product_listing_exact(
+    db_path: str | Path, sku: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return catalog_handlers.update_product_listing_exact_api(
+        db_path, sku, payload, _require_merchant_token
+    )
+
+
 def _get_product_operation_exact(
     db_path: str | Path, operation_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -464,6 +472,11 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         {"PATCH"},
         "/v1/merchant/products/{sku}/inventory",
         lambda db_path, payload, query, sku: _update_product_inventory_exact(db_path, sku, payload),
+    ),
+    RouteEntry(
+        {"PATCH"},
+        "/v1/merchant/products/{sku}/listing",
+        lambda db_path, payload, query, sku: _update_product_listing_exact(db_path, sku, payload),
     ),
     RouteEntry(
         {"GET"},

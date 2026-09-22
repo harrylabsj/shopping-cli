@@ -92,11 +92,15 @@ def project_product_listing(
 
     # provenance 标注：只存在于 projection（Merchant Kiwi 可见），发布前由
     # strip_provenance 剥离；商品不再携带价格/库存 hint（名称-only，v0.3 §16）。
+    # listing_paused 也放 provenance：暂停商品不会进入可发布清单（见
+    # list_publishable_listings），该标记只供 owner 在单条投影上核对销售状态，
+    # 不应进 wire。
     projection["_provenance"] = {
         "authority": authority,
         "source_revision": projection["source_revision"],
         "observed_at": str(row.get("observed_at") or now),
         "fresh_until": str(row.get("fresh_until") or ""),
+        "listing_paused": bool(row.get("listing_paused") or 0),
         "note": "name-only discovery projection; authoritative facts in the local product record",
     }
     return projection
@@ -146,9 +150,13 @@ def list_publishable_listings(
 
     Returns projection dicts（不含 withdraw 项）。审查 S-M3：私有字段
     （handoff_destination）缺省剥离，owner 显式 include_private=True 保留。
+
+    ``listing_paused=1`` 的商品同样排除——「暂停销售」的语义就是下架：它仍在
+    products 里、可恢复，但**不可发布**（v31 起 paused 是独立事实列，刻意不用
+    active=0 或库存写零伪装，三者的恢复语义与对账含义都不同）。
     """
     rows = conn.execute(
-        "select * from products where active = 1 order by sku",
+        "select * from products where active = 1 and coalesce(listing_paused, 0) = 0 order by sku",
     ).fetchall()
     projections: list[dict[str, Any]] = []
     for row in rows:

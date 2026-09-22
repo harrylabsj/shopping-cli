@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 30
+CURRENT_SCHEMA_VERSION = 31
 
 
 @dataclass(frozen=True)
@@ -666,6 +666,93 @@ def migration_030_product_inventory_operation_receipts(conn: sqlite3.Connection)
     )
 
 
+def migration_031_listing_pause_and_operation_kind_enum(conn: sqlite3.Connection) -> None:
+    """operation kind 词表改枚举表（最后一次重建表）+ products.listing_paused 状态列。
+
+    **为什么是枚举表而不是再一次放宽 CHECK**（东哥 2026-09-22 拍板）：v29/v30 把
+    operation kind 词表写进了 CHECK，于是**每新增一个 kind 都要机械重建一次表**
+    （v30 已为此付过一次代价，其 docstring 也预警了这一点）。本次为 B 线「上下架」
+    （product_listing_change）加 kind 时一并把词表收敛到枚举表
+    ``merchant_product_operation_kinds``，``merchant_product_operations.operation_kind``
+    去掉 CHECK、改为外键引用——**以后加 kind = 枚举表加行，不再重建表**。
+
+    **FK 的实际生效行为**：``shopping_cli/db/session.py`` 的 ``open_connection`` 对每个
+    连接执行 ``pragma foreign_keys = on``，因此经应用入口打开的连接上该外键**真实
+    强制**——未播种的 kind 插入会被 IntegrityError 拒绝（与此前 CHECK 的拒绝强度
+    一致）。SQLite 默认不开 FK，绕过应用入口的裸连接不强制，但写入路径全部走
+    ``db_session``，不接受裸连接写入。
+
+    重建照 ``_v30`` 模式（复制全列 + 数据 + 索引）；幂等：schema 已引用枚举表时跳过。
+    迁移顺序保证先播种再重建——FK 开启下 insert select 要求既有行的 kind 全部在枚举
+    表中（v30 词表三个 kind + 本次新增的 product_listing_change，共四行）。
+
+    ``products.listing_paused``：上下架此前**没有任何数据模型**（listings/* 全是从
+    products 派生的只读投影，发布面随 kiwi-catalog 子系统移除）。新增
+    ``listing_paused integer not null default 0`` 作为「暂停销售」的唯一事实来源；
+    投影层（``list_publishable_listings``）据此排除暂停商品——这就是「下架」的语义。
+    """
+    conn.execute(
+        """
+        create table if not exists merchant_product_operation_kinds (
+            kind text primary key
+        )
+        """
+    )
+    for kind in (
+        "exact_product_create",
+        "exact_product_money_update",
+        "product_inventory_update",
+        "product_listing_change",
+    ):
+        conn.execute(
+            "insert or ignore into merchant_product_operation_kinds(kind) values(?)",
+            (kind,),
+        )
+    row = conn.execute(
+        "select sql from sqlite_master where type='table' and name='merchant_product_operations'"
+    ).fetchone()
+    if row is not None and "merchant_product_operation_kinds" not in (row[0] or ""):
+        conn.execute(
+            """
+            create table merchant_product_operations_v31 (
+                operation_id text primary key,
+                merchant_id text not null,
+                operation_kind text not null,
+                sku text not null,
+                request_hash text not null,
+                status text not null check(status in ('succeeded')),
+                response_json text not null,
+                created_at text not null,
+                foreign key (merchant_id) references merchants(id),
+                foreign key (operation_kind) references merchant_product_operation_kinds(kind)
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into merchant_product_operations_v31(
+                operation_id, merchant_id, operation_kind, sku, request_hash,
+                status, response_json, created_at
+            )
+            select
+                operation_id, merchant_id, operation_kind, sku, request_hash,
+                status, response_json, created_at
+            from merchant_product_operations
+            """
+        )
+        conn.execute("drop table merchant_product_operations")
+        conn.execute(
+            "alter table merchant_product_operations_v31 rename to merchant_product_operations"
+        )
+        conn.execute(
+            """
+            create index if not exists idx_merchant_product_operations_owner
+            on merchant_product_operations(merchant_id, created_at, operation_id)
+            """
+        )
+    ensure_column(conn, "products", "listing_paused", "integer not null default 0")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -690,6 +777,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(28, "exact_money_authority", migration_028_exact_money_authority),
     Migration(29, "merchant_product_operation_receipts", migration_029_merchant_product_operation_receipts),
     Migration(30, "product_inventory_operation_receipts", migration_030_product_inventory_operation_receipts),
+    Migration(31, "listing_pause_and_operation_kind_enum", migration_031_listing_pause_and_operation_kind_enum),
 )
 
 
