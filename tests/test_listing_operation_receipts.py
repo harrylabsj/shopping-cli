@@ -152,7 +152,7 @@ class ListingOperationReceiptTest(unittest.TestCase):
     # ── ② 幂等重放 ──────────────────────────────────────────────────
     def test_same_operation_and_request_replays_without_second_effect(self) -> None:
         self.activate()
-        first = self.call(
+        self.call(
             paused=True, currency_table_version=CURRENCY_TABLE, operation_id="op-replay"
         )
         # 中间改一次状态，再重放原请求——重放必须回原回执，且**不覆盖**中间那次改动
