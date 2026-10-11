@@ -1,6 +1,7 @@
 """Finite execution checks; no pip installation or release/package invocation."""
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -52,10 +53,11 @@ class ReleaseVerifierExecutionTest(unittest.TestCase):
             site = prefix / "lib" / "site-packages"
             site.mkdir(parents=True)
             # Exact ordinary source as a package-location fixture, not an installed wheel claim.
-            files = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "shopping_cli"], text=True)
-            for relative in files.splitlines():
-                src = ROOT / relative
-                dst = site / relative
+            files = sorted((ROOT / "shopping_cli").rglob("*"))
+            for src in files:
+                if not src.is_file() or src.suffix not in {".py", ".json"}:
+                    continue
+                dst = site / src.relative_to(ROOT)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dst)
             working = Path(root) / "empty-working-directory"
@@ -79,10 +81,13 @@ class ReleaseVerifierExecutionTest(unittest.TestCase):
         self.assertIn("shopping_cli import escaped the isolated venv", result.stderr)
 
     def test_legacy_imports_accept_checkout_shadow_but_new_origin_gate_refuses(self):
-        legacy = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", "7ec88af03bacf58d8cfb527fc0a136f7b1bb6256:scripts/verify_release.sh"],
-            text=True,
+        # Exact historical Git blob, retained so archive/shallow CI need no history.
+        legacy_bytes = (ROOT / "tests/fixtures/verify_release_7ec88.sh").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(legacy_bytes).hexdigest(),
+            "7d30b9deea321a86a9d6d17b397e29aea562072f067bb0da98993fc98b31f3c3",
         )
+        legacy = legacy_bytes.decode("utf-8")
         snippet = re.search(r'-c "(import psutil[^\n]+)"', legacy)
         self.assertIsNotNone(snippet)
         old = self.run_import_gate(shadow=True, body_override=snippet.group(1))
