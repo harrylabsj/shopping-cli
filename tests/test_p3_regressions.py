@@ -71,11 +71,54 @@ class P3RegressionTest(unittest.TestCase):
         self.assertEqual(package["name"], manifest["id"])
         self.assertEqual(package["version"], manifest["version"])
 
+    def _assert_release_install_contract(self, script):
+        self.assertIn('TMP_DIR="$(mktemp -d)"', script)
+        self.assertIn("trap 'rm -rf \"$TMP_DIR\"' EXIT", script)
+        self.assertIn('python3 -m venv "$TMP_DIR/venv"', script)
+        self.assertNotIn("--system-site-packages", script)
+        self.assertNotIn("--no-deps", script)
+        self.assertIn('set -- "$TMP_DIR"/dist/*.whl', script)
+        self.assertIn('"$#" -ne 1 || ! -f "$1" || -L "$1"', script)
+        self.assertIn('"$TMP_DIR/venv/bin/python" -m pip install --force-reinstall "$1[api]"', script)
+        self.assertIn('(\n  cd "$TMP_DIR"\n  "$TMP_DIR/venv/bin/python" -m pip check', script)
+        self.assertIn('"$TMP_DIR/venv/bin/python" - <<\'PYTHON\'', script)
+        self.assertIn('import psutil, fastapi, uvicorn', script)
+        self.assertIn('package_file = Path(shopping_cli.__file__).resolve()', script)
+        self.assertIn('venv_prefix = Path(sys.prefix).resolve()', script)
+        self.assertIn('if not package_file.is_relative_to(venv_prefix):', script)
+        self.assertIn('raise SystemExit("shopping_cli import escaped the isolated venv")', script)
+        self.assertIn("('decision', 'snapshot', 'policy-result', 'capabilities')", script)
+        for command in ("shopping-cli", "shopping-cli-api", "shopping-cli-agent"):
+            self.assertIn(f'"$TMP_DIR/venv/bin/{command}" --help', script)
+        self.assertIn(')\nnpm pack --dry-run', script)  # Packing remains in the checkout.
+
     def test_release_verifier_uses_an_isolated_install(self):
         script = (ROOT / "scripts" / "verify_release.sh").read_text(encoding="utf-8")
-        self.assertIn("python3 -m venv", script)
-        self.assertIn("pip install --no-deps", script)
-        self.assertIn("shopping-cli-api", script)
+        self._assert_release_install_contract(script)
+
+    def test_release_install_contract_rejects_missing_or_host_dependent_gates(self):
+        script = (ROOT / "scripts" / "verify_release.sh").read_text(encoding="utf-8")
+        mutations = {
+            "cleanup": ("trap 'rm -rf \"$TMP_DIR\"' EXIT", ""),
+            "wheel-count": ('"$#" -ne 1', '"$#" -ne 2'),
+            "wheel-regular": ('! -f "$1"', '! -d "$1"'),
+            "wheel-symlink": (' || -L "$1"', ''),
+            "host-python": ('"$TMP_DIR/venv/bin/python" -m pip install', 'python3 -m pip install'),
+            "no-deps": ('pip install --force-reinstall', 'pip install --no-deps --force-reinstall'),
+            "host-site": ('python3 -m venv', 'python3 -m venv --system-site-packages'),
+            "api-extra": ('$1[api]', '$1'),
+            "check": ('"$TMP_DIR/venv/bin/python" -m pip check', ''),
+            "cwd": ('  cd "$TMP_DIR"', '  cd "$ROOT_DIR"'),
+            "imports": ('import psutil, fastapi, uvicorn', 'import psutil'),
+            "origin": ('if not package_file.is_relative_to(venv_prefix):', 'if False:'),
+            "schemas": ("'capabilities'", "'missing'"),
+            "api-cli": ('"$TMP_DIR/venv/bin/shopping-cli-api" --help', ''),
+        }
+        for name, (before, after) in mutations.items():
+            with self.subTest(gate=name):
+                self.assertIn(before, script)
+                with self.assertRaises(AssertionError):
+                    self._assert_release_install_contract(script.replace(before, after))
 
     def test_listing_projection_list_requires_merchant_id(self):
         """审查 P3-01：list 出口必须带 merchant_id 过滤——无过滤的匿名枚举

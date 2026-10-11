@@ -26,11 +26,27 @@ if [[ "$#" -ne 1 || ! -f "$1" || -L "$1" ]]; then
   exit 1
 fi
 "$TMP_DIR/venv/bin/python" -m pip install --force-reinstall "$1[api]"
-"$TMP_DIR/venv/bin/python" -m pip check
-"$TMP_DIR/venv/bin/python" -c "import psutil, fastapi, uvicorn; from shopping_cli.core.negotiation_contracts import load_contract_schema; [load_contract_schema(name) for name in ('decision', 'snapshot', 'policy-result', 'capabilities')]"
-"$TMP_DIR/venv/bin/shopping-cli" --help >/dev/null
-"$TMP_DIR/venv/bin/shopping-cli-api" --help >/dev/null
-"$TMP_DIR/venv/bin/shopping-cli-agent" --help >/dev/null
+# Check the installed wheel away from the checkout; environment shadowing must fail.
+(
+  cd "$TMP_DIR"
+  "$TMP_DIR/venv/bin/python" -m pip check
+  "$TMP_DIR/venv/bin/python" - <<'PYTHON'
+import sys
+from pathlib import Path
+import psutil, fastapi, uvicorn
+import shopping_cli
+from shopping_cli.core.negotiation_contracts import load_contract_schema
+
+package_file = Path(shopping_cli.__file__).resolve()
+venv_prefix = Path(sys.prefix).resolve()
+if not package_file.is_relative_to(venv_prefix):
+    raise SystemExit("shopping_cli import escaped the isolated venv")
+[load_contract_schema(name) for name in ('decision', 'snapshot', 'policy-result', 'capabilities')]
+PYTHON
+  "$TMP_DIR/venv/bin/shopping-cli" --help >/dev/null
+  "$TMP_DIR/venv/bin/shopping-cli-api" --help >/dev/null
+  "$TMP_DIR/venv/bin/shopping-cli-agent" --help >/dev/null
+)
 npm pack --dry-run --json --pack-destination "$TMP_DIR" >/dev/null
 npm pack --dry-run --json --pack-destination "$TMP_DIR" ./plugins/shopping-plugin >/dev/null
 
