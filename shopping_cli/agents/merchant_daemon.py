@@ -335,6 +335,41 @@ def pid_record_matches_process(pid_record: dict[str, Any], merchant_id: str) -> 
     return True
 
 
+def _pid_record_disposition(pid_record: dict[str, Any], merchant_id: str) -> bool | None:
+    """True: confirmed owner; False: dead/reused; None: cannot verify safely."""
+    pid = safe_non_negative_int(pid_record.get("pid"))
+    if not pid:
+        return False
+    if psutil is not None and pid_record_matches_process(pid_record, merchant_id):
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return None
+    if psutil is None:
+        return None
+    identity = process_identity(pid)
+    if identity is None:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return False
+        except psutil.NoSuchProcess:
+            return False
+        except (psutil.AccessDenied, OSError):
+            pass
+        return None
+    # A readable process with a different birth/command is a confirmed reused PID.
+    if not pid_record.get("launch_token") or not pid_record.get("create_time"):
+        required = ["shopping_cli.cli", "agent", "run", "--merchant", str(merchant_id)]
+        cmdline = list(identity.get("cmdline") or [])
+        if not all(item in cmdline for item in required):
+            return False
+        return None
+    return False
+
+
 def state_matches_pid_record(state: dict[str, Any], pid_record: dict[str, Any], merchant_id: str) -> bool:
     launch_token = str(pid_record.get("launch_token") or "")
     if not launch_token or str(state.get("launch_token") or "") != launch_token:
@@ -429,11 +464,9 @@ def start_agent(
     with _PidFileLock(paths["pid_file"]):
         pid_record = read_json(paths["pid_file"], {})
         existing_pid = safe_non_negative_int(pid_record.get("pid"))
-        existing_state = read_json(paths["state_file"], {})
-        existing_matches = (
-            state_matches_pid_record(existing_state, pid_record, merchant_id)
-            and pid_record_matches_process(pid_record, merchant_id)
-        )
+        existing_matches = _pid_record_disposition(pid_record, merchant_id)
+        if existing_pid and existing_matches is None:
+            raise SystemExit(f"Agent process identity unverified for merchant {merchant_id}: pid {existing_pid}")
         stale_replaced = bool(existing_pid and not existing_matches)
         if existing_pid and existing_matches:
             raise SystemExit(f"Agent already running for merchant {merchant_id}: pid {existing_pid}")
@@ -574,14 +607,11 @@ def stop_agent(
         session_id = str(pid_record.get("session_id") or "")
         api_url = str(pid_record.get("api_url") or "")
         launch_token = str(pid_record.get("launch_token") or "")
-        state_before_stop = read_json(paths["state_file"], {})
-        state_launch_token = str(state_before_stop.get("launch_token") or "")
-        was_running = bool(
-            launch_token
-            and state_launch_token == launch_token
-            and state_matches_pid_record(state_before_stop, pid_record, merchant_id)
-            and pid_record_matches_process(pid_record, merchant_id)
-        )
+        initial_disposition = _pid_record_disposition(pid_record, merchant_id)
+        was_running = initial_disposition is True
+
+    stop_timed_out = False
+    force_kill_attempted = False
 
     if was_running:
         # 审查 P2-07：stop 文件含 launch_token——0600（open() 默认 mode 会
@@ -601,6 +631,8 @@ def stop_agent(
         # SIGKILL 兜底：SIGTERM 被阻塞的处理中进程（如卡在 HTTP 调用，
         # 默认 5s 内无法响应）停不掉——强杀并短等待。
         if pid_record_matches_process(pid_record, merchant_id):
+            stop_timed_out = True
+            force_kill_attempted = True
             try:
                 os.kill(pid, signal.SIGKILL)
             except (PermissionError, ProcessLookupError):
@@ -608,7 +640,6 @@ def stop_agent(
             time.sleep(0.2)
 
     with _PidFileLock(paths["pid_file"]):
-        state_after_stop = read_json(paths["state_file"], {})
         current_record = read_json(paths["pid_file"], {})
         same_launch = bool(
             launch_token
@@ -618,17 +649,19 @@ def stop_agent(
         # A different launch token means a new daemon took over the pid/state
         # files while this stop was in flight; it must remain untouched.
         replaced_by_new_launch = bool(str(current_record.get("launch_token") or "")) and not same_launch
-        running = same_launch and pid_record_matches_process(current_record, merchant_id) and state_after_stop.get("running") is not False
-        if not running and same_launch and paths["pid_file"].exists():
+        final_disposition = _pid_record_disposition(current_record, merchant_id) if same_launch else False
+        identity_unverified = same_launch and final_disposition is None
+        running = same_launch and final_disposition is True
+        if not running and not identity_unverified and same_launch and paths["pid_file"].exists():
             paths["pid_file"].unlink()
 
-    if mode != "api":
+    if mode != "api" and not replaced_by_new_launch and not identity_unverified:
         with db_session(db_path) as conn:
             merchant_agent.heartbeat(conn, merchant_id, status="away")
 
     previous = read_json(paths["state_file"], {})
     counters = previous.get("counters") or {"checked": 0, "replied": 0}
-    if not running and not replaced_by_new_launch:
+    if not running and not replaced_by_new_launch and not identity_unverified:
         write_state(
             paths["state_file"],
             merchant_id,
@@ -638,7 +671,8 @@ def stop_agent(
             pid=pid or None,
             extra={
                 "stopped_at": now_iso(),
-                "stop_timed_out": running,
+                "stop_timed_out": stop_timed_out,
+                "force_kill_attempted": force_kill_attempted,
                 "mode": mode,
                 "api_url": api_url,
                 "host": host,
@@ -647,7 +681,10 @@ def stop_agent(
             },
         )
     return {
-        "ok": not running,
+        "ok": not running and not identity_unverified and not replaced_by_new_launch,
+        "identity_unverified": identity_unverified,
+        "stop_timed_out": stop_timed_out,
+        "force_kill_attempted": force_kill_attempted,
         "merchant_id": merchant_id,
         "pid": pid or None,
         "mode": mode,

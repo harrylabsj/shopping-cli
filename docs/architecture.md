@@ -12,3 +12,9 @@ The merchant agent core runs against a typed marketplace tools boundary (`Mercha
 
 
 The MVP intentionally has no transaction tables. Buyer `quote_request` and `purchase_intent` are message intents only.
+
+### Frozen contract provenance and delivery checks
+
+Runtime schemas remain the same four shopping.negotiation/0.1 files. Provenance is pinned to the actual immutable Kiwi e703bc0d67e24a98c417274e46f37d210eff86ac manifest (34 rows), retaining bundle a867a10774c7990f585e57ea186262a46a2eeb62e75d81f0e8606940dc30a4bb. The older lock combined af21 source metadata with this later bundle; this correction does not upgrade wire schemas. The default guard always verifies the trusted raw manifest and all four vendored file bytes without requiring a sibling checkout.
+
+Both npm and wheel payloads include recursive contract JSON resources and the lock. Docker selects the sole locally built project wheel instead of a stale fixed version; the local compose tag is a build alias, not a published version. CI additionally runs the existing end-to-end/benchmark/resource/pack verifier. Release verification uses normal dependency resolution plus pip check and imports, rather than no-deps CLI help alone; its fresh install/Docker execution still requires an actual authorized CI run.

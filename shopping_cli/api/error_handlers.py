@@ -12,9 +12,11 @@ block).
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Any
 
 from shopping_cli.api.error_response import build_error_response
+from shopping_cli.api.sqlite_contention import CONTENTION_MESSAGE, is_sqlite_contention
 from shopping_cli.core.errors import (
     AuthError,
     ConflictError,
@@ -97,11 +99,19 @@ def register_error_handlers(
     def shopping_cli_error_handler(_request: Any, exc: ShoppingCliError) -> Any:
         return _json_error_response(json_response, 400, str(exc))
 
+    @app.exception_handler(sqlite3.OperationalError)
+    def sqlite_operation_handler(_request: Any, exc: sqlite3.OperationalError) -> Any:
+        if is_sqlite_contention(exc):
+            return build_error_response(503, CONTENTION_MESSAGE, json_response, headers={"Retry-After": "1"})
+        return _json_error_response(json_response, 500, "internal server error")
+
     if request_validation_error is not None:  # pragma: no cover - exercised with fastapi installed
         @app.exception_handler(request_validation_error)
         def request_validation_error_handler(request: Any, exc: Exception) -> Any:
             # 不回显 str(exc)：包含 schema 内部结构并回显调用方输入。
-            logger.warning("request validation failed on %s: %s", getattr(request, "url", "?"), exc)
+            errors: list[Any] = getattr(exc, "errors", lambda: [])()
+            safe_types = [str(error.get("type", "validation_error")) for error in errors if isinstance(error, dict)]
+            logger.warning("request validation failed on schema (%s): types=%s", type(exc).__name__, safe_types)
             return _json_error_response(json_response, 400, "invalid request body")
 
     if starlette_http_exception is not None:  # pragma: no cover - exercised with fastapi installed

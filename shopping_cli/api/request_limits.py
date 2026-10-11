@@ -35,6 +35,16 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Starlette's own route regex may accept a decoded trailing LF. Reject
+        # CR/LF at the real ASGI ingress before body parsing or any endpoint.
+        path = str(scope.get("path") or "")
+        if "\n" in path or "\r" in path:
+            body = json.dumps({"ok": False, "error": "not found"}).encode("utf-8")
+            await send({"type": "http.response.start", "status": 404,
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"content-length", str(len(body)).encode("ascii"))]})
+            await send({"type": "http.response.body", "body": body})
+            return
         maximum = max_request_body_bytes()
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         try:

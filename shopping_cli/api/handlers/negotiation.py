@@ -29,6 +29,8 @@ from shopping_cli.services import negotiation as negotiation_service
 # 封顶。merchant/agent 单 token 部署下语义不变。
 _NEGOTIATION_DECISION_WINDOW_SECONDS = 60
 _DECISION_RATE_LIMIT_DEFAULT_PER_MINUTE = 600
+# Bound process-local credential history; never evict an active limit.
+_DECISION_BUCKET_CAP = 4096
 _decision_buckets: dict[str, tuple[float, int]] = {}
 _decision_buckets_lock = threading.Lock()
 
@@ -46,6 +48,13 @@ def _enforce_decision_rate_limit(credential_key: str) -> None:
     limit = _decision_rate_limit_per_minute()
     now = time.monotonic()
     with _decision_buckets_lock:
+        expired = [
+            key for key, (start, _) in _decision_buckets.items() if now - start >= _NEGOTIATION_DECISION_WINDOW_SECONDS
+        ]
+        for key in expired:
+            del _decision_buckets[key]
+        if credential_key not in _decision_buckets and len(_decision_buckets) >= _DECISION_BUCKET_CAP:
+            raise RateLimitError("rate limit credential capacity exhausted")
         window_start, count = _decision_buckets.get(credential_key, (0.0, 0))
         if now - window_start >= _NEGOTIATION_DECISION_WINDOW_SECONDS:
             window_start, count = now, 0

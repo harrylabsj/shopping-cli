@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from shopping_cli.core.errors import ConflictError
+from shopping_cli.core.catalog import sync_product_search_index
 from shopping_cli.core.money_authority import assert_legacy_money_write_allowed
 
 SOURCE_LOCAL = "local"
@@ -350,6 +351,7 @@ def sync_erp_products(
     *,
     fetch: Callable[..., Any] | None = None,
     now: Callable[[], str] = _now_iso,
+    before_write: Callable[[sqlite3.Connection], None] | None = None,
 ) -> ErpSyncReport:
     """分页拉取 ERP 商品并 upsert 到本地 ``products`` 表（source='erp'）。
 
@@ -358,11 +360,16 @@ def sync_erp_products(
       （绝不静默合并冲突权威源）；
     * 任何网络/结构错误 → ErpSourceError（fail-closed），不部分落盘后假装成功。
     """
+    if conn.in_transaction:
+        raise ErpSourceError("ERP sync requires an idle caller connection; caller transaction preserved")
+    if isinstance(config.page_size, bool) or not isinstance(config.page_size, int) or not 1 <= config.page_size <= 500:
+        raise ErpSourceError("erp page_size must be an integer between 1 and 500")
     base, _hostname = _validate_url(config.base_url)
     report = ErpSyncReport()
     offset = 0
     page = 0
     now_ts = now()
+    products: list[dict[str, Any]] = []
 
     while True:
         page += 1
@@ -385,8 +392,21 @@ def sync_erp_products(
         results = raw["results"]
         report.fetched += len(results)
 
-        for index, item in enumerate(results):
-            product = _parse_erp_product(item, index)
+        if len(results) > config.page_size:
+            raise ErpSourceError("erp page returned more rows than requested page_size")
+        products.extend(_parse_erp_product(item, index) for index, item in enumerate(results))
+
+        if len(results) < config.page_size:
+            break
+        offset += len(results)
+
+    # All network and page/row shape validation is complete before this owned
+    # write transaction. Auth/current money authority are checked under its lock.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if before_write is not None:
+            before_write(conn)
+        for product in products:
             sku = product["sku"]
             merchant_id = product["merchant_id"] or config.default_merchant_id
             if not merchant_id:
@@ -485,11 +505,10 @@ def sync_erp_products(
                     now_ts,
                 ),
             )
+            sync_product_search_index(conn, sku=sku)
             report.upserted += 1
-
-        if len(results) < config.page_size:
-            break
-        offset += len(results)
-
-    conn.commit()
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return report

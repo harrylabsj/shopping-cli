@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import math
 import sqlite3
+import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from shopping_cli.data_sources.adapter import (
     resolve_merchant_or_raise,
     upsert_product_row,
 )
+from shopping_cli.core.catalog import sync_product_search_index
 from shopping_cli.db.provenance import erp_fresh_ttl_seconds
 
 SOURCE_CSV_EXCEL = "csv_excel"
@@ -314,58 +316,77 @@ def sync_csv_excel(
         datetime.fromisoformat(now_ts) + timedelta(seconds=erp_fresh_ttl_seconds())
     ).isoformat()
 
+    # Parse local rows before taking an owned writer, retaining row error order.
+    parsed_rows: list[tuple[int, dict[str, Any] | None, str | None]] = []
     for index, row in enumerate(rows):
         try:
-            product = _parse_product(row, index)
+            parsed_rows.append((index, _parse_product(row, index), None))
         except AdapterError as exc:
-            report.errors.append(str(exc))
-            continue
-        sku = product["sku"]
-        merchant_id = product["merchant_id"] or config.default_merchant_id
-        if not merchant_id:
-            report.errors.append(f"row {index} sku {sku}: no merchant_id (and no default_merchant_id)")
-            continue
-        if config.allowed_merchant_id and merchant_id != config.allowed_merchant_id:
-            report.errors.append(
-                f"row {index} sku {sku}: merchant_id {merchant_id!r} does not match actor "
-                f"merchant {config.allowed_merchant_id!r}; skipped"
-            )
-            report.skipped += 1
-            continue
-        existing = conn.execute(
-            "select source, merchant_id from products where sku = ? and merchant_id = ?",
-            (sku, merchant_id),
-        ).fetchone()
-        if existing is None:
-            other = conn.execute("select 1 from products where sku = ?", (sku,)).fetchone()
-            if other is not None:
-                report.errors.append(f"row {index} sku {sku}: already owned by another merchant; refusing to reassign")
+            parsed_rows.append((index, None, str(exc)))
+    owns_transaction = not conn.in_transaction
+    savepoint = f"csv_excel_batch_{uuid.uuid4().hex}"
+    conn.execute("BEGIN IMMEDIATE" if owns_transaction else f"SAVEPOINT {savepoint}")
+    try:
+        for index, product, error in parsed_rows:
+            if product is None:
+                report.errors.append(error if error is not None else "invalid import row")
+                continue
+            sku = product["sku"]
+            merchant_id = product["merchant_id"] or config.default_merchant_id
+            if not merchant_id:
+                report.errors.append(f"row {index} sku {sku}: no merchant_id (and no default_merchant_id)")
+                continue
+            if config.allowed_merchant_id and merchant_id != config.allowed_merchant_id:
+                report.errors.append(
+                    f"row {index} sku {sku}: merchant_id {merchant_id!r} does not match actor "
+                    f"merchant {config.allowed_merchant_id!r}; skipped"
+                )
                 report.skipped += 1
                 continue
-            resolve_merchant_or_raise(conn, merchant_id)
-        elif existing[0] == "local":
-            report.conflicts.append({"sku": sku, "reason": "local authoritative row"})
-            report.skipped += 1
-            continue
-        upsert_product_row(
-            conn,
-            sku=sku,
-            merchant_id=merchant_id,
-            title=product["title"],
-            description=product["description"],
-            category=product["category"],
-            price=product["price"],
-            currency=product["currency"],
-            stock=product["stock"],
-            source=SOURCE_CSV_EXCEL,
-            revision=revision,
-            now_ts=now_ts,
-            fresh_until=fresh_until,
-        )
-        report.fetched += 1
-        report.upserted += 1
-
-    conn.commit()
+            existing = conn.execute(
+                "select source, merchant_id from products where sku = ? and merchant_id = ?",
+                (sku, merchant_id),
+            ).fetchone()
+            if existing is None:
+                other = conn.execute("select 1 from products where sku = ?", (sku,)).fetchone()
+                if other is not None:
+                    report.errors.append(f"row {index} sku {sku}: already owned by another merchant; refusing to reassign")
+                    report.skipped += 1
+                    continue
+                resolve_merchant_or_raise(conn, merchant_id)
+            elif existing[0] == "local":
+                report.conflicts.append({"sku": sku, "reason": "local authoritative row"})
+                report.skipped += 1
+                continue
+            upsert_product_row(
+                conn,
+                sku=sku,
+                merchant_id=merchant_id,
+                title=product["title"],
+                description=product["description"],
+                category=product["category"],
+                price=product["price"],
+                currency=product["currency"],
+                stock=product["stock"],
+                source=SOURCE_CSV_EXCEL,
+                revision=revision,
+                now_ts=now_ts,
+                fresh_until=fresh_until,
+            )
+            sync_product_search_index(conn, sku=sku)
+            report.fetched += 1
+            report.upserted += 1
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except BaseException:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
     return report
 
 

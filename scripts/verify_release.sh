@@ -20,7 +20,14 @@ fi
 
 "$BUILD_PYTHON" -m build --outdir "$TMP_DIR/dist"
 python3 -m venv "$TMP_DIR/venv"
-"$TMP_DIR/venv/bin/python" -m pip install --no-deps --force-reinstall "$TMP_DIR"/dist/*.whl
+set -- "$TMP_DIR"/dist/*.whl
+if [[ "$#" -ne 1 || ! -f "$1" || -L "$1" ]]; then
+  echo "expected exactly one regular project wheel" >&2
+  exit 1
+fi
+"$TMP_DIR/venv/bin/python" -m pip install --force-reinstall "$1[api]"
+"$TMP_DIR/venv/bin/python" -m pip check
+"$TMP_DIR/venv/bin/python" -c "import psutil, fastapi, uvicorn; from shopping_cli.core.negotiation_contracts import load_contract_schema; [load_contract_schema(name) for name in ('decision', 'snapshot', 'policy-result', 'capabilities')]"
 "$TMP_DIR/venv/bin/shopping-cli" --help >/dev/null
 "$TMP_DIR/venv/bin/shopping-cli-api" --help >/dev/null
 "$TMP_DIR/venv/bin/shopping-cli-agent" --help >/dev/null

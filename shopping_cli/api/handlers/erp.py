@@ -30,12 +30,19 @@ from shopping_cli.services import tokens as token_service
 _ERP_SYNC_RATE_LIMIT_PER_MINUTE = 3
 _ERP_SYNC_WINDOW_SECONDS = 60
 _erp_sync_lock = threading.Lock()
+# Bound process-local credential history; never evict an active limit.
+_ERP_SYNC_BUCKET_CAP = 4096
 _erp_sync_buckets: dict[str, tuple[float, int]] = {}
 
 
 def _enforce_erp_sync_rate_limit(actor_key: str) -> None:
     now = time.monotonic()
     with _erp_sync_lock:
+        expired = [key for key, (start, _) in _erp_sync_buckets.items() if now - start >= _ERP_SYNC_WINDOW_SECONDS]
+        for key in expired:
+            del _erp_sync_buckets[key]
+        if actor_key not in _erp_sync_buckets and len(_erp_sync_buckets) >= _ERP_SYNC_BUCKET_CAP:
+            raise RateLimitError("rate limit credential capacity exhausted")
         window_start, count = _erp_sync_buckets.get(actor_key, (0.0, 0))
         if now - window_start >= _ERP_SYNC_WINDOW_SECONDS:
             window_start, count = now, 0
@@ -113,8 +120,20 @@ def sync_erp(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             default_merchant_id=default_merchant_id,
             allowed_merchant_id=allowed_merchant_id,
         )
+
+        def recheck_authorization(write_conn: sqlite3.Connection) -> None:
+            # Fetching releases the database writer. Recheck the authoritative
+            # credentials and merchant existence under the final write lock.
+            if is_admin:
+                api_auth.require_admin_token(payload)
+                if default_merchant_id:
+                    require_merchant(write_conn, default_merchant_id)
+            else:
+                token_service.require_merchant_token(write_conn, allowed_merchant_id, api_auth.payload_token(payload))
+                require_merchant(write_conn, allowed_merchant_id)
+
         try:
-            report = sync_erp_products(conn, config)
+            report = sync_erp_products(conn, config, before_write=recheck_authorization)
         except (ErpSourceError, OSError) as exc:
             # ERP 网络/结构失败统一 fail-closed 信封（200 + ok:false）
             return {"ok": False, "error": str(exc), "actor": actor}

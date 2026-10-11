@@ -21,7 +21,9 @@ RUN groupadd --gid 10001 shopping \
     && useradd --uid 10001 --gid shopping --create-home --shell /usr/sbin/nologin shopping \
     && install -d -o shopping -g shopping /data
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels "shopping-cli[api]==3.0.1" \
+RUN set -- /wheels/shopping_cli-*.whl \
+    && test "$#" -eq 1 && test -f "$1" \
+    && python -m pip install --no-cache-dir --no-index --find-links=/wheels "$1[api]" \
     && find /wheels -type f -delete
 
 USER 10001:10001

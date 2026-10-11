@@ -11,12 +11,16 @@ def build_error_response(
     status_code: int,
     error: str,
     response_factory: Callable[..., Any] | None = None,
+    *, headers: dict[str, str] | None = None,
 ) -> Any:
     """Build the existing JSON error envelope for FastAPI or fallback mode."""
     payload = {"ok": False, "error": error}
     if response_factory is not None:
+        if headers:
+            return response_factory(status_code=status_code, content=payload, headers=headers)
         return response_factory(status_code=status_code, content=payload)
     return SimpleNamespace(
         status_code=status_code,
         body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers or {},
     )

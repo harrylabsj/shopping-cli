@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
-from typing import Any
+from typing import Any, Callable
 
 from shopping_cli.agents import merchant_agent, merchant_daemon
 from shopping_cli.agents.tools import HTTPMerchantAgentTools
@@ -44,10 +44,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         tools = HTTPMerchantAgentTools(api_url, args.merchant, token, host=host, session_id=session_id)
         if args.once:
             result = merchant_agent.process_once_with_tools(tools, args.merchant)
-            if args.format == "text":
-                emit_agent_run_once_text(result)
-                return
-            emit(result, args.format)
+            emit_agent_runtime_result(result, args.format, emit_agent_run_once_text)
             return
         merchant_daemon.run_tools_forever(
             tools,
@@ -60,10 +57,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
     if args.once:
         with db_session(db_path_from_args(args)) as conn:
             result = merchant_agent.process_once(conn, args.merchant)
-        if args.format == "text":
-            emit_agent_run_once_text(result)
-            return
-        emit(result, args.format)
+        emit_agent_runtime_result(result, args.format, emit_agent_run_once_text)
         return
     merchant_daemon.run_forever(
         db_path_from_args(args),
@@ -118,6 +112,31 @@ def redact_secret_text(value: Any) -> str:
     return SECRET_VALUE_RE.sub("[redacted-token]", text)
 
 
+_RUNTIME_SECRET_KEYS = {"merchant_token", "agent_token", "buyer_token", "auth_token", "authorization", "password", "api_key"}
+
+
+def _redact_runtime_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: "[redacted-token]" if str(key).lower() in _RUNTIME_SECRET_KEYS else _redact_runtime_value(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_runtime_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_secret_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_secret_text(value)
+
+
+def emit_agent_runtime_result(result: dict[str, Any], fmt: str, text_emitter: Callable[[dict[str, Any]], None]) -> None:
+    """One diagnostic projection for JSON/text; explicit token issuance is separate."""
+    safe: dict[str, Any] = _redact_runtime_value(result)
+    if fmt == "text":
+        text_emitter(safe)
+    else:
+        emit(safe, fmt)
+
+
 def emit_agent_runtime_metadata(result: dict[str, Any]) -> None:
     print(f"Running: {yes_no(result.get('running'))}")
     print(f"PID: {result.get('pid') or '-'}")
@@ -161,10 +180,7 @@ def cmd_agent_start(args: argparse.Namespace) -> None:
         host=args.host or os.environ.get("SHOPPING_AGENT_HOST") or "",
         session_id=args.session_id or os.environ.get("SHOPPING_AGENT_SESSION_ID") or "",
     )
-    if args.format == "text":
-        emit_agent_start_text(result)
-        return
-    emit(result, args.format)
+    emit_agent_runtime_result(result, args.format, emit_agent_start_text)
 
 
 def cmd_agent_stop(args: argparse.Namespace) -> None:
@@ -174,10 +190,7 @@ def cmd_agent_stop(args: argparse.Namespace) -> None:
         state_dir=args.state_dir,
         timeout=args.timeout,
     )
-    if args.format == "text":
-        emit_agent_stop_text(result)
-        return
-    emit(result, args.format)
+    emit_agent_runtime_result(result, args.format, emit_agent_stop_text)
 
 
 def emit_agent_status_text(result: dict[str, Any]) -> None:
@@ -196,10 +209,7 @@ def emit_agent_status_text(result: dict[str, Any]) -> None:
 
 def cmd_agent_status(args: argparse.Namespace) -> None:
     result = merchant_daemon.status_agent(db_path_from_args(args), args.merchant, state_dir=args.state_dir)
-    if args.format == "text":
-        emit_agent_status_text(result)
-        return
-    emit(result, args.format)
+    emit_agent_runtime_result(result, args.format, emit_agent_status_text)
 
 
 def emit_agent_logs_text(result: dict[str, Any]) -> None:
@@ -228,19 +238,17 @@ def emit_agent_logs_text(result: dict[str, Any]) -> None:
 
 def cmd_agent_logs(args: argparse.Namespace) -> None:
     result = merchant_daemon.logs_agent(args.merchant, tail=args.tail, state_dir=args.state_dir)
-    if args.format == "text":
-        emit_agent_logs_text(result)
-        return
-    emit(result, args.format)
+    emit_agent_runtime_result(result, args.format, emit_agent_logs_text)
 
 
 def cmd_agent_heartbeat(args: argparse.Namespace) -> None:
     with db_session(db_path_from_args(args)) as conn:
         result = merchant_agent.heartbeat(conn, args.merchant, args.status)
+    safe: dict[str, Any] = _redact_runtime_value(result)
     if args.format == "text":
-        emit_agent_heartbeat_text(result)
+        emit_agent_heartbeat_text(safe)
         return
-    emit({"ok": True, "agent": result}, args.format)
+    emit({"ok": True, "agent": safe}, args.format)
 
 
 def emit_agent_heartbeat_text(agent: dict[str, Any]) -> None:

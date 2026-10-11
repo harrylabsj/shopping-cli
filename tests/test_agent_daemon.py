@@ -621,7 +621,8 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                 )
 
             self.assertEqual(sleep_durations, [])
-            kill.assert_not_called()
+            self.assertEqual(kill.call_args_list, [unittest.mock.call(12345, 0)])
+            # Presence probing never grants permission to send TERM or KILL.
             self.assertTrue(stopped["ok"])
 
     def test_agent_stop_caps_oversized_timeout(self):
@@ -667,7 +668,8 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                 )
 
             self.assertEqual(sleep_durations, [])
-            kill.assert_not_called()
+            self.assertEqual(kill.call_args_list, [unittest.mock.call(12345, 0)])
+            # Presence probing never grants permission to send TERM or KILL.
             self.assertTrue(stopped["ok"])
             self.assertFalse(stopped["running"])
 
@@ -706,7 +708,8 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
                 )
 
             self.assertEqual(sleep_durations, [])
-            kill.assert_not_called()
+            self.assertEqual(kill.call_args_list, [unittest.mock.call(12345, 0)])
+            # Presence probing never grants permission to send TERM or KILL.
             self.assertTrue(stopped["ok"])
 
 

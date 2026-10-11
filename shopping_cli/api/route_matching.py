@@ -7,6 +7,8 @@ import re
 
 def match_path(template: str, path: str) -> dict[str, str] | None:
     """Return path parameters when *path* matches a route template."""
+    if "\n" in path or "\r" in path:
+        return None
     parts = template.split("/")
     regex_parts = []
     for part in parts:
@@ -15,5 +17,5 @@ def match_path(template: str, path: str) -> dict[str, str] | None:
             regex_parts.append(f"(?P<{param_name}>[^/]+)")
         else:
             regex_parts.append(re.escape(part))
-    match = re.match("^" + "/".join(regex_parts) + "$", path)
+    match = re.match("^" + "/".join(regex_parts) + r"\Z", path)
     return match.groupdict() if match else None

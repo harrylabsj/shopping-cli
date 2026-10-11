@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from shopping_cli.api.sqlite_contention import CONTENTION_MESSAGE
+
 import asyncio
 import hashlib
 import json
@@ -93,6 +95,14 @@ class MarketplaceASGIApp:
         return self._route_resolver
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "lifespan":
+            while True:
+                event = await receive()
+                if event.get("type") == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif event.get("type") == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
         if scope.get("type") != "http":
             await send({"type": "http.response.start", "status": 404, "headers": [(b"content-type", b"application/json")]})
             await send({"type": "http.response.body", "body": b'{"ok":false,"error":"unsupported scope"}'})
@@ -213,6 +223,7 @@ class MarketplaceASGIApp:
                     (b"content-type", b"application/json"),
                     (b"etag", etag.encode("ascii")),
                     (b"content-length", str(len(body)).encode("ascii")),
+                    *([(b"retry-after", b"1")] if status == 503 and response.get("error") == CONTENTION_MESSAGE else []),
                 ],
             }
         )

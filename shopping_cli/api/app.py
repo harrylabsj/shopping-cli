@@ -15,10 +15,12 @@ route_registry、fallback ASGI 与既有导入方不变。
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from shopping_cli import VERSION
+from shopping_cli.api.sqlite_contention import CONTENTION_MESSAGE, is_sqlite_contention
 from shopping_cli.api.fallback_asgi import MarketplaceASGIApp
 from shopping_cli.api.fastapi_routes import (
     AUTHORIZATION_HEADER,  # noqa: F401 - compat re-export for external importers
@@ -92,6 +94,11 @@ def handle_request(
         return 400, {"ok": False, "error": str(exc)}
     except ShoppingCliError as exc:
         return 400, {"ok": False, "error": str(exc)}
+    except sqlite3.OperationalError as exc:
+        if is_sqlite_contention(exc):
+            return 503, {"ok": False, "error": CONTENTION_MESSAGE}
+        logger.exception("unhandled SQLite operation handling %s %s", method, path)
+        return 500, {"ok": False, "error": "internal server error"}
     except Exception:
         logger.exception("unhandled error handling %s %s", method, path)
         return 500, {"ok": False, "error": "internal server error"}

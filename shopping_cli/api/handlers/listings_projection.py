@@ -55,11 +55,13 @@ def get_listing_projection(db_path: str | Path, sku: str, payload: dict[str, Any
     if not sku:
         raise ValidationError("sku is required")
     with db_session(db_path) as conn:
-        row = conn.execute("select merchant_id from products where sku = ?", (sku,)).fetchone()
+        row = conn.execute("select merchant_id, active, listing_paused from products where sku = ?", (sku,)).fetchone()
         owner = _owner_merchant_from_payload(conn, payload)
         is_owner = bool(
             owner and row is not None and owner == str(row["merchant_id"] or "")
         )
+        if not is_owner and (row is None or not bool(row["active"]) or bool(row["listing_paused"])):
+            raise NotFoundError("listing is not publicly available")
         try:
             # 审查 S-M3：私有剥离收进投影层（include_private）。
             # merchant_id 由商品 owner 派生（配送时效是商家级字段，投影需要它）；

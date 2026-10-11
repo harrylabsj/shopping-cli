@@ -72,8 +72,19 @@ shopping adapters list
 ### 读写边界 / 删除 / 回滚
 
 - 只写 `products` 表，不写 conversation / 订单 / 库存预留（no-order 边界保持）。
-- 导入不物理删除：如需下架，用 `shopping product update --active 0`（回滚 = 再导
-  上一版文件或本地改 active）。
+- 导入不物理删除。暂停/恢复销售使用 `products.listing_paused`：当前 CLI
+  `shopping product update` 没有 `--active` 参数。使用已实现的 owner API
+  `PATCH /v1/merchant/products/{sku}/listing`，鉴权为所属商户 Bearer token。
+  请求必须带唯一 `operation_id`、`merchant_id`、布尔 `paused` 及当前
+  `currency_table_version`，相同请求使用相同 operation_id 查询/重放原回执。
+  例如请求 JSON（token 放 Authorization，不放 JSON；SKU 放路径）：
+
+  ```json
+  {"merchant_id":"merchant-example","operation_id":"listing-pause-example-1","paused":true,"currency_table_version":"kiwi-workbench-currency-v1-2026-09-21"}
+  ```
+
+  恢复销售用 `paused:false` 与新的 operation_id；暂停不修改价格或库存，
+  商品仍保留。owner 可诊断单条投影，匿名投影拒绝 inactive/paused 商品。
 - 单行失败不中止整批：记入 `report.errors` 继续；整批在 `conn.commit()` 前失败
   则整体回滚（SQLite 事务）。
 

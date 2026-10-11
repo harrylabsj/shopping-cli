@@ -67,4 +67,4 @@ where = ["."]
 include = ["shopping_cli*"]
 
 [tool.setuptools.package-data]
-shopping_cli = ["contracts/*.json"]
+shopping_cli = ["contracts/*.json", "contracts/**/*.json"]

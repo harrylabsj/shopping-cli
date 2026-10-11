@@ -392,7 +392,7 @@ def decimal_token_to_minor(currency: str, token: str) -> str:
         amount = Decimal(token)
     except (InvalidOperation, ValueError) as exc:
         raise ValidationError("amount must be an authoritative plain decimal string") from exc
-    if amount < 0 or "e" in token.lower():
+    if not amount.is_finite() or amount < 0 or "e" in token.lower():
         raise ValidationError("amount must be a non-negative plain decimal string")
     scaled = amount * (Decimal(10) ** exponent)
     if scaled != scaled.to_integral_value():

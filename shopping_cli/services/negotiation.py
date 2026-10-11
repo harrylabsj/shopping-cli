@@ -13,11 +13,13 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from shopping_cli.agents import merchant_agent
 from shopping_cli.core import negotiation as protocol
 from shopping_cli.core.catalog import product_summary
+from shopping_cli.core.money_authority import SUPPORTED_EXPONENTS, exact_product_money, money_mode
 from shopping_cli.core.conversations import (
     add_flag,
     append_message,
@@ -516,8 +518,19 @@ def _merchant_gate(
     product = _load_conversation_product(conn, conversation)
     # v26：结构化底价/折扣优先（floor_price / max_discount_percent），回退
     # automation_boundaries 自由文本正则（_effective_floor_price 内部处理）。
-    effective_floor = merchant_agent._effective_floor_price(product)
-    floor_str = str(effective_floor) if effective_floor is not None else ""
+    mode, _authority_version = money_mode(conn, str(product["merchant_id"]))
+    if mode == "FROZEN" and proposal is not None:
+        return _human("money_authority_frozen", "金额权威正在切换，需要人工处理。")
+    private_money = product
+    if mode == "EXACT_MINOR":
+        exact = exact_product_money(conn, str(product["merchant_id"]), str(product["sku"]))
+        scale = Decimal(10) ** SUPPORTED_EXPONENTS[exact.currency]
+        private_money = {**product, "price": Decimal(exact.price_minor) / scale,
+                         "floor_price": Decimal(exact.floor_price_minor) / scale}
+    effective_floor = merchant_agent._effective_floor_price_decimal(private_money)
+    floor_str = format(effective_floor, "f") if effective_floor is not None else ""
+    if "." in floor_str:
+        floor_str = floor_str.rstrip("0").rstrip(".")
     # 泄漏守卫对每个 merchant 决策运行——ask/decline 等无 proposal 的决策
     # 也可能携带泄露底价的 public_message（此前该分支直接放行）。
     if floor_str and _leaks_private_threshold(str(decision.get("public_message") or ""), floor_str):
@@ -535,11 +548,11 @@ def _merchant_gate(
     age = (datetime.now(timezone.utc) - observed_at).total_seconds()
     if age > protocol.STOCK_OBSERVATION_MAX_AGE_SECONDS or age < -60:
         return _reject("stale_inventory", "库存观察时间已过期，请重新获取快照后再报价。")
-    unit_price = float(proposal["unit_price"])
+    unit_price = Decimal(str(proposal["unit_price"]))
     if effective_floor is not None:
         if unit_price < effective_floor:
             return _human("below_floor", "报价低于商家授权的自动磋商范围，需要人工处理。")
-    elif unit_price < float(product["price"]):
+    elif unit_price < Decimal(str(private_money["price"])):
         return _human("unauthorized_discount", "该折扣没有商家授权规则，需要人工处理。")
     return _ACCEPT
 
@@ -550,9 +563,19 @@ def _find_decision_replay(
     conversation_id: str,
     idempotency_key: str,
 ) -> dict[str, Any] | None:
-    # 反向扫描最近 100 条：replay 目标恒是刚写入的 decision 消息（幂等
-    # 重试发生在提交后不久），首次命中即返回——避免每次 submit 全量
-    # 扫描会话（O(n)，长会话下每次决策都拖慢）。
+    # Committed ledger receipts remain authoritative after the message window.
+    # Reserved message_id=0 rows are not completed outcomes.
+    committed = conn.execute(
+        "select message_id, decision_json from negotiation_decision_idempotency "
+        "where conversation_id=? and agent_id=? and idempotency_key=? and message_id>0",
+        (conversation_id, actor.agent_id, idempotency_key),
+    ).fetchone()
+    if committed is not None:
+        stored = decode_json(committed["decision_json"], {})
+        if not stored:
+            raise IdempotencyConflict("committed decision receipt is incomplete; reconciliation required")
+        return {"message_id": int(committed["message_id"]), "decision": stored}
+    # Legacy accepted messages without a ledger keep the bounded old fallback.
     rows = conn.execute(
         "select id, structured_payload_json from messages "
         "where conversation_id = ? order by id desc limit 100",

@@ -1,0 +1,211 @@
+{
+  "manifest_version": 1,
+  "authority": "kiwi/contracts",
+  "bundle_sha256": "a867a10774c7990f585e57ea186262a46a2eeb62e75d81f0e8606940dc30a4bb",
+  "contracts": [
+    {
+      "id": "commerce-intent",
+      "version": "1.0",
+      "path": "contracts/commerce-intent/1.0/schema.json",
+      "sha256": "58e24c3d41dab8d582c7e74b540546ccad601b0e219ea1f988eca21c9107a7fb"
+    },
+    {
+      "id": "delegation-policy",
+      "version": "1.0",
+      "path": "contracts/delegation-policy/1.0/schema.json",
+      "sha256": "62a146055a68f9a1014c99ed58d6ba02160e17441f9577de0fd134023c038341"
+    },
+    {
+      "id": "effective-authorization",
+      "version": "1.0",
+      "path": "contracts/effective-authorization/1.0/schema.json",
+      "sha256": "7a04d97de2c5b2777766ee260ca8a8a2bce5024e2bff817a64ad6ff327856aa1"
+    },
+    {
+      "id": "persistent-task",
+      "version": "1.0",
+      "path": "contracts/persistent-task/1.0/schema.json",
+      "sha256": "f01c7df2dd439350daddbc272985bf4caa3db50b9c741cd1454799fdad1afdcc"
+    },
+    {
+      "id": "candidate-agent-dto",
+      "version": "1.0",
+      "path": "contracts/candidate-agent-dto-1.0.schema.json",
+      "sha256": "9c820cff1f998662dee6fe85f7a6a8bbc3d1a8bce8b8802b6483612ae06dec03"
+    },
+    {
+      "id": "kiwi-catalog-agent-record",
+      "version": "1.0",
+      "path": "contracts/kiwi-catalog/1.0/agent-record.schema.json",
+      "sha256": "2d4cc595f8fd5d7bd6b7ce45066519695ecf867a3f1089bf112d1bff1e30fe15"
+    },
+    {
+      "id": "kiwi-catalog-listing-record",
+      "version": "1.0",
+      "path": "contracts/kiwi-catalog/1.0/listing-record.schema.json",
+      "sha256": "9bdb2b262404b3a9fe57e4c4b09d337341d89f6b8aba40c54b49eaa46b687662"
+    },
+    {
+      "id": "kiwi-catalog-listing-search-result",
+      "version": "1.0",
+      "path": "contracts/kiwi-catalog/1.0/listing-search-result.schema.json",
+      "sha256": "c77792ffb7e4eb0a59cd0f4d48059686face8878674afac1090808ccb6c7fee7"
+    },
+    {
+      "id": "negotiation-envelope",
+      "version": "1.0",
+      "path": "contracts/negotiation/1.0/schema.json",
+      "sha256": "7a0da30fb8a6d91b653d9507beaa4615f263d4b26d7bc9c3e61f64853f3495c6"
+    },
+    {
+      "id": "shopping-negotiation-capabilities",
+      "version": "0.1",
+      "path": "contracts/shopping.negotiation/0.1/capabilities.schema.json",
+      "sha256": "386a6eda04d20e31519e86aa2c7b30403af5ec31dbd9ac0d15a440347d7e1356"
+    },
+    {
+      "id": "shopping-negotiation-decision",
+      "version": "0.1",
+      "path": "contracts/shopping.negotiation/0.1/decision.schema.json",
+      "sha256": "b98255cf779f76a15c5768dc75fd6d9cd5616c4cbaa0593053b113e7bd2c4ef1"
+    },
+    {
+      "id": "shopping-negotiation-policy-result",
+      "version": "0.1",
+      "path": "contracts/shopping.negotiation/0.1/policy-result.schema.json",
+      "sha256": "3b2dd7980c091c50f8a58dd18f15a0a56a483ba722c075153ee1c3be07c660e8"
+    },
+    {
+      "id": "shopping-negotiation-snapshot",
+      "version": "0.1",
+      "path": "contracts/shopping.negotiation/0.1/snapshot.schema.json",
+      "sha256": "3684e5674917b1d3777e298d9e18e34f3f124d1ba7534540de08023be45a4e27"
+    },
+    {
+      "id": "merchant-rfq-delivery-record",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/delivery-record.schema.json",
+      "sha256": "a49bf130a1da087ba32ae0b97d89785829acdcd71f744cdc023e9720b4bfbf24"
+    },
+    {
+      "id": "merchant-rfq-fact-snapshot",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/fact-snapshot.schema.json",
+      "sha256": "393e875e64afe4dca8d4e2eb6b094006c0c10a6b0c620bcad0534d85f1341a6e"
+    },
+    {
+      "id": "merchant-rfq-handoff-record",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/handoff-record.schema.json",
+      "sha256": "ea6a8177d351542493e4992865eddf84f778335765dc5d2c28172f6a70d14029"
+    },
+    {
+      "id": "merchant-rfq-pricing-input",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/pricing-input.schema.json",
+      "sha256": "c22cfb4ddb76b6e6e6b866a0d0a06d83b9a0847924b4801415861d9cce7493ed"
+    },
+    {
+      "id": "merchant-rfq-quote-revision",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/quote-revision.schema.json",
+      "sha256": "e089db6aa725b1ac5c0a7bd248e69298ca3a1a5af9437f086490b9ca096a770e"
+    },
+    {
+      "id": "merchant-rfq-release-request",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/release-request.schema.json",
+      "sha256": "aeff815962e28232da2b8784b6e61b80e04bbdcbdd40ff13801514e26911164b"
+    },
+    {
+      "id": "merchant-rfq-rfq-case",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/rfq-case.schema.json",
+      "sha256": "20d384a302602707bd3562e891edb5e7558f5e825251b35f90d51409cbe36cb6"
+    },
+    {
+      "id": "merchant-rfq-source-record",
+      "version": "0.1.0",
+      "path": "contracts/merchant-rfq/0.1.0/source-record.schema.json",
+      "sha256": "822f6b17ab3b77479385e092c50b04355a84b0820fba74a57d4ab38aa60415ad"
+    },
+    {
+      "id": "runtime-binding-claims",
+      "version": "0.1.2",
+      "path": "contracts/runtime-binding/0.1.2/claims.schema.json",
+      "sha256": "dacdacf7099c595cf70899994d3778f33f0476757426555c31168fbfd6660d4e"
+    },
+    {
+      "id": "runtime-binding-document",
+      "version": "0.1.2",
+      "path": "contracts/runtime-binding/0.1.2/document.schema.json",
+      "sha256": "752860e06c8af8739385efed02e6c09f70ccec4d115b56479c4a4290f0d28697"
+    },
+    {
+      "id": "runtime-binding-request",
+      "version": "0.1.2",
+      "path": "contracts/runtime-binding/0.1.2/binding-request.schema.json",
+      "sha256": "7788b5722614b0ae4ccb47657a64f75be9dac13f962a50aa6a1937c3761b7b15"
+    },
+    {
+      "id": "card-publication-request",
+      "version": "0.1.2",
+      "path": "contracts/card-publication/0.1.2/request.schema.json",
+      "sha256": "9053e039b8d59c0bbb2d9c73a6d1219491148f28346e1202355605aa5311c72e"
+    },
+    {
+      "id": "merchant-management-runtime-status",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/runtime-status.schema.json",
+      "sha256": "6ac15f81c9443dd6a1401ae45d40d956b1967af1952985a7856e0b79ff6e354f"
+    },
+    {
+      "id": "merchant-management-approval-preview",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/approval-preview.schema.json",
+      "sha256": "2bd48d77482677a8a142c8e751da10fd678dd66a2bc6d72014c17f459ad519fa"
+    },
+    {
+      "id": "merchant-management-approval-decision",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/approval-decision.schema.json",
+      "sha256": "e3e606bd6d4ae152910de304b283207d5407e4f7a31f9dfcffb5ec8e9d07aa6c"
+    },
+    {
+      "id": "merchant-management-operation-receipt",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/operation-receipt.schema.json",
+      "sha256": "f247d3060f93aa0cdc986152c39d3ec7f821e5ddf370274b795b85df7902059f"
+    },
+    {
+      "id": "merchant-management-management-error",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/management-error.schema.json",
+      "sha256": "20feb287235c383769407fd673457a30166ef5778e148e56e9f92310c69221a3"
+    },
+    {
+      "id": "merchant-management-runtime-descriptor",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/runtime-management-descriptor.schema.json",
+      "sha256": "cb284a6b03119219967090562e4723371e9052f31f51d06b790ab4602b144af0"
+    },
+    {
+      "id": "merchant-management-delivery-manifest",
+      "version": "1.0",
+      "path": "contracts/merchant-management/1.0/connector-delivery-manifest.schema.json",
+      "sha256": "cad7c8735d0b1684176b4871a17b9b3b1831b6600b745ee2551e753bfcade82d"
+    },
+    {
+      "id": "merchant-workbench-problem",
+      "version": "1.0",
+      "path": "contracts/merchant-workbench/1.0/problem.schema.json",
+      "sha256": "0763b5106af2fa3ad6a2b180dd2cbe7476844a4a7089bca1a2d978eaa949fe34"
+    },
+    {
+      "id": "merchant-workbench-money",
+      "version": "1.0",
+      "path": "contracts/merchant-workbench/1.0/money.schema.json",
+      "sha256": "f7f52cde540607fc0ff7185b6681171317d0f24bea5a68f8012061478ca93265"
+    }
+  ]
+}

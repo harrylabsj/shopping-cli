@@ -107,6 +107,8 @@ class ErpDataSourceTest(unittest.TestCase):
                price, currency, stock, delivery_attributes_json, active, source, created_at, updated_at)
                values ('SKU-001','merchant-1','Local Title','','','[]',55.0,'CNY',1,'[]',1,'local','t','t')"""
         )
+        # Finish fixture initialization/edit before the owned network sync.
+        self.conn.commit()
         fetch = fake_fetch([PAGE1])
         report = sync_erp_products(self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"), fetch=fetch)
         self.assertEqual(report.skipped, 1)
@@ -125,6 +127,8 @@ class ErpDataSourceTest(unittest.TestCase):
                price, currency, stock, delivery_attributes_json, active, source, created_at, updated_at)
                values ('SKU-001','merchant-1','Other Tenant','','','[]',55.0,'CNY',1,'[]',1,'local','t','t')"""
         )
+        # Finish fixture initialization/edit before the owned network sync.
+        self.conn.commit()
         fetch = fake_fetch([PAGE1])
         report = sync_erp_products(self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-2"), fetch=fetch)
         self.assertEqual(report.skipped, 1)
@@ -325,6 +329,8 @@ class ErpDataSourceTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["source"], "local")
         # 提升后：再次同步同一 SKU 必须跳过并记入 conflicts（不再被覆盖）。
+        # Finish fixture initialization/edit before the owned network sync.
+        self.conn.commit()
         fetch = fake_fetch([PAGE1])
         report = sync_erp_products(
             self.conn, ErpSyncConfig(base_url="https://erp.example", default_merchant_id="merchant-1"),

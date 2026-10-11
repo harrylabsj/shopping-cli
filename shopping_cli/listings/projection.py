@@ -52,7 +52,14 @@ def project_product_listing(
     **缺省剥离**（``include_private=False``），仅 owner 显式 opt-in 保留。此前
     剥离依赖调用方，CLI ``--format json`` 原样输出即泄漏成交入口。
     """
-    row = _product_row(conn, sku)
+    return _project_product_row(_product_row(conn, sku), merchant_id=merchant_id,
+                                include_private=include_private,
+                                times=delivery_times(conn, merchant_id) if merchant_id else {})
+
+
+def _project_product_row(row: dict[str, Any], *, merchant_id: str,
+                         include_private: bool, times: dict[str, dict[str, int]]) -> dict[str, Any]:
+    sku = str(row["sku"])
     if merchant_id and row["merchant_id"] != merchant_id:
         raise ProjectionError(f"product {sku} belongs to merchant {row['merchant_id']}, not {merchant_id}")
 
@@ -73,7 +80,6 @@ def project_product_listing(
     # 阶段看到时效摘要与履约区域。商家级字段（delivery_rules.delivery_times_json），
     # 由商家用 `delivery set-time` 维护；为空保持 regions:[] 且无 commercial_hints。
     if merchant_id:
-        times = delivery_times(conn, merchant_id)
         if times:
             region_names = sorted(times.keys())
             projection["regions"] = region_names
@@ -155,16 +161,12 @@ def list_publishable_listings(
     products 里、可恢复，但**不可发布**（v31 起 paused 是独立事实列，刻意不用
     active=0 或库存写零伪装，三者的恢复语义与对账含义都不同）。
     """
-    rows = conn.execute(
-        "select * from products where active = 1 and coalesce(listing_paused, 0) = 0 order by sku",
-    ).fetchall()
-    projections: list[dict[str, Any]] = []
-    for row in rows:
-        if merchant_id and row["merchant_id"] != merchant_id:
-            continue
-        projections.append(
-            project_product_listing(
-                conn, row["sku"], merchant_id=merchant_id, include_private=include_private
-            )
-        )
-    return projections
+    sql = "select * from products where active = 1 and coalesce(listing_paused, 0) = 0"
+    params: tuple[str, ...] = ()
+    if merchant_id:
+        sql += " and merchant_id = ?"
+        params = (merchant_id,)
+    rows = conn.execute(sql + " order by sku", params).fetchall()
+    times = delivery_times(conn, merchant_id) if merchant_id and rows else {}
+    return [_project_product_row(dict(row), merchant_id=merchant_id,
+                                 include_private=include_private, times=times) for row in rows]

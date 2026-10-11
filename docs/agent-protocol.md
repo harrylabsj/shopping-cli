@@ -28,6 +28,15 @@
 - `text`
 - optional structured payload, including `source_id` for the buyer CLI, merchant agent, or operator process that created the message
 
+Human-review resolution still validates the requested `sender` label, but the stored
+message label is derived from the authenticated resolver branch: operator-routed
+review reasons require the configured admin token and record `operator`; ordinary
+reviews require the owning merchant token and record `merchant`. An identity string
+spelled `admin` does not confer an operator role. `structured_payload.source_id` and
+resolution/closure audit actors retain the true token-derived actor identity. This
+changes message/audit display attribution, not who may resolve a review.
+
+
 Merchant agents may answer public catalog, stock, price, delivery, and substitution questions. Private discounts, commitments, stock reservation, payment evidence, refunds, disputes, and unclear requests require `human_required`.
 
 ## Tool Boundary

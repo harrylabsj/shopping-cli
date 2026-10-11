@@ -7,6 +7,7 @@
     "docs/agent-protocol.md",
     "docs/architecture.md",
     "shopping_cli/**/*.py",
+    "shopping_cli/contracts/**/*.json",
     "plugins/shopping-plugin/index.js",
     "plugins/shopping-plugin/openclaw_compat.js",
     "plugins/shopping-plugin/openclaw.plugin.json",
@@ -26,7 +27,8 @@
     "marketplace.example.env",
     "pyproject.toml",
     "seller-demo.json",
-    "SKILL.md"
+    "SKILL.md",
+    "scripts/verify_contract_lock.py"
   ],
   "bin": {
     "shopping-cli": "scripts/shopping.py",

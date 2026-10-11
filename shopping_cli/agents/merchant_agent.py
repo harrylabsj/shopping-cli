@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, cast
 
 from shopping_cli import VERSION
@@ -115,27 +116,39 @@ def _authorized_bargain_amount(product: dict[str, Any]) -> str:
     return ""
 
 
-def _effective_floor_price(product: dict[str, Any]) -> float | None:
-    """解析商家授权的最低成交价（v26 结构化优先）。
+def _effective_floor_price_decimal(product: dict[str, Any]) -> Decimal | None:
+    """Exact private floor calculation; preserves the existing policy priority."""
+    def amount(value: Any) -> Decimal:
+        if isinstance(value, Decimal):
+            return value if value.is_finite() and value >= 0 else Decimal(0)
+        return Decimal(str(_safe_non_negative_float(value)))
 
-    优先级：``product.floor_price > 0`` → 用它；否则
-    ``0 < max_discount_percent <= 100`` → ``price * (1 - discount/100)``；
-    否则回退 ``_authorized_bargain_amount`` 自由文本正则（存量
-    ``automation_boundaries`` 兼容）。全无 → None（无授权底价）。
-    """
-    floor = _safe_non_negative_float(product.get("floor_price"))
+    floor = amount(product.get("floor_price"))
     if floor > 0:
         return floor
-    discount = _safe_non_negative_float(product.get("max_discount_percent"))
+    discount = amount(product.get("max_discount_percent"))
     if 0 < discount <= 100:
-        return _safe_non_negative_float(product.get("price")) * (1 - discount / 100)
+        price = amount(product.get("price"))
+        # Enough precision for the finite stored decimal coefficients/exponents,
+        # including a tiny discount. No currency/floor rounding policy is added.
+        with localcontext() as context:
+            context.prec = max(28, sum(len(v.as_tuple().digits) + abs(int(v.as_tuple().exponent))
+                                      for v in (price, discount)) + 10)
+            return price * (1 - discount / 100)
     free_text = _authorized_bargain_amount(product)
     if free_text:
         try:
-            return float(free_text)
-        except (TypeError, ValueError):
+            value = Decimal(free_text)
+            return value if value.is_finite() and value >= 0 else None
+        except (InvalidOperation, TypeError, ValueError):
             return None
     return None
+
+
+def _effective_floor_price(product: dict[str, Any]) -> float | None:
+    """Legacy float projection for existing callers; the authoritative gate is decimal."""
+    value = _effective_floor_price_decimal(product)
+    return float(value) if value is not None else None
 
 
 def generate_reply(
