@@ -4,6 +4,8 @@ __pycache__/
 build/
 *.egg-info/
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .env
 .env.*
 !.env.example
