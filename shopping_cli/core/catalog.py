@@ -989,6 +989,14 @@ def product_summary(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
         "handoff_destination": product["handoff_destination"] or "",
         "trade_platform": product["trade_platform"] or "",
         "platform_product_id": product["platform_product_id"] or "",
+        # 来源凭据（商家读）/ 卖给买家的公开投影里会被剥离：商家运行时用它判断
+        # “这份库存/价格是不是可核实的当前事实”，缺了就不敢随报价下发成交入口。
+        "source_evidence": {
+            "system": "shopping-cli",
+            "source_version": str(product["source_revision"] or ""),
+            "updated_at": str(product["observed_at"] or product["updated_at"] or ""),
+            "retrieved_at": str(product["updated_at"] or ""),
+        },
         "floor_price": _safe_non_negative_float(product["floor_price"]),
         "max_discount_percent": _safe_non_negative_float(product["max_discount_percent"]),
         "promotions": decode_promotions(product["promotions_json"]),
