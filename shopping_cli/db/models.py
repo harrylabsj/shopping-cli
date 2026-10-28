@@ -342,6 +342,10 @@ INDEXES = [
     on merchant_token_rotations(previous_token_hash) where status = 'pending'
     """,
     """
+    create index if not exists idx_merchant_token_rotation_replacement
+    on merchant_token_rotations(replacement_token_hash)
+    """,
+    """
     create index if not exists idx_agents_owner_id
     on agents(owner_id, id)
     """,

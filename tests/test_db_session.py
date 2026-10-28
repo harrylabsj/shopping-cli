@@ -290,7 +290,9 @@ class DbSessionTest(unittest.TestCase):
 
             self.assertEqual(schema_version["value"], str(CURRENT_SCHEMA_VERSION))
             self.assertEqual(user_version, CURRENT_SCHEMA_VERSION)
-            self.assertEqual(CURRENT_SCHEMA_VERSION, 31)
+            # 这里只关心「本迁移已经落地且之后没被回退」；精确当前版本由
+            # user_version/schema_version 断言负责，别让每次加迁移都要改这一行。
+            self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 31)
 
             # The installed index enforces uniqueness for new open reuse rows.
             with self.assertRaises(sqlite3.IntegrityError) as raised:

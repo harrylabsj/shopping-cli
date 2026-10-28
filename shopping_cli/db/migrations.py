@@ -753,6 +753,40 @@ def migration_031_listing_pause_and_operation_kind_enum(conn: sqlite3.Connection
     ensure_column(conn, "products", "listing_paused", "integer not null default 0")
 
 
+def migration_032_merchant_token_two_phase_rotation(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        create table if not exists merchant_token_rotations (
+            rotation_id text primary key,
+            merchant_id text not null,
+            previous_token_hash text not null,
+            replacement_token_hash text not null,
+            status text not null check(status in ('pending', 'confirmed', 'expired')),
+            expires_at text not null,
+            created_at text not null,
+            confirmed_at text not null default ''
+        )
+        """
+    )
+    # 鉴权热路径每次都按 replacement_token_hash 查 pending 状态（require_api_token），
+    # 索引必须跟着表一起建。
+    conn.execute(
+        """
+        create index if not exists idx_merchant_token_rotation_replacement
+        on merchant_token_rotations(replacement_token_hash)
+        """
+    )
+
+
+def migration_033_one_pending_merchant_token_rotation(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        create unique index if not exists idx_merchant_token_rotation_pending_old
+        on merchant_token_rotations(previous_token_hash) where status = 'pending'
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -778,22 +812,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(29, "merchant_product_operation_receipts", migration_029_merchant_product_operation_receipts),
     Migration(30, "product_inventory_operation_receipts", migration_030_product_inventory_operation_receipts),
     Migration(31, "listing_pause_and_operation_kind_enum", migration_031_listing_pause_and_operation_kind_enum),
-    Migration(32, "merchant_token_two_phase_rotation", lambda conn: conn.execute("""
-        create table if not exists merchant_token_rotations (
-            rotation_id text primary key,
-            merchant_id text not null,
-            previous_token_hash text not null,
-            replacement_token_hash text not null,
-            status text not null check(status in ('pending', 'confirmed', 'expired')),
-            expires_at text not null,
-            created_at text not null,
-            confirmed_at text not null default ''
-        )
-    """)),
-    Migration(33, "one_pending_merchant_token_rotation", lambda conn: conn.execute("""
-        create unique index if not exists idx_merchant_token_rotation_pending_old
-        on merchant_token_rotations(previous_token_hash) where status = 'pending'
-    """)),
+    Migration(32, "merchant_token_two_phase_rotation", migration_032_merchant_token_two_phase_rotation),
+    Migration(33, "one_pending_merchant_token_rotation", migration_033_one_pending_merchant_token_rotation),
 )
 
 

@@ -281,7 +281,7 @@ def prepare_merchant_token_rotation(
         expires_at = (datetime.now() + timedelta(minutes=15)).replace(microsecond=0).isoformat()
         token_service.store_merchant_token(conn, replacement, merchant_id)
         conn.execute("insert into merchant_token_rotations(rotation_id,merchant_id,previous_token_hash,replacement_token_hash,status,expires_at,created_at) values(?,?,?,?,'pending',?,?)", (rotation_id, merchant_id, previous_hash, replacement_hash, expires_at, now_iso()))
-        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_prepared", {"rotation_id": rotation_id, "previous_token_prefix": previous_hash[:24], "replacement_token_prefix": token_prefix(replacement), "expires_at": expires_at, "actor": actor})
+        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_prepared", {"rotation_id": rotation_id, "previous_token_hash_prefix": previous_hash[:24], "replacement_token_prefix": token_prefix(replacement), "expires_at": expires_at, "actor": actor})
         return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "pending", "replacement_token_prefix": token_prefix(replacement), "expires_at": expires_at}
 
 
@@ -313,7 +313,7 @@ def confirm_merchant_token_rotation(db_path: str | Path, merchant_id: str, paylo
         revoked = conn.execute("update api_tokens set revoked_at=? where token_hash=? and merchant_id=? and role='merchant' and revoked_at=''", (confirmed_at, row["previous_token_hash"], merchant_id))
         if revoked.rowcount != 1:
             raise ConflictError("previous credential changed during rotation")
-        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_confirmed", {"rotation_id": rotation_id, "previous_token_prefix": row["previous_token_hash"][:24], "replacement_token_prefix": str(caller["token_hash"])[:24]})
+        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_confirmed", {"rotation_id": rotation_id, "previous_token_hash_prefix": row["previous_token_hash"][:24], "replacement_token_hash_prefix": str(caller["token_hash"])[:24]})
         return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "confirmed", "revoked_previous": True}
 
 

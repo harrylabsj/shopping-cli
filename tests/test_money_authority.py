@@ -47,7 +47,9 @@ class ExactMoneyAuthorityTest(unittest.TestCase):
         self.conn.close()
 
     def test_schema_v28_adds_nullable_exact_columns_without_guessing(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 31)
+        # 这里只关心「本迁移已经落地且之后没被回退」；精确当前版本由
+        # user_version/schema_version 断言负责，别让每次加迁移都要改这一行。
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 28)
         row = self.conn.execute(
             "select price_minor_text, floor_price_minor_text, money_currency_table_version "
             "from products where sku='sku-a'"
