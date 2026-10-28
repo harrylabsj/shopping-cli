@@ -52,6 +52,18 @@ def _rotate_merchant_token(db_path: str | Path, merchant_id: str, payload: dict[
     return catalog_handlers.rotate_merchant_token(db_path, merchant_id, payload, api_auth.require_admin_token)
 
 
+def _merchant_token_status(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.merchant_token_status(db_path, merchant_id, payload)
+
+
+def _prepare_merchant_token_rotation(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.prepare_merchant_token_rotation(db_path, merchant_id, payload, api_auth.require_admin_token)
+
+
+def _confirm_merchant_token_rotation(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return catalog_handlers.confirm_merchant_token_rotation(db_path, merchant_id, payload)
+
+
 def _revoke_merchant_tokens(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     return catalog_handlers.revoke_merchant_tokens(db_path, merchant_id, payload, api_auth.require_admin_token)
 
@@ -411,10 +423,17 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         lambda db_path, payload, query, merchant_id: _get_merchant_private_config(db_path, merchant_id, payload),
     ),
     RouteEntry(
+        {"GET"},
+        "/merchants/{merchant_id}/token/status",
+        lambda db_path, payload, query, merchant_id: _merchant_token_status(db_path, merchant_id, payload),
+    ),
+    RouteEntry(
         {"POST"},
         "/merchants/{merchant_id}/token/rotate",
         lambda db_path, payload, query, merchant_id: _rotate_merchant_token(db_path, merchant_id, payload),
     ),
+    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/rotate/prepare", lambda db_path, payload, query, merchant_id: _prepare_merchant_token_rotation(db_path, merchant_id, payload)),
+    RouteEntry({"POST"}, "/merchants/{merchant_id}/token/rotate/confirm", lambda db_path, payload, query, merchant_id: _confirm_merchant_token_rotation(db_path, merchant_id, payload)),
     RouteEntry(
         {"POST"},
         "/merchants/{merchant_id}/token/revoke",

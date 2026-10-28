@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 31
+CURRENT_SCHEMA_VERSION = 33
 
 
 @dataclass(frozen=True)
@@ -778,6 +778,22 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(29, "merchant_product_operation_receipts", migration_029_merchant_product_operation_receipts),
     Migration(30, "product_inventory_operation_receipts", migration_030_product_inventory_operation_receipts),
     Migration(31, "listing_pause_and_operation_kind_enum", migration_031_listing_pause_and_operation_kind_enum),
+    Migration(32, "merchant_token_two_phase_rotation", lambda conn: conn.execute("""
+        create table if not exists merchant_token_rotations (
+            rotation_id text primary key,
+            merchant_id text not null,
+            previous_token_hash text not null,
+            replacement_token_hash text not null,
+            status text not null check(status in ('pending', 'confirmed', 'expired')),
+            expires_at text not null,
+            created_at text not null,
+            confirmed_at text not null default ''
+        )
+    """)),
+    Migration(33, "one_pending_merchant_token_rotation", lambda conn: conn.execute("""
+        create unique index if not exists idx_merchant_token_rotation_pending_old
+        on merchant_token_rotations(previous_token_hash) where status = 'pending'
+    """)),
 )
 
 

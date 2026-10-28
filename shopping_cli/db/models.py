@@ -185,6 +185,18 @@ SCHEMA = [
     )
     """,
     """
+    create table if not exists merchant_token_rotations (
+        rotation_id text primary key,
+        merchant_id text not null,
+        previous_token_hash text not null,
+        replacement_token_hash text not null,
+        status text not null check(status in ('pending', 'confirmed', 'expired')),
+        expires_at text not null,
+        created_at text not null,
+        confirmed_at text not null default ''
+    )
+    """,
+    """
     create table if not exists audit_events (
         id integer primary key autoincrement,
         conversation_id text not null default '',
@@ -324,6 +336,10 @@ INDEXES = [
     """
     create index if not exists idx_api_tokens_merchant_role_prefix
     on api_tokens(merchant_id, role, token_prefix)
+    """,
+    """
+    create unique index if not exists idx_merchant_token_rotation_pending_old
+    on merchant_token_rotations(previous_token_hash) where status = 'pending'
     """,
     """
     create index if not exists idx_agents_owner_id

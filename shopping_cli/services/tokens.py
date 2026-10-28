@@ -124,6 +124,17 @@ def require_api_token(conn: Any, token: Any, missing_error: str = "authorization
         raise AuthError("revoked authorization token")
     if token_is_expired(row["expires_at"]):
         raise AuthError("expired authorization token")
+    # A two-phase replacement is usable only during its bounded confirmation
+    # window. Leave expiry cleanup to the rotation endpoint (so a rejected
+    # request does not roll back its own cleanup transaction), but fail closed
+    # on every use after the deadline.
+    if row["role"] == "merchant":
+        rotation = conn.execute(
+            "select status, expires_at from merchant_token_rotations where replacement_token_hash = ?",
+            (token_digest(raw_token),),
+        ).fetchone()
+        if rotation is not None and rotation["status"] == "pending" and token_is_expired(rotation["expires_at"]):
+            raise AuthError("pending replacement merchant token has expired")
     return row
 
 
@@ -231,6 +242,10 @@ def rotate_merchant_token(conn: Any, merchant_id: str, *, actor: str = "admin") 
         """,
         (revoked_at, merchant_id),
     )
+    conn.execute(
+        "update merchant_token_rotations set status='expired' where merchant_id=? and status='pending'",
+        (merchant_id,),
+    )
     token = issue_merchant_token(conn, merchant_id)
     append_audit_event(
         conn,
@@ -249,6 +264,10 @@ def revoke_merchant_tokens(conn: Any, merchant_id: str, *, actor: str = "admin")
         (revoked_at, merchant_id),
     )
     count = int(cursor.rowcount or 0)
+    conn.execute(
+        "update merchant_token_rotations set status='expired' where merchant_id=? and status='pending'",
+        (merchant_id,),
+    )
     append_audit_event(conn, "", actor, "merchant_tokens_revoked", {"merchant_id": merchant_id, "revoked_count": count})
     return count
 

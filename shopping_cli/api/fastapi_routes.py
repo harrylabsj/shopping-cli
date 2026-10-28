@@ -54,6 +54,7 @@ from shopping_cli.api.route_table import (
     _list_merchants,
     _list_products_exact,
     _merchant_conversations,
+    _merchant_token_status,
     _negotiation_abandon_claim,
     _negotiation_abandon_stale_claims,
     _negotiation_claim,
@@ -63,6 +64,8 @@ from shopping_cli.api.route_table import (
     _negotiation_pending_messages,
     _negotiation_snapshot,
     _negotiation_submit_decision,
+    _prepare_merchant_token_rotation,
+    _confirm_merchant_token_rotation,
     _recover_merchant_token,
     _record_tool_call_audit,
     _resolve_human_review,
@@ -166,6 +169,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             api_auth.payload_with_auth({}, authorization),
         )
 
+    @app.get("/merchants/{merchant_id}/token/status")
+    def merchant_token_status(merchant_id: str, authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _merchant_token_status(db_path, merchant_id, api_auth.payload_with_auth({}, authorization))
+
     @app.post("/merchants/{merchant_id}/token/rotate")
     def rotate_merchant_token(
         merchant_id: str,
@@ -177,6 +184,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             merchant_id,
             api_auth.payload_with_auth(payload, authorization),
         )
+
+    @app.post("/merchants/{merchant_id}/token/rotate/prepare")
+    def prepare_merchant_token_rotation(merchant_id: str, payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _prepare_merchant_token_rotation(db_path, merchant_id, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/merchants/{merchant_id}/token/rotate/confirm")
+    def confirm_merchant_token_rotation(merchant_id: str, payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _confirm_merchant_token_rotation(db_path, merchant_id, api_auth.payload_with_auth(payload, authorization))
 
     @app.post("/merchants/{merchant_id}/token/revoke")
     def revoke_merchant_tokens(

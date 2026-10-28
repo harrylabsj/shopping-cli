@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
@@ -196,6 +197,124 @@ def rotate_merchant_token(
             actor = str(token_row["merchant_id"])
         token = token_service.rotate_merchant_token(conn, merchant_id, actor=actor)
         return {"ok": True, "merchant_id": merchant_id, "merchant_token": token, "rotated": True}
+
+
+def merchant_token_status(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Return non-secret expiry metadata for the authenticated merchant token only."""
+    with db_session(db_path) as conn:
+        catalog.require_merchant(conn, merchant_id)
+        authenticated = token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
+        row = conn.execute(
+            "select token_prefix, created_at, expires_at from api_tokens where token_hash=? and merchant_id=? and role='merchant' and revoked_at=''",
+            (authenticated["token_hash"], merchant_id),
+        ).fetchone()
+        if row is None:
+            raise AuthError("invalid merchant token")
+        def utc_iso(value: str) -> str:
+            if not value:
+                return ""
+            parsed = datetime.fromisoformat(value)
+            return parsed.astimezone(timezone.utc).isoformat()
+        return {
+            "ok": True,
+            "merchant_id": merchant_id,
+            "token_prefix": str(row["token_prefix"] or ""),
+            "created_at": utc_iso(str(row["created_at"] or "")),
+            "expires_at": utc_iso(str(row["expires_at"] or "")),
+            "active": True,
+        }
+
+
+def prepare_merchant_token_rotation(
+    db_path: str | Path, merchant_id: str, payload: dict[str, Any], require_admin_token: Any,
+) -> dict[str, Any]:
+    """Install a client-generated replacement alongside the caller's current token.
+
+    The caller must durably retain replacement_token before sending it. Only its
+    digest is stored; retrying the same rotation_id and token safely recovers the
+    pending status after a lost response.
+    """
+    from datetime import datetime, timedelta
+    from shopping_cli.core.tokens import token_digest, token_prefix
+
+    rotation_id = str(payload.get("rotation_id") or "")
+    replacement = str(payload.get("replacement_token") or "")
+    if not (22 <= len(rotation_id) <= 128) or not rotation_id.isascii() or not all(c.isalnum() or c in "_-" for c in rotation_id):
+        raise ValidationError("rotation_id must be 22-128 URL-safe characters")
+    if not replacement.startswith("shopping_merchant_") or len(replacement) < 48 or not replacement.isascii() or any(c.isspace() for c in replacement):
+        raise ValidationError("replacement_token is not a valid merchant credential")
+    with db_session(db_path) as conn:
+        conn.execute("begin immediate")
+        catalog.require_merchant(conn, merchant_id)
+        actor = "admin"
+        try:
+            require_admin_token(payload)
+            previous_hash = str(payload.get("previous_token_hash") or "")
+            if len(previous_hash) != 64 or any(c not in "0123456789abcdef" for c in previous_hash):
+                raise ValidationError("admin rotation requires previous_token_hash")
+            row = conn.execute("select token_hash from api_tokens where token_hash=? and merchant_id=? and role='merchant' and revoked_at=''", (previous_hash, merchant_id)).fetchone()
+            if row is None:
+                raise AuthError("previous merchant token is not active")
+        except AuthError:
+            caller = token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
+            previous_hash = str(caller["token_hash"])
+            actor = merchant_id
+        replacement_hash = token_digest(replacement)
+        existing = conn.execute("select * from merchant_token_rotations where rotation_id=?", (rotation_id,)).fetchone()
+        if existing is not None:
+            if existing["merchant_id"] != merchant_id or existing["previous_token_hash"] != previous_hash or existing["replacement_token_hash"] != replacement_hash:
+                raise ConflictError("rotation_id was already used for a different rotation")
+            if existing["status"] == "pending" and datetime.fromisoformat(existing["expires_at"]) <= datetime.now():
+                conn.execute("update merchant_token_rotations set status='expired' where rotation_id=? and status='pending'", (rotation_id,))
+                conn.execute("update api_tokens set revoked_at=? where token_hash=? and revoked_at=''", (now_iso(), replacement_hash))
+                return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "expired", "recovery": "start a new rotation while the previous credential remains active"}
+            return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": existing["status"], "replacement_token_prefix": token_prefix(replacement)}
+        old = conn.execute("select token_hash from api_tokens where token_hash=? and merchant_id=? and role='merchant' and revoked_at=''", (previous_hash, merchant_id)).fetchone()
+        if old is None:
+            raise ConflictError("previous merchant credential is no longer active")
+        pending = conn.execute("select rotation_id from merchant_token_rotations where previous_token_hash=? and status='pending'", (previous_hash,)).fetchone()
+        if pending is not None:
+            raise ConflictError("a merchant token rotation is already pending for this credential")
+        collision = conn.execute("select merchant_id, role from api_tokens where token_hash=?", (replacement_hash,)).fetchone()
+        if collision is not None:
+            raise ConflictError("replacement credential already exists")
+        expires_at = (datetime.now() + timedelta(minutes=15)).replace(microsecond=0).isoformat()
+        token_service.store_merchant_token(conn, replacement, merchant_id)
+        conn.execute("insert into merchant_token_rotations(rotation_id,merchant_id,previous_token_hash,replacement_token_hash,status,expires_at,created_at) values(?,?,?,?,'pending',?,?)", (rotation_id, merchant_id, previous_hash, replacement_hash, expires_at, now_iso()))
+        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_prepared", {"rotation_id": rotation_id, "previous_token_prefix": previous_hash[:24], "replacement_token_prefix": token_prefix(replacement), "expires_at": expires_at, "actor": actor})
+        return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "pending", "replacement_token_prefix": token_prefix(replacement), "expires_at": expires_at}
+
+
+def confirm_merchant_token_rotation(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from datetime import datetime
+    from shopping_cli.core.tokens import token_digest
+
+    rotation_id = str(payload.get("rotation_id") or "")
+    with db_session(db_path) as conn:
+        conn.execute("begin immediate")
+        catalog.require_merchant(conn, merchant_id)
+        caller = token_service.require_merchant_token(conn, merchant_id, api_auth.payload_token(payload))
+        replacement_hash = str(caller["token_hash"])
+        row = conn.execute("select * from merchant_token_rotations where rotation_id=? and merchant_id=?", (rotation_id, merchant_id)).fetchone()
+        if row is None or row["replacement_token_hash"] != replacement_hash:
+            raise AuthError("confirmation must be proved by the replacement credential")
+        if row["status"] == "confirmed":
+            return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "confirmed", "revoked_previous": True}
+        if row["status"] != "pending":
+            raise ConflictError("rotation is no longer pending")
+        if datetime.fromisoformat(row["expires_at"]) <= datetime.now():
+            conn.execute("update merchant_token_rotations set status='expired' where rotation_id=? and status='pending'", (rotation_id,))
+            conn.execute("update api_tokens set revoked_at=? where token_hash=? and revoked_at=''", (now_iso(), replacement_hash))
+            return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "expired", "revoked_previous": False}
+        confirmed_at = now_iso()
+        changed = conn.execute("update merchant_token_rotations set status='confirmed', confirmed_at=? where rotation_id=? and status='pending'", (confirmed_at, rotation_id))
+        if changed.rowcount != 1:
+            raise ConflictError("rotation was confirmed concurrently")
+        revoked = conn.execute("update api_tokens set revoked_at=? where token_hash=? and merchant_id=? and role='merchant' and revoked_at=''", (confirmed_at, row["previous_token_hash"], merchant_id))
+        if revoked.rowcount != 1:
+            raise ConflictError("previous credential changed during rotation")
+        token_service.append_agent_token_audit(conn, merchant_id, "merchant_token_rotation_confirmed", {"rotation_id": rotation_id, "previous_token_prefix": row["previous_token_hash"][:24], "replacement_token_prefix": str(caller["token_hash"])[:24]})
+        return {"ok": True, "merchant_id": merchant_id, "rotation_id": rotation_id, "status": "confirmed", "revoked_previous": True}
 
 
 def recover_merchant_token(
