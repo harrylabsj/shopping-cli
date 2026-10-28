@@ -45,6 +45,8 @@ SCHEMA = [
         -- 交易入口（URL 类为 https URL；联系/会话类为 opaque ref），publish 时
         -- 同步进 catalog listing 的 handoff_destination_ref。
         handoff_destination text not null default '',
+        trade_platform text not null default '',
+        platform_product_id text not null default '',
         -- v26 — 商家私有价格边界（结构化字段，替代 automation_boundaries 自由文本）：
         -- floor_price = 底价（最小成交价，0=未设）；max_discount_percent =
         -- 最大授权折扣率 0-100（0=无折扣授权）；promotions_json = 结构化促销

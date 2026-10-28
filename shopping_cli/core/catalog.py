@@ -173,6 +173,36 @@ def _whole_int(value: Any, message: str) -> int:
 _BLOCKED_HANDOFF_SCHEMES = frozenset({"javascript", "data", "file", "vbscript", "blob"})
 
 
+TRADE_PLATFORMS = ("jd", "taobao", "tmall")
+_PLATFORM_ALIASES = {"jd": "jd", "jingdong": "jd", "京东": "jd", "京东商城": "jd",
+                     "taobao": "taobao", "淘宝": "taobao", "淘宝网": "taobao",
+                     "tmall": "tmall", "天猫": "tmall", "天猫商城": "tmall"}
+
+
+def validate_trade_fields(platform: str, product_id: str) -> tuple[str, str]:
+    """交易入口必须是**成对**的「平台 + 平台商品ID」。
+
+    只接受京东/淘宝/天猫三个平台，商品ID一律按 ASCII 数字字符串处理（不转数字，
+    超长 ID 不丢精度）；商品页 URL 由调用方按平台固定路由生成，库里不存任意 URL。
+    这两个字段不进 listing 投影：目录侧只看到名称类发现信息，成交入口在磋商达成
+    后点对点交付。
+    """
+    raw_platform = (platform or "").strip()
+    raw_id = (product_id or "").strip()
+    if raw_platform == "" and raw_id == "":
+        return "", ""
+    if raw_platform == "":
+        raise ValidationError("填写平台商品ID时必须同时填写交易平台（jd/taobao/tmall）")
+    if raw_id == "":
+        raise ValidationError("填写交易平台时必须同时填写平台商品ID")
+    canonical = _PLATFORM_ALIASES.get(raw_platform.lower())
+    if canonical is None:
+        raise ValidationError("交易平台必须是京东、淘宝、天猫（jd/taobao/tmall）")
+    if len(raw_id) > 32 or not raw_id.isascii() or not raw_id.isdigit():
+        raise ValidationError("平台商品ID必须是 ASCII 数字字符串（最长 32 位）")
+    return canonical, raw_id
+
+
 def _validate_handoff_destination(value: str) -> None:
     """handoff_destination 形态校验（审查 P2-A）。
 
@@ -540,6 +570,8 @@ def create_product(
     floor_price: float = 0.0,
     max_discount_percent: float = 0.0,
     promotions: list | None = None,
+    trade_platform: str = "",
+    platform_product_id: str = "",
 ) -> dict[str, Any]:
     merchant_id = bounded_text(merchant_id, "merchant id", MAX_SHORT_TEXT_CHARS).strip()
     sku = bounded_text(sku, "product sku", MAX_SHORT_TEXT_CHARS).strip()
@@ -549,6 +581,7 @@ def create_product(
     currency = bounded_text(currency, "currency", 16)
     handoff_destination = bounded_text(handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS)
     _validate_handoff_destination(handoff_destination)
+    trade_platform, platform_product_id = validate_trade_fields(trade_platform, platform_product_id)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not sku:
@@ -572,9 +605,10 @@ def create_product(
             sku, merchant_id, title, description, category, tags_json, price,
             currency, stock, delivery_attributes_json, handoff_destination,
             floor_price, max_discount_percent, promotions_json,
+            trade_platform, platform_product_id,
             active, created_at, updated_at
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (
             sku,
@@ -591,6 +625,8 @@ def create_product(
             floor_price,
             max_discount_percent,
             encode_json(promotions),
+            trade_platform,
+            platform_product_id,
             now,
             now,
             ),
@@ -710,6 +746,8 @@ def update_product(
     floor_price: float | None = None,
     max_discount_percent: float | None = None,
     promotions: list | None = None,
+    trade_platform: str | None = None,
+    platform_product_id: str | None = None,
 ) -> dict[str, Any]:
     product = require_product(conn, sku)
     if merchant_id and product["merchant_id"] != merchant_id:
@@ -732,6 +770,14 @@ def update_product(
             handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS
         )
         _validate_handoff_destination(handoff_destination)
+    if trade_platform is not None or platform_product_id is not None:
+        # 成对更新：只给一边时，另一边取库里现值参与校验（清空用空串）。
+        existing_platform = str(product["trade_platform"] or "")
+        existing_id = str(product["platform_product_id"] or "")
+        trade_platform, platform_product_id = validate_trade_fields(
+            existing_platform if trade_platform is None else trade_platform,
+            existing_id if platform_product_id is None else platform_product_id,
+        )
     if price is not None:
         price = _price_with_precision(price, "--price must be finite")
     if stock is not None:
@@ -755,6 +801,8 @@ def update_product(
         "description": description,
         "floor_price": floor_price,
         "max_discount_percent": max_discount_percent,
+        "trade_platform": trade_platform,
+        "platform_product_id": platform_product_id,
     }
     for column, value in field_map.items():
         if value is not None:
@@ -939,6 +987,8 @@ def product_summary(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
         "stock": _safe_non_negative_int(product["stock"]),
         "delivery_attributes": decode_json(product["delivery_attributes_json"], []),
         "handoff_destination": product["handoff_destination"] or "",
+        "trade_platform": product["trade_platform"] or "",
+        "platform_product_id": product["platform_product_id"] or "",
         "floor_price": _safe_non_negative_float(product["floor_price"]),
         "max_discount_percent": _safe_non_negative_float(product["max_discount_percent"]),
         "promotions": decode_promotions(product["promotions_json"]),

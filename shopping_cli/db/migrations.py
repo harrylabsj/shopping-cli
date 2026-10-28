@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 33
+CURRENT_SCHEMA_VERSION = 34
 
 
 @dataclass(frozen=True)
@@ -778,6 +778,20 @@ def migration_032_merchant_token_two_phase_rotation(conn: sqlite3.Connection) ->
     )
 
 
+def migration_034_product_trade_platform_fields(conn: sqlite3.Connection) -> None:
+    """商品交易入口：平台 + 平台商品ID（成对，可为空）。
+
+    只有平台与商品ID**成对**时才有意义；具体的商品页 URL 由调用方按平台固定
+    路由生成，库里绝不存任意 URL。这两个字段不进入 listing 投影（目录侧只看到
+    名称类发现信息），成交入口在磋商达成后点对点交付。
+    """
+    columns = {row[1] for row in conn.execute("pragma table_info(products)")}
+    if "trade_platform" not in columns:
+        conn.execute("alter table products add column trade_platform text not null default ''")
+    if "platform_product_id" not in columns:
+        conn.execute("alter table products add column platform_product_id text not null default ''")
+
+
 def migration_033_one_pending_merchant_token_rotation(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -814,6 +828,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(31, "listing_pause_and_operation_kind_enum", migration_031_listing_pause_and_operation_kind_enum),
     Migration(32, "merchant_token_two_phase_rotation", migration_032_merchant_token_two_phase_rotation),
     Migration(33, "one_pending_merchant_token_rotation", migration_033_one_pending_merchant_token_rotation),
+    Migration(34, "product_trade_platform_fields", migration_034_product_trade_platform_fields),
 )
 
 

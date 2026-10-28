@@ -455,6 +455,8 @@ def create_product(
             floor_price=payload.get("floor_price", 0.0),
             max_discount_percent=payload.get("max_discount_percent", 0.0),
             promotions=payload.get("promotions"),
+            trade_platform=str(payload.get("trade_platform") or ""),
+            platform_product_id=str(payload.get("platform_product_id") or ""),
         )
         return {"ok": True, "product": product}
 
@@ -483,6 +485,10 @@ def update_product(
             delivery_attributes=payload.get("delivery_attributes") if "delivery_attributes" in payload else None,
             handoff_destination=payload.get("handoff_destination")
             if "handoff_destination" in payload
+            else None,
+            trade_platform=payload.get("trade_platform") if "trade_platform" in payload else None,
+            platform_product_id=payload.get("platform_product_id")
+            if "platform_product_id" in payload
             else None,
             floor_price=payload.get("floor_price"),
             max_discount_percent=payload.get("max_discount_percent"),
