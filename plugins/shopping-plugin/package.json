@@ -1,6 +1,6 @@
 {
   "name": "shopping-plugin",
-  "version": "3.2.9",
+  "version": "3.2.10",
   "description": "Lightweight OpenClaw native bridge for shopping-cli consultation tools.",
   "type": "module",
   "main": "index.js",
