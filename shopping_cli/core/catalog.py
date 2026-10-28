@@ -993,7 +993,10 @@ def product_summary(conn: sqlite3.Connection, sku: str) -> dict[str, Any]:
         # “这份库存/价格是不是可核实的当前事实”，缺了就不敢随报价下发成交入口。
         "source_evidence": {
             "system": "shopping-cli",
-            "source_version": str(product["source_revision"] or ""),
+            # 本地维护的商品没有上游修订号：用 `local:<updated_at>` 作为内容版本，
+            # 与 listing 投影同一口径。空串会被商家运行时的严格校验拒收
+            # （"Invalid source evidence field"），所以这里绝不返回空值。
+            "source_version": str(product["source_revision"] or f"local:{product['updated_at']}"),
             "updated_at": str(product["observed_at"] or product["updated_at"] or ""),
             "retrieved_at": str(product["updated_at"] or ""),
         },
