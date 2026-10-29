@@ -72,6 +72,22 @@ def require_admin_token(payload: dict[str, Any]) -> None:
         raise AuthError("invalid admin bootstrap token")
 
 
+def configured_order_connector_token() -> str:
+    return str(os.environ.get("SHOPPING_ORDER_CONNECTOR_TOKEN") or "").strip()
+
+
+def require_order_connector_token(payload: dict[str, Any]) -> None:
+    """受信订单连接器凭据；未配置时 fail-closed，商户 token 不能替代。"""
+    expected = configured_order_connector_token()
+    if not _runtime_secret_is_usable(expected):
+        raise AuthError("order connector token is not configured")
+    token = payload_token(payload)
+    if not token:
+        raise AuthError("order connector token required")
+    if not token_matches(token, expected):
+        raise AuthError("invalid order connector token")
+
+
 def require_buyer_bootstrap_token(payload: dict[str, Any], digest_fn: Any) -> str:
     expected = configured_buyer_bootstrap_token()
     if not _runtime_secret_is_usable(expected):

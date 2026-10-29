@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from shopping_cli.api.handlers import orders
-from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from shopping_cli.db.session import db_session
 
 
@@ -153,6 +155,55 @@ class MerchantOrderFactsTest(unittest.TestCase):
             orders.get_cost_snapshot(
                 self.db, snapshot["snapshot_id"], {"merchant_id": "m2"}, {}, _auth
             )
+
+    def test_trusted_connector_can_verify_and_update(self) -> None:
+        payload = {
+            "merchant_id": "m1",
+            "source_namespace": "jd",
+            "source_account_id": "acc-1",
+            "external_order_id": "order-verified",
+            "evidence_source": "external_verified",
+            "source_version": "jd:42",
+            "verified_at": "2026-10-29T10:05:00Z",
+            "observed_at": "2026-10-29T10:00:00Z",
+            "payment_status": "paid",
+            "lines": [{"line_id": "l1", "sku": "SKU-1", "quantity": 1, "amount_minor": 1000}],
+            "_auth_token": "connector-secret",
+        }
+        with mock.patch.dict(os.environ, {"SHOPPING_ORDER_CONNECTOR_TOKEN": "connector-secret"}):
+            verified = orders.record_verified_order(
+                self.db, payload, lambda inner: __import__("shopping_cli.api.auth", fromlist=["require_order_connector_token"]).require_order_connector_token(inner)
+            )
+        order = verified["order"]
+        self.assertEqual(order["evidence_source"], "external_verified")
+        self.assertEqual(order["source_version"], "jd:42")
+        self.assertEqual(order["verified_at"], "2026-10-29T10:05:00Z")
+
+        # 商户人工申报不能把已核实事实降级。
+        downgraded = self._record(
+            external_order_id="order-verified",
+            evidence_source="manual_report",
+        )["order"]
+        self.assertEqual(downgraded["evidence_source"], "external_verified")
+
+    def test_trusted_connector_requires_configured_token(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(AuthError):
+                orders.record_verified_order(
+                    self.db,
+                    {
+                        "merchant_id": "m1",
+                        "source_namespace": "jd",
+                        "source_account_id": "acc-1",
+                        "external_order_id": "order-verified-2",
+                        "evidence_source": "external_verified",
+                        "source_version": "v1",
+                        "verified_at": "2026-10-29T10:05:00Z",
+                        "observed_at": "2026-10-29T10:00:00Z",
+                        "lines": [{"line_id": "l1", "sku": "SKU-1", "quantity": 1, "amount_minor": 1}],
+                    },
+                    lambda inner: __import__("shopping_cli.api.auth", fromlist=["require_order_connector_token"]).require_order_connector_token(inner),
+                )
 
     def test_source_contract_revision_and_readback(self) -> None:
         first = orders.register_source_contract(

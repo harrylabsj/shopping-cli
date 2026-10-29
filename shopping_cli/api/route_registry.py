@@ -37,6 +37,7 @@ _ROUTE_GROUPS: dict[str, set[str]] = {
     "/v1/merchant/products/{sku}/listing": {"merchants"},
     "/v1/merchant/product-operations/{operation_id}": {"merchants"},
     "/v1/merchant/orders": {"merchants"},
+    "/v1/merchant/orders/verified": {"merchants"},
     "/v1/merchant/orders/{external_order_id}": {"merchants"},
     "/v1/merchant/orders/{external_order_id}/refunds": {"merchants"},
     "/v1/merchant/cost-snapshots": {"merchants"},
