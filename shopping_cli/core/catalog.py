@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
 from shopping_cli.core.harness import append_audit_event
@@ -219,6 +219,50 @@ def _validate_handoff_destination(value: str) -> None:
             raise ValidationError("handoff destination URL must be a valid http(s) origin")
     elif scheme in _BLOCKED_HANDOFF_SCHEMES:
         raise ValidationError(f"handoff destination scheme is not allowed: {scheme}")
+
+
+def _trade_url_identity(value: str) -> tuple[str, str] | None:
+    """从京东/淘宝/天猫商品页 URL 提取 (platform, product_id)；不认识的返回 None。
+
+    只认三个平台的固定商品页路由；查询串只用于淘宝/天猫的 ``id``。不尝试
+    猜测短链、跳转链或其它主机。
+    """
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if host == "item.jd.com":
+        path = parsed.path.strip("/")
+        if path.endswith(".html"):
+            path = path[: -len(".html")]
+        if path.isascii() and path.isdigit():
+            return "jd", path
+        return None
+    if host in ("item.taobao.com", "detail.tmall.com"):
+        ids = parse_qs(parsed.query).get("id") or []
+        product_id = ids[0].strip() if ids else ""
+        if product_id.isascii() and product_id.isdigit():
+            return ("taobao" if host == "item.taobao.com" else "tmall"), product_id
+    return None
+
+
+def _validate_handoff_trade_consistency(
+    handoff_destination: str, trade_platform: str, platform_product_id: str
+) -> None:
+    """显式成交入口与「平台+商品ID」必须指向同一商品（D：防错配）。
+
+    VQ-101 曾把保温杯的成交入口指向京东另一件商品（茅台），买家点开看到
+    完全无关的页面。数据入口 fail-closed：两种写法同时存在且指向不同商品时
+    直接拒绝写入，而不是让错误链接进到磋商与交接环节。无法识别的 URL
+    （opaque 引用、非三平台链接）维持原行为，不做猜测性拒绝。
+    """
+    if not handoff_destination or not trade_platform or not platform_product_id:
+        return
+    identity = _trade_url_identity(handoff_destination)
+    if identity is None:
+        return
+    if identity != (trade_platform, platform_product_id):
+        raise ValidationError(
+            "handoff destination 与交易平台/商品ID指向不同商品；请修正链接或平台商品ID（只保留一种成交入口）"
+        )
 
 
 def _audit_catalog(conn: sqlite3.Connection, merchant_id: str, event: str, details: dict) -> None:
@@ -582,6 +626,7 @@ def create_product(
     handoff_destination = bounded_text(handoff_destination, "handoff destination", MAX_PERSISTED_TEXT_CHARS)
     _validate_handoff_destination(handoff_destination)
     trade_platform, platform_product_id = validate_trade_fields(trade_platform, platform_product_id)
+    _validate_handoff_trade_consistency(handoff_destination, trade_platform, platform_product_id)
     if not merchant_id:
         raise ValidationError("merchant id is required")
     if not sku:
@@ -778,6 +823,11 @@ def update_product(
             existing_platform if trade_platform is None else trade_platform,
             existing_id if platform_product_id is None else platform_product_id,
         )
+    _validate_handoff_trade_consistency(
+        handoff_destination if handoff_destination is not None else str(product["handoff_destination"] or ""),
+        trade_platform if trade_platform is not None else str(product["trade_platform"] or ""),
+        platform_product_id if platform_product_id is not None else str(product["platform_product_id"] or ""),
+    )
     if price is not None:
         price = _price_with_precision(price, "--price must be finite")
     if stock is not None:
