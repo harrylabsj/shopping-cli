@@ -41,7 +41,15 @@ class ApiBoundariesTest(unittest.TestCase):
                 else await client.request(method, path)
             )
 
+    def require_fastapi(self) -> None:
+        # 这些用例针对真实 FastAPI 栈；缺可选依赖时应在项目 venv 里跑，
+        # 而不是让 fallback app 抛 AttributeError 伪装成产品缺陷。
+        if app_module.FastAPI is None:
+            self.skipTest("FastAPI is not installed; run with the project venv (pip install -e '.[api,dev]')")
+
     def both_error_stacks(self, operation, path):
+        self.require_fastapi()
+
         async def run():
             app = app_module.create_app(path)
 
@@ -135,6 +143,7 @@ class ApiBoundariesTest(unittest.TestCase):
         self.assertEqual(match_path("/products/{sku}", "/products/synthetic-sku"), {"sku": "synthetic-sku"})
 
     def test_actual_fastapi_invalid_body_logs_no_canary_input(self):
+        self.require_fastapi()
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
         logger = logging.getLogger("shopping-cli")

@@ -359,6 +359,8 @@ class AgentDaemonLifecycleTest(unittest.TestCase):
         self.fail(f"status did not satisfy predicate; last={last_status}")
 
     def test_agent_daemon_start_status_logs_stop_and_duplicate_guard(self):
+        if psutil is None:
+            self.skipTest("psutil is not installed; duplicate-guard identity requires it (pip install -e .)")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             db_file = tmp_path / "shopping-cli.sqlite"

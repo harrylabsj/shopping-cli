@@ -6,6 +6,12 @@ from shopping_cli.agents import merchant_daemon as daemon
 
 
 class DaemonIdentity(TestCase):
+    def setUp(self):
+        # 进程身份核验依赖 psutil（项目的必需依赖）；缺依赖时这些用例无法
+        # 判断身份，应跳过而不是把 fallback 行为当成产品缺陷。
+        if daemon.psutil is None:
+            self.skipTest("psutil is not installed; run with the project venv (pip install -e .)")
+
     def seed(self, tmp, pid, identity):
         paths = daemon.agent_paths("m", tmp)
         daemon.ensure_agent_dirs(paths)

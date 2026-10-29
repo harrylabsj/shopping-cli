@@ -5,10 +5,14 @@ import unittest
 from pathlib import Path
 import httpx
 from shopping_cli.api.app import create_app
+from shopping_cli.api import app as app_module
 
 
 class DecodedPathAdmissionTest(unittest.TestCase):
     def test_actual_fastapi_rejects_encoded_crlf_before_endpoint_and_keeps_legal_path(self):
+        if app_module.FastAPI is None:
+            self.skipTest("FastAPI is not installed; run with the project venv (pip install -e '.[api,dev]')")
+
         async def run():
             with tempfile.TemporaryDirectory() as root:
                 app = create_app(Path(root) / "synthetic.sqlite")
