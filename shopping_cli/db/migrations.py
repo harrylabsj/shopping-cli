@@ -10,7 +10,7 @@ from typing import Callable
 
 from shopping_cli.core.tokens import is_sha256_digest, token_digest, token_prefix, token_suffix
 
-CURRENT_SCHEMA_VERSION = 34
+CURRENT_SCHEMA_VERSION = 35
 
 
 @dataclass(frozen=True)
@@ -801,6 +801,106 @@ def migration_033_one_pending_merchant_token_rotation(conn: sqlite3.Connection) 
     )
 
 
+def migration_035_merchant_order_facts(conn: sqlite3.Connection) -> None:
+    """商家私有订单/退款/成本快照读取面（Kiwi 商家持续经营 v0.2 §11–§13）。
+
+    订单、退款、成本都是只读事实；商家身份由 token 鉴权确定，不接受回调
+    正文自报。外部来源字段在 M0 冻结前保持通用，不绑定具体平台。
+    """
+    conn.execute(
+        """
+        create table if not exists order_facts (
+          record_id text primary key,
+          merchant_id text not null,
+          source_namespace text not null,
+          source_account_id text not null,
+          external_order_id text not null,
+          evidence_source text not null check (evidence_source in
+            ('manual_report','csv_import','external_verified')),
+          payment_status text,
+          fulfillment_status text,
+          refund_status text,
+          cancellation_status text,
+          currency text,
+          total_minor integer,
+          source_version text,
+          observed_at text,
+          verified_at text,
+          created_at text not null,
+          updated_at text not null,
+          unique (merchant_id, source_namespace, source_account_id, external_order_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists order_fact_lines (
+          record_id text not null,
+          line_id text not null,
+          sku text not null,
+          quantity integer not null,
+          amount_minor integer not null,
+          unit_price_minor integer,
+          primary key (record_id, line_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists order_fact_refunds (
+          refund_row_id text primary key,
+          merchant_id text not null,
+          record_id text not null,
+          external_refund_id text not null,
+          amount_minor integer not null,
+          version integer not null,
+          status text not null check (status in ('active','reversed')),
+          updated_at text not null,
+          unique (merchant_id, record_id, external_refund_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists merchant_cost_snapshots (
+          snapshot_id text primary key,
+          merchant_id text not null,
+          ref_kind text not null check (ref_kind in ('quote','order')),
+          ref_id text not null,
+          currency text not null,
+          completeness text not null check (completeness in ('COMPLETE','ESTIMATED','INCOMPLETE')),
+          costs_json text not null,
+          missing_json text not null,
+          version integer not null,
+          created_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists merchant_source_contracts (
+          merchant_id text not null,
+          source_namespace text not null,
+          source_account_id text not null,
+          ordering text not null check (ordering in ('monotonic','unorderable')),
+          version_scope text not null,
+          event_id_scope text not null,
+          supports_watermark integer not null,
+          revision integer not null,
+          created_at text not null,
+          updated_at text not null,
+          primary key (merchant_id, source_namespace, source_account_id)
+        )
+        """
+    )
+    conn.execute(
+        "create index if not exists idx_order_facts_merchant on order_facts (merchant_id, observed_at)"
+    )
+    conn.execute(
+        "create index if not exists idx_cost_snapshots_ref on merchant_cost_snapshots (merchant_id, ref_kind, ref_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "conversation_next_actor", migration_001_conversation_next_actor),
     Migration(2, "agent_runtime_columns", migration_002_agent_runtime_columns),
@@ -829,6 +929,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(32, "merchant_token_two_phase_rotation", migration_032_merchant_token_two_phase_rotation),
     Migration(33, "one_pending_merchant_token_rotation", migration_033_one_pending_merchant_token_rotation),
     Migration(34, "product_trade_platform_fields", migration_034_product_trade_platform_fields),
+    Migration(35, "merchant_order_facts", migration_035_merchant_order_facts),
 )
 
 

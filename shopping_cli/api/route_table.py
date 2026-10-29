@@ -22,6 +22,7 @@ from shopping_cli.api.handlers import erp as erp_handlers
 from shopping_cli.api.handlers import human_review as human_review_handlers
 from shopping_cli.api.handlers import listings_projection as listings_projection_handlers
 from shopping_cli.api.handlers import negotiation as negotiation_handlers
+from shopping_cli.api.handlers import orders as order_handlers
 from shopping_cli.api.handlers.common import DEFAULT_RESULT_LIMIT
 from shopping_cli.api.request_dispatch import RouteEntry
 from shopping_cli.api.route_matching import match_path as _match_path
@@ -34,6 +35,53 @@ def _require_merchant_token(conn: Any, merchant_id: str, payload: dict[str, Any]
 
 def _resolve_agent_token(conn: Any, merchant_id: str, token: Any = "", token_prefix: Any = "") -> str:
     return token_service.resolve_agent_token(conn, merchant_id, token, token_prefix)
+
+
+
+def _record_order(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return order_handlers.record_order(db_path, payload, _require_merchant_token)
+
+
+def _list_orders(db_path: str | Path, query: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    return order_handlers.list_orders(db_path, query, payload, _require_merchant_token)
+
+
+def _get_order(
+    db_path: str | Path, external_order_id: str, query: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    return order_handlers.get_order(db_path, external_order_id, query, payload, _require_merchant_token)
+
+
+def _record_refund(
+    db_path: str | Path, external_order_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return order_handlers.record_refund(db_path, external_order_id, payload, _require_merchant_token)
+
+
+def _save_cost_snapshot(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return order_handlers.save_cost_snapshot(db_path, payload, _require_merchant_token)
+
+
+def _get_cost_snapshot(
+    db_path: str | Path, snapshot_id: str, query: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    return order_handlers.get_cost_snapshot(db_path, snapshot_id, query, payload, _require_merchant_token)
+
+
+def _register_source_contract(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return order_handlers.register_source_contract(db_path, payload, _require_merchant_token)
+
+
+def _get_source_contract(
+    db_path: str | Path,
+    source_namespace: str,
+    source_account_id: str,
+    query: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return order_handlers.get_source_contract(
+        db_path, source_namespace, source_account_id, query, payload, _require_merchant_token
+    )
 
 
 def _health(db_path: str | Path) -> dict[str, Any]:
@@ -460,6 +508,50 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
             owner_id=merchant_id,
             limit=query.get("limit"),
             offset=query.get("offset"),
+        ),
+    ),
+    RouteEntry({"POST"}, "/v1/merchant/orders", lambda db_path, payload, query, **kw: _record_order(db_path, payload)),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/orders",
+        lambda db_path, payload, query, **kw: _list_orders(db_path, query, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/orders/{external_order_id}",
+        lambda db_path, payload, query, external_order_id: _get_order(
+            db_path, external_order_id, query, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/orders/{external_order_id}/refunds",
+        lambda db_path, payload, query, external_order_id: _record_refund(
+            db_path, external_order_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/cost-snapshots",
+        lambda db_path, payload, query, **kw: _save_cost_snapshot(db_path, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/cost-snapshots/{snapshot_id}",
+        lambda db_path, payload, query, snapshot_id: _get_cost_snapshot(
+            db_path, snapshot_id, query, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/source-contracts",
+        lambda db_path, payload, query, **kw: _register_source_contract(db_path, payload),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/merchant/source-contracts/{source_namespace}/{source_account_id}",
+        lambda db_path, payload, query, source_namespace, source_account_id: _get_source_contract(
+            db_path, source_namespace, source_account_id, query, payload
         ),
     ),
     RouteEntry({"POST"}, "/products", lambda db_path, payload, query, **kw: _create_product(db_path, payload)),

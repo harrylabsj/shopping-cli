@@ -76,6 +76,14 @@ from shopping_cli.api.route_table import (
     _rotate_merchant_token,
     _search_merchants,
     _search_products,
+    _record_order,
+    _list_orders,
+    _get_order,
+    _record_refund,
+    _save_cost_snapshot,
+    _get_cost_snapshot,
+    _register_source_contract,
+    _get_source_contract,
     _sync_erp,
     _update_merchant,
     _update_product,
@@ -246,6 +254,88 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         authorization: str = AUTHORIZATION_HEADER,
     ) -> dict[str, Any]:
         return _update_product(db_path, sku, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/v1/merchant/orders")
+    def record_order(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
+        return _record_order(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/v1/merchant/orders")
+    def list_orders(
+        merchant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _list_orders(
+            db_path,
+            {"merchant_id": merchant_id, "limit": limit, "offset": offset},
+            api_auth.payload_with_auth({}, authorization),
+        )
+
+    @app.get("/v1/merchant/orders/{external_order_id}")
+    def get_order(
+        external_order_id: str,
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_order(
+            db_path,
+            external_order_id,
+            {"merchant_id": merchant_id},
+            api_auth.payload_with_auth({}, authorization),
+        )
+
+    @app.post("/v1/merchant/orders/{external_order_id}/refunds")
+    def record_refund(
+        external_order_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _record_refund(
+            db_path, external_order_id, api_auth.payload_with_auth(payload, authorization)
+        )
+
+    @app.post("/v1/merchant/cost-snapshots")
+    def save_cost_snapshot(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _save_cost_snapshot(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.get("/v1/merchant/cost-snapshots/{snapshot_id}")
+    def get_cost_snapshot(
+        snapshot_id: str,
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_cost_snapshot(
+            db_path,
+            snapshot_id,
+            {"merchant_id": merchant_id},
+            api_auth.payload_with_auth({}, authorization),
+        )
+
+    @app.post("/v1/merchant/source-contracts")
+    def register_source_contract(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _register_source_contract(
+            db_path, api_auth.payload_with_auth(payload, authorization)
+        )
+
+    @app.get("/v1/merchant/source-contracts/{source_namespace}/{source_account_id}")
+    def get_source_contract(
+        source_namespace: str,
+        source_account_id: str,
+        merchant_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _get_source_contract(
+            db_path,
+            source_namespace,
+            source_account_id,
+            {"merchant_id": merchant_id},
+            api_auth.payload_with_auth({}, authorization),
+        )
 
     @app.get("/v1/merchant/products/exact")
     def list_products_exact(
