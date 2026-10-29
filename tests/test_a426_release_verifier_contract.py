@@ -46,6 +46,10 @@ class ReleaseVerifierExecutionTest(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, mode == "regular", result.stderr)
 
     def run_import_gate(self, *, shadow=False, body_override=None):
+        try:
+            import psutil  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("psutil is not installed; run with the project venv (pip install -e .)")
         body = re.search(r"<<'PYTHON'\n(.*?)\nPYTHON", self.script(), re.DOTALL)
         self.assertIsNotNone(body)
         with tempfile.TemporaryDirectory() as root:
