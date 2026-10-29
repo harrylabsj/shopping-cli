@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from shopping_cli.core.errors import ConflictError, NotFoundError, ValidationError
+from shopping_cli.core.harness import append_audit_event
 from shopping_cli.db.session import db_session, now_iso
 
 _EVIDENCE_SOURCES = {"manual_report", "csv_import"}
@@ -52,10 +53,23 @@ def _optional_int(payload: dict[str, Any], name: str, minimum: int = 0) -> int |
 def _timestamp(payload: dict[str, Any], name: str) -> str:
     value = _require_text(payload, name, 64)
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValidationError(f"{name} must be an RFC 3339 timestamp") from exc
-    return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    # 统一存 UTC 规范形，避免 +08:00/Z 混用时按文本排序出错。
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _query_int(value: Any, name: str, default: int, minimum: int, maximum: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{name} must be an integer") from exc
+    return min(max(parsed, minimum), maximum)
 
 
 def _lines(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -187,12 +201,13 @@ def record_order(
         now = now_iso()
         if existing is None:
             record_id = f"ord_{uuid.uuid4()}"
-            conn.execute(
+            cursor = conn.execute(
                 """insert into order_facts
                    (record_id, merchant_id, source_namespace, source_account_id, external_order_id,
                     evidence_source, payment_status, fulfillment_status, refund_status, cancellation_status,
                     currency, total_minor, source_version, observed_at, verified_at, created_at, updated_at)
-                   values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   on conflict do nothing""",
                 (
                     record_id,
                     merchant_id,
@@ -213,48 +228,90 @@ def record_order(
                     now,
                 ),
             )
-        else:
-            # 人工/CSV 申报不能覆盖已核实事实；只允许补充展示字段。
-            if existing["evidence_source"] == "external_verified" and evidence != "external_verified":
+            if cursor.rowcount == 0:
+                # 并发同身份申报：另一写者已插入，按幂等返回既有订单。
+                existing = conn.execute(
+                    """select * from order_facts
+                       where merchant_id=? and source_namespace=? and source_account_id=? and external_order_id=?""",
+                    (merchant_id, source_namespace, source_account_id, external_order_id),
+                ).fetchone()
+                if existing is None:
+                    raise ConflictError("order identity conflict")
                 record_id = existing["record_id"]
-            else:
-                record_id = existing["record_id"]
+        protected = (
+            existing is not None
+            and existing["evidence_source"] == "external_verified"
+            and evidence != "external_verified"
+        )
+        if existing is not None:
+            record_id = existing["record_id"]
+        if existing is not None and not protected:
+            conn.execute(
+                """update order_facts
+                   set evidence_source=?, payment_status=?, fulfillment_status=?, refund_status=?,
+                       cancellation_status=?, currency=?, total_minor=?, source_version=?, observed_at=?,
+                       verified_at=?, updated_at=?
+                   where record_id=? and merchant_id=?""",
+                (
+                    evidence,
+                    _optional_text(payload, "payment_status", 64),
+                    _optional_text(payload, "fulfillment_status", 64),
+                    _optional_text(payload, "refund_status", 64),
+                    _optional_text(payload, "cancellation_status", 64),
+                    _optional_text(payload, "currency", 8),
+                    _optional_int(payload, "total_minor", 0),
+                    source_version,
+                    observed_at,
+                    verified_at,
+                    now,
+                    record_id,
+                    merchant_id,
+                ),
+            )
+        if not protected:
+            conn.execute("delete from order_fact_lines where record_id=?", (record_id,))
+            for line in lines:
                 conn.execute(
-                    """update order_facts
-                       set evidence_source=?, payment_status=?, fulfillment_status=?, refund_status=?,
-                           cancellation_status=?, currency=?, total_minor=?, source_version=?, observed_at=?,
-                           verified_at=?, updated_at=?
-                       where record_id=? and merchant_id=?""",
+                    """insert into order_fact_lines
+                       (record_id, line_id, sku, quantity, amount_minor, unit_price_minor)
+                       values (?, ?, ?, ?, ?, ?)""",
                     (
-                        evidence,
-                        _optional_text(payload, "payment_status", 64),
-                        _optional_text(payload, "fulfillment_status", 64),
-                        _optional_text(payload, "refund_status", 64),
-                        _optional_text(payload, "cancellation_status", 64),
-                        _optional_text(payload, "currency", 8),
-                        _optional_int(payload, "total_minor", 0),
-                        source_version,
-                        observed_at,
-                        verified_at,
-                        now,
                         record_id,
-                        merchant_id,
+                        line["line_id"],
+                        line["sku"],
+                        line["quantity"],
+                        line["amount_minor"],
+                        line["unit_price_minor"],
                     ),
                 )
-        conn.execute("delete from order_fact_lines where record_id=?", (record_id,))
-        for line in lines:
-            conn.execute(
-                """insert into order_fact_lines
-                   (record_id, line_id, sku, quantity, amount_minor, unit_price_minor)
-                   values (?, ?, ?, ?, ?, ?)""",
-                (
-                    record_id,
-                    line["line_id"],
-                    line["sku"],
-                    line["quantity"],
-                    line["amount_minor"],
-                    line["unit_price_minor"],
-                ),
+        if evidence != "external_verified":
+            append_audit_event(
+                conn,
+                "",
+                "merchant",
+                "order.reported",
+                {
+                    "merchant_id": merchant_id,
+                    "source_namespace": source_namespace,
+                    "source_account_id": source_account_id,
+                    "external_order_id": external_order_id,
+                    "evidence_source": evidence,
+                    "line_count": len(lines),
+                },
+            )
+        if evidence == "external_verified":
+            append_audit_event(
+                conn,
+                "",
+                "order-connector",
+                "order.external_verified",
+                {
+                    "merchant_id": merchant_id,
+                    "source_namespace": source_namespace,
+                    "source_account_id": source_account_id,
+                    "external_order_id": external_order_id,
+                    "source_version": source_version,
+                },
             )
         row = _load_order(conn, merchant_id, record_id)
         return {
@@ -269,10 +326,16 @@ def record_verified_order(
     require_connector_token: Any,
 ) -> dict[str, Any]:
     """受信连接器写入 `external_verified`；凭据由 connector token 单独校验。"""
+    def require_connector_for_merchant(conn: Any, merchant_id: str, inner: dict[str, Any]) -> None:
+        require_connector_token(inner)
+        row = conn.execute("select 1 from merchants where id = ?", (merchant_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("merchant not found")
+
     return record_order(
         db_path,
         payload,
-        lambda _conn, _merchant_id, inner: require_connector_token(inner),
+        require_connector_for_merchant,
         allow_external_verified=True,
     )
 
@@ -284,8 +347,8 @@ def list_orders(
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = _require_text(query, "merchant_id", 128)
-    limit = min(max(int(query.get("limit") or 50), 1), 100)
-    offset = max(int(query.get("offset") or 0), 0)
+    limit = _query_int(query.get("limit"), "limit", 50, 1, 100)
+    offset = _query_int(query.get("offset"), "offset", 0, 0, 1_000_000)
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
         rows = conn.execute(
@@ -318,14 +381,26 @@ def get_order(
     require_merchant_token: Any,
 ) -> dict[str, Any]:
     merchant_id = _require_text(query, "merchant_id", 128)
+    namespace = _optional_text(query, "source_namespace", 64)
+    account = _optional_text(query, "source_account_id", 128)
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
-        row = conn.execute(
-            "select * from order_facts where merchant_id=? and external_order_id=?",
-            (merchant_id, external_order_id),
-        ).fetchone()
-        if row is None:
+        sql = "select * from order_facts where merchant_id=? and external_order_id=?"
+        params: list[Any] = [merchant_id, external_order_id]
+        if namespace:
+            sql += " and source_namespace=?"
+            params.append(namespace)
+        if account:
+            sql += " and source_account_id=?"
+            params.append(account)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        if not rows:
             raise NotFoundError("order not found")
+        if len(rows) > 1:
+            raise ConflictError(
+                "order identity is ambiguous; provide source_namespace and source_account_id"
+            )
+        row = rows[0]
         return {
             "ok": True,
             "order": _order_projection(
@@ -351,15 +426,26 @@ def record_refund(
     status = str(payload.get("status") or "active")
     if status not in {"active", "reversed"}:
         raise ValidationError("status must be active or reversed")
+    namespace = _optional_text(payload, "source_namespace", 64)
+    account = _optional_text(payload, "source_account_id", 128)
     with db_session(db_path) as conn:
         require_merchant_token(conn, merchant_id, payload)
-        order = conn.execute(
-            "select record_id from order_facts where merchant_id=? and external_order_id=?",
-            (merchant_id, external_order_id),
-        ).fetchone()
-        if order is None:
+        sql = "select record_id from order_facts where merchant_id=? and external_order_id=?"
+        params: list[Any] = [merchant_id, external_order_id]
+        if namespace:
+            sql += " and source_namespace=?"
+            params.append(namespace)
+        if account:
+            sql += " and source_account_id=?"
+            params.append(account)
+        orders_found = conn.execute(sql, tuple(params)).fetchall()
+        if not orders_found:
             raise NotFoundError("order not found")
-        record_id = order["record_id"]
+        if len(orders_found) > 1:
+            raise ConflictError(
+                "order identity is ambiguous; provide source_namespace and source_account_id"
+            )
+        record_id = orders_found[0]["record_id"]
         existing = conn.execute(
             "select * from order_fact_refunds where merchant_id=? and record_id=? and external_refund_id=?",
             (merchant_id, record_id, external_refund_id),

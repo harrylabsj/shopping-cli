@@ -231,7 +231,7 @@ def _trade_url_identity(value: str) -> tuple[str, str] | None:
     host = (parsed.hostname or "").lower()
     if host == "item.jd.com":
         path = parsed.path.strip("/")
-        if path.endswith(".html"):
+        if path.lower().endswith(".html"):
             path = path[: -len(".html")]
         if path.isascii() and path.isdigit():
             return "jd", path

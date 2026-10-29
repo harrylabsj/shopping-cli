@@ -86,6 +86,22 @@ class ProductTradePlatformTest(unittest.TestCase):
         )
         self.assertEqual(product["platform_product_id"], "100253036806")
 
+    def test_mixed_case_html_suffix_still_matches_the_same_product(self) -> None:
+        product = self._add(
+            sku="SKU-CASE",
+            trade_platform="jd",
+            platform_product_id="100253036806",
+            handoff_destination="https://item.jd.com/100253036806.HTML",
+        )
+        self.assertEqual(product["platform_product_id"], "100253036806")
+        with self.assertRaises(ValidationError):
+            self._add(
+                sku="SKU-CASE-BAD",
+                trade_platform="jd",
+                platform_product_id="100253036806",
+                handoff_destination="https://item.jd.com/999999999999.HTML",
+            )
+
     def test_handoff_url_consistency_on_update(self) -> None:
         self._add(trade_platform="jd", platform_product_id="100253036806")
         with db_session(self.db) as conn, self.assertRaises(ValidationError):
