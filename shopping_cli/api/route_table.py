@@ -42,6 +42,12 @@ def _record_order(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any
     return order_handlers.record_order(db_path, payload, _require_merchant_token)
 
 
+def _record_verified_order(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    return order_handlers.record_verified_order(
+        db_path, payload, api_auth.require_order_connector_token
+    )
+
+
 def _list_orders(db_path: str | Path, query: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     return order_handlers.list_orders(db_path, query, payload, _require_merchant_token)
 
@@ -511,6 +517,11 @@ _ROUTE_TABLE: tuple[RouteEntry, ...] = (
         ),
     ),
     RouteEntry({"POST"}, "/v1/merchant/orders", lambda db_path, payload, query, **kw: _record_order(db_path, payload)),
+    RouteEntry(
+        {"POST"},
+        "/v1/merchant/orders/verified",
+        lambda db_path, payload, query, **kw: _record_verified_order(db_path, payload),
+    ),
     RouteEntry(
         {"GET"},
         "/v1/merchant/orders",

@@ -77,6 +77,7 @@ from shopping_cli.api.route_table import (
     _search_merchants,
     _search_products,
     _record_order,
+    _record_verified_order,
     _list_orders,
     _get_order,
     _record_refund,
@@ -258,6 +259,12 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.post("/v1/merchant/orders")
     def record_order(payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER) -> dict[str, Any]:
         return _record_order(db_path, api_auth.payload_with_auth(payload, authorization))
+
+    @app.post("/v1/merchant/orders/verified")
+    def record_verified_order(
+        payload: dict[str, Any], authorization: str = AUTHORIZATION_HEADER
+    ) -> dict[str, Any]:
+        return _record_verified_order(db_path, api_auth.payload_with_auth(payload, authorization))
 
     @app.get("/v1/merchant/orders")
     def list_orders(

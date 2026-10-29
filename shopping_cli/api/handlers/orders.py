@@ -155,13 +155,23 @@ def record_order(
     db_path: str | Path,
     payload: dict[str, Any],
     require_merchant_token: Any,
+    *,
+    allow_external_verified: bool = False,
 ) -> dict[str, Any]:
     merchant_id = _require_text(payload, "merchant_id", 128)
     evidence = _require_text(payload, "evidence_source", 32)
-    if evidence not in _EVIDENCE_SOURCES:
+    if evidence == "external_verified" and not allow_external_verified:
         raise ValidationError(
             "external verification requires a trusted connector; merchant reports are manual_report/csv_import"
         )
+    if evidence not in _EVIDENCE_SOURCES and evidence != "external_verified":
+        raise ValidationError("evidence_source is invalid")
+    source_version = _optional_text(payload, "source_version", 128)
+    verified_at = _optional_text(payload, "verified_at", 64) if evidence == "external_verified" else None
+    if evidence == "external_verified":
+        if not source_version or not verified_at:
+            raise ValidationError("external_verified requires source_version and verified_at")
+        _timestamp(payload, "verified_at")
     source_namespace = _require_text(payload, "source_namespace", 64)
     source_account_id = _require_text(payload, "source_account_id", 128)
     external_order_id = _require_text(payload, "external_order_id", 256)
@@ -196,23 +206,24 @@ def record_order(
                     _optional_text(payload, "cancellation_status", 64),
                     _optional_text(payload, "currency", 8),
                     _optional_int(payload, "total_minor", 0),
-                    _optional_text(payload, "source_version", 128),
+                    source_version,
                     observed_at,
-                    None,
+                    verified_at,
                     now,
                     now,
                 ),
             )
         else:
             # 人工/CSV 申报不能覆盖已核实事实；只允许补充展示字段。
-            if existing["evidence_source"] == "external_verified":
+            if existing["evidence_source"] == "external_verified" and evidence != "external_verified":
                 record_id = existing["record_id"]
             else:
                 record_id = existing["record_id"]
                 conn.execute(
                     """update order_facts
                        set evidence_source=?, payment_status=?, fulfillment_status=?, refund_status=?,
-                           cancellation_status=?, currency=?, total_minor=?, observed_at=?, updated_at=?
+                           cancellation_status=?, currency=?, total_minor=?, source_version=?, observed_at=?,
+                           verified_at=?, updated_at=?
                        where record_id=? and merchant_id=?""",
                     (
                         evidence,
@@ -222,7 +233,9 @@ def record_order(
                         _optional_text(payload, "cancellation_status", 64),
                         _optional_text(payload, "currency", 8),
                         _optional_int(payload, "total_minor", 0),
+                        source_version,
                         observed_at,
+                        verified_at,
                         now,
                         record_id,
                         merchant_id,
@@ -248,6 +261,20 @@ def record_order(
             "ok": True,
             "order": _order_projection(row, _line_rows(conn, record_id), _refund_rows(conn, merchant_id, record_id)),
         }
+
+
+def record_verified_order(
+    db_path: str | Path,
+    payload: dict[str, Any],
+    require_connector_token: Any,
+) -> dict[str, Any]:
+    """受信连接器写入 `external_verified`；凭据由 connector token 单独校验。"""
+    return record_order(
+        db_path,
+        payload,
+        lambda _conn, _merchant_id, inner: require_connector_token(inner),
+        allow_external_verified=True,
+    )
 
 
 def list_orders(
