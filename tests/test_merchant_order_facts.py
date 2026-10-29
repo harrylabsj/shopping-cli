@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from shopping_cli.api.handlers import orders
+from shopping_cli.core import catalog
+from shopping_cli.services import tokens as token_service
 from shopping_cli.core.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from shopping_cli.db.session import db_session
 
@@ -21,8 +23,9 @@ class MerchantOrderFactsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "shopping.sqlite"
-        with db_session(self.db):
-            pass
+        with db_session(self.db) as conn:
+            catalog.create_merchant(conn, "m1", "Merchant One", delivery_fee=0.0)
+            catalog.create_merchant(conn, "m2", "Merchant Two", delivery_fee=0.0)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -130,6 +133,45 @@ class MerchantOrderFactsTest(unittest.TestCase):
                 _auth,
             )
 
+    def test_real_merchant_token_binding_rejects_cross_merchant_read(self) -> None:
+        with db_session(self.db) as conn:
+            token = token_service.issue_merchant_token(conn, "m1")
+
+        def real_auth(conn, merchant_id, payload):
+            token_service.require_merchant_token(conn, merchant_id, payload.get("_auth_token"))
+
+        self._record(merchant_id="m1")
+        listed = orders.list_orders(
+            self.db, {"merchant_id": "m1"}, {"_auth_token": token}, real_auth
+        )
+        self.assertEqual(listed["total"], 1)
+        with self.assertRaises(AuthError):
+            orders.list_orders(self.db, {"merchant_id": "m2"}, {"_auth_token": token}, real_auth)
+
+    def test_order_handle_ambiguity_requires_namespace_and_account(self) -> None:
+        for account in ("account-a", "account-b"):
+            self._record(source_account_id=account, external_order_id="same-id")
+        with self.assertRaises(ConflictError):
+            orders.get_order(self.db, "same-id", {"merchant_id": "m1"}, {}, _auth)
+        resolved = orders.get_order(
+            self.db,
+            "same-id",
+            {"merchant_id": "m1", "source_account_id": "account-a", "source_namespace": "jd"},
+            {},
+            _auth,
+        )
+        self.assertEqual(resolved["order"]["source_account_id"], "account-a")
+
+    def test_invalid_pagination_is_validation_not_server_error(self) -> None:
+        with self.assertRaises(ValidationError):
+            orders.list_orders(self.db, {"merchant_id": "m1", "limit": "abc"}, {}, _auth)
+        with self.assertRaises(ValidationError):
+            orders.list_orders(self.db, {"merchant_id": "m1", "offset": "NaN"}, {}, _auth)
+
+    def test_observed_at_is_normalized_to_utc(self) -> None:
+        created = self._record(observed_at="2026-10-29T18:00:00+08:00")["order"]
+        self.assertEqual(created["observed_at"], "2026-10-29T10:00:00Z")
+
     def test_cost_snapshot_roundtrip_and_private_scope(self) -> None:
         saved = orders.save_cost_snapshot(
             self.db,
@@ -179,12 +221,14 @@ class MerchantOrderFactsTest(unittest.TestCase):
         self.assertEqual(order["source_version"], "jd:42")
         self.assertEqual(order["verified_at"], "2026-10-29T10:05:00Z")
 
-        # 商户人工申报不能把已核实事实降级。
+        # 商户人工申报不能把已核实事实降级，也不能改写行明细。
         downgraded = self._record(
             external_order_id="order-verified",
             evidence_source="manual_report",
+            lines=[{"line_id": "fake", "sku": "FAKE-SKU", "quantity": 1, "amount_minor": 1}],
         )["order"]
         self.assertEqual(downgraded["evidence_source"], "external_verified")
+        self.assertEqual([line["sku"] for line in downgraded["lines"]], ["SKU-1"])
 
     def test_trusted_connector_requires_configured_token(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
