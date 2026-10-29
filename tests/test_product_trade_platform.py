@@ -64,6 +64,45 @@ class ProductTradePlatformTest(unittest.TestCase):
             )
         self.assertEqual((cleared["trade_platform"], cleared["platform_product_id"]), ("", ""))
 
+    def test_rejects_handoff_url_that_points_at_a_different_platform_product(self) -> None:
+        # VQ-101 事故：保温杯的成交入口指向京东另一件商品（茅台）。
+        with self.assertRaises(ValidationError):
+            self._add(
+                trade_platform="jd",
+                platform_product_id="100253036806",
+                handoff_destination="https://item.jd.com/100012043978.html",
+            )
+        with self.assertRaises(ValidationError):
+            self._add(
+                trade_platform="jd",
+                platform_product_id="100253036806",
+                handoff_destination="https://item.taobao.com/item.htm?id=100253036806",
+            )
+        # 一致时放行（同一平台同一 ID）。
+        product = self._add(
+            sku="SKU-OK",
+            trade_platform="jd",
+            platform_product_id="100253036806",
+            handoff_destination="https://item.jd.com/100253036806.html",
+        )
+        self.assertEqual(product["platform_product_id"], "100253036806")
+
+    def test_handoff_url_consistency_on_update(self) -> None:
+        self._add(trade_platform="jd", platform_product_id="100253036806")
+        with db_session(self.db) as conn, self.assertRaises(ValidationError):
+            catalog.update_product(
+                conn,
+                "SKU-1",
+                merchant_id="m1",
+                handoff_destination="https://item.jd.com/100012043978.html",
+            )
+        # 无法识别的 opaque 引用维持原行为，不做猜测性拒绝。
+        with db_session(self.db) as conn:
+            updated = catalog.update_product(
+                conn, "SKU-1", merchant_id="m1", handoff_destination="chat-session-42"
+            )
+        self.assertEqual(updated["handoff_destination"], "chat-session-42")
+
     def test_listing_projection_never_carries_the_trade_fields(self) -> None:
         self._add(trade_platform="jd", platform_product_id="100012043978")
         from shopping_cli.listings.projection import list_publishable_listings
