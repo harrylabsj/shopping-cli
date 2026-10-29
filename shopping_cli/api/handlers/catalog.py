@@ -287,7 +287,6 @@ def prepare_merchant_token_rotation(
 
 def confirm_merchant_token_rotation(db_path: str | Path, merchant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     from datetime import datetime
-    from shopping_cli.core.tokens import token_digest
 
     rotation_id = str(payload.get("rotation_id") or "")
     with db_session(db_path) as conn:
