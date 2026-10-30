@@ -752,7 +752,7 @@ wheels = [
 
 [[package]]
 name = "shopping-cli"
-version = "3.2.10"
+version = "3.2.11"
 source = { editable = "." }
 dependencies = [
     { name = "psutil" },
