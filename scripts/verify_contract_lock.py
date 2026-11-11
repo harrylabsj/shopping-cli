@@ -7,9 +7,9 @@ import json
 import stat
 from pathlib import Path
 
-PINNED_COMMIT = "82c1cfcb5f323e000e1ae3f6fbe1e1e9ab9f272a"
-PINNED_MANIFEST_SHA256 = "0efaabbaa47ebfb241eb8ef8ea060b2c3318747fdf5dadda296d7f93cb584a92"
-PINNED_BUNDLE_SHA256 = "5be0f0e86fa0f66c2ca150770c3ffb20f41c3417c13a2e5e05565a55e92be9cc"
+PINNED_COMMIT = "a2e76e2bfccdeae66e3856901637cfecaf6fac7a"
+PINNED_MANIFEST_SHA256 = "9de7722593115d2cdb106211a23b668d273b0e2f03339b613584c4f77a0ee07e"
+PINNED_BUNDLE_SHA256 = "ee5aa7e38f75179f4532801e12e39ed27276446b6537af707baae59ea9029b74"
 PINNED_SCHEMAS = {
     "shopping.negotiation/0.1/capabilities.schema.json": "386a6eda04d20e31519e86aa2c7b30403af5ec31dbd9ac0d15a440347d7e1356",
     "shopping.negotiation/0.1/decision.schema.json": "b98255cf779f76a15c5768dc75fd6d9cd5616c4cbaa0593053b113e7bd2c4ef1",
